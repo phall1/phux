@@ -50,11 +50,13 @@ use super::input_dispatch::{
     DispatchCtx, ReattachTarget, dispatch_input_events, encode_layout_or_log,
 };
 use super::paint::{
-    SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_full_frame,
+    SidebarEdge, SidebarReservation, content_rect, paint_bar_after_pane, paint_chrome_in_place,
+    paint_full_frame,
 };
 use super::plugin_actions::{self, PluginActionEntry, PluginRunResult};
 use super::plugin_panes;
 use super::render::{SelectionRect, TerminalRenderer, write_cup, write_reset};
+use super::repaint::{RepaintAccumulator, RepaintLevel};
 use super::server_frame::{AgentMetaIndex, handle_server_frame};
 use crate::agent_meta::{
     AgentAttention, AgentMetaState, AgentRecord, TERMINAL_AGENT_KEY, agent_name_from_title,
@@ -62,7 +64,7 @@ use crate::agent_meta::{
 };
 use crate::layout::Workspace;
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
-use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter};
+use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter, attention_rank};
 use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
@@ -72,6 +74,10 @@ use phux_config::SidebarPosition;
 /// terminal. Grown from "one of these per attach" (single-pane v0) to
 /// "one of these per leaf in the layout tree" by phux-4li.4. The driver
 /// keeps a `PaneMap` of these keyed by [`TerminalId`].
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "independent per-pane flags (scroll, attention, sync-output, seen); a bitset would obscure every read site"
+)]
 pub(super) struct PaneSlot {
     /// libghostty mirror for this pane.
     pub terminal: GhosttyTerminal<'static, 'static>,
@@ -125,6 +131,15 @@ pub(super) struct PaneSlot {
     /// would only refresh on an unrelated chrome event. Empty ⇒ no
     /// title set, matching libghostty's `title()` contract.
     pub last_title: String,
+    /// The attention ladder's "have you looked at this?" bit. Set whenever the
+    /// pane is the focused one (every loop iteration), cleared whenever an
+    /// UNFOCUSED pane's `phux.agent/v1` record changes.
+    ///
+    /// This is what lets the sidebar rank "finished, unread" above "still
+    /// working": an agent that goes `done` in a background pane re-arms as
+    /// unseen and climbs the strip until the user actually visits it. Starts
+    /// `false` — a pane you have never focused has never been reviewed.
+    pub seen: bool,
 }
 
 impl std::fmt::Debug for PaneSlot {
@@ -168,6 +183,7 @@ impl PaneSlot {
             cwd: None,
             last_exit: None,
             last_title: String::new(),
+            seen: false,
         })
     }
 
@@ -343,13 +359,16 @@ fn refresh_window_chrome(
     zoomed: Option<&TerminalId>,
     own_client_id: Option<ClientId>,
     // ADR-0040: structured `phux.agent/v1` records; a window whose focused
-    // leaf carries one is labelled from it instead of the OSC title.
-    agent_meta: &HashMap<TerminalId, AgentRecord>,
+    // leaf carries one is labelled from it instead of the OSC title. The whole
+    // index (not just `records`) because the sidebar's agent rows are ORDERED
+    // by the attention ladder, whose tiebreak is the index's per-pane
+    // last-change clock.
+    agent_meta: &AgentMetaIndex,
     // phux-p4vp: pane cwd + branch memo; each window's branch line derives
     // from its focused leaf's working directory.
     vcs: &mut VcsIndex,
 ) -> bool {
-    let windows = window_infos(workspace, panes, zoomed, agent_meta, vcs);
+    let windows = window_infos(workspace, panes, zoomed, &agent_meta.records, vcs);
     let mut changed = false;
     if let Some(sb) = status_bar {
         changed |= sb.set_windows(windows.clone());
@@ -1061,7 +1080,7 @@ pub async fn run_headless_rendered(
     sidebar_painter.set_windows(windows);
     // phux-foz.9: and the agents section, from the same record index +
     // title fallback a live attach renders.
-    sidebar_painter.set_agents(agent_entries(&workspace, &panes, &agent_meta.records));
+    sidebar_painter.set_agents(agent_entries(&workspace, &panes, &agent_meta));
 
     // Compose the assembled frame against the render layout (honoring zoom).
     let layout_state = workspace.render_window(zoomed.as_ref()).map_or_else(
@@ -1878,7 +1897,7 @@ async fn main_loop<W: super::RenderSink>(
             focused_pane.as_ref(),
             zoomed.as_ref(),
             own_client_id,
-            &agent_meta.records,
+            &agent_meta,
             &mut vcs,
         );
     }
@@ -1934,6 +1953,18 @@ async fn main_loop<W: super::RenderSink>(
         // so a recycled TerminalId can never inherit a stale opt-out.
         if !mouse_optout.is_empty() {
             mouse_optout.retain(|id| panes.contains_key(id));
+        }
+        // The attention ladder's `seen` half: the pane the user is looking at
+        // has, by definition, been looked at. One hash lookup per iteration —
+        // and it covers EVERY way focus can move (click, keybind, split,
+        // window switch, a peer's layout broadcast) without a call at each
+        // site. A later agent-state change on an unfocused pane re-arms the
+        // bit (see `server_frame::note_agent_change`), which is what lets a
+        // background agent's `done` climb back above the working ones.
+        if let Some(fid) = focused_pane.as_ref()
+            && let Some(slot) = panes.get_mut(fid)
+        {
+            slot.seen = true;
         }
         let want_capture =
             desired_mouse_capture(mouse_capture_cfg, focused_pane.as_ref(), &mouse_optout);
@@ -2169,7 +2200,7 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
-                        &agent_meta.records,
+                        &agent_meta,
                     &mut vcs,
                     );
                     // phux-5ke.4: on overlay dismiss the dispatcher
@@ -2274,6 +2305,20 @@ async fn main_loop<W: super::RenderSink>(
                             .map(|f| frame_paint_target(f).cloned())
                             .collect();
                         let defer_flags = coalesce_defer_flags(&paint_targets);
+                        // ADR-0029 §2: the loop-level repaint triggers in this
+                        // batch RAISE a level instead of painting inline, and
+                        // the accumulator is drained ONCE below. A burst of
+                        // twenty `MetadataChanged` frames (a live agent
+                        // detector publishing state transitions across nine
+                        // panes) therefore collapses into a single in-place
+                        // sidebar paint rather than twenty full-screen clears.
+                        // Declared HERE, inside the frame arm, deliberately:
+                        // the stdin / ESC-flush arms shadow `sidebar` with a
+                        // freshly recomputed reservation so a same-iteration
+                        // `toggle-sidebar` takes effect, and a drain hoisted
+                        // outside the `select!` would capture the stale outer
+                        // one. This arm does not shadow it.
+                        let mut repaint = RepaintAccumulator::default();
                         for (frame_idx, f) in batch.into_iter().enumerate() {
                         // phux-foz.8: a peer session's persisted-layout GET
                         // reply. Picker/fleet display data only — decode into
@@ -2481,25 +2526,14 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
-                                &agent_meta.records,
+                                &agent_meta,
                             &mut vcs,
                             );
-                            if chrome_changed
-                                && !overlays.is_active()
-                                && let Some(ls) =
-                                    workspace.render_window(zoomed.as_ref()).as_deref()
-                            {
-                                paint_full_frame(
-                                    out,
-                                    ls,
-                                    &mut panes,
-                                    focused_pane.as_ref(),
-                                    viewport_dims,
-                                    status_bar.as_mut(),
-                                    sidebar,
-                                    Some(&mut sidebar_painter),
-                                    &session_name,
-                                );
+                            // ADR-0029: nothing about a title / lease /
+                            // attention change touches a pane interior, so this
+                            // is a CHROME raise, not a full-frame clear.
+                            if chrome_changed && !overlays.is_active() {
+                                repaint.raise_chrome();
                             }
                         }
                         // phux-3uv / ADR-0018: ack the applied TERMINAL_OUTPUT
@@ -2638,24 +2672,14 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
-                                &agent_meta.records,
+                                &agent_meta,
                             &mut vcs,
                             );
-                            if !overlays.is_active()
-                                && let Some(ls) =
-                                    workspace.render_window(zoomed.as_ref()).as_deref()
-                            {
-                                paint_full_frame(
-                                    out,
-                                    ls,
-                                    &mut panes,
-                                    focused_pane.as_ref(),
-                                    viewport_dims,
-                                    status_bar.as_mut(),
-                                    sidebar,
-                                    Some(&mut sidebar_painter),
-                                    &session_name,
-                                );
+                            // The pane rects moved: only a full-viewport
+                            // repaint (ED2 + every pane + dividers) is a
+                            // coherent base. ADR-0029: raise, drain once.
+                            if !overlays.is_active() {
+                                repaint.raise_full();
                             }
                             // The GET reply is single-use; clear the
                             // pending request id so a stray late
@@ -2664,11 +2688,23 @@ async fn main_loop<W: super::RenderSink>(
                         }
                         // ADR-0040: a `phux.agent/v1` record changed (GET
                         // reply or subscribed broadcast). The window labels
-                        // derive from it, so recompose the tab strip +
-                        // sidebar and repaint — the same shape as the
-                        // layout_replaced arm, minus the layout bookkeeping.
+                        // and the sidebar's agents section derive from it, so
+                        // recompose the chrome and schedule an IN-PLACE chrome
+                        // paint.
+                        //
+                        // This arm used to call `paint_full_frame`
+                        // UNCONDITIONALLY — no gate on whether a painter input
+                        // actually changed, unlike the `chrome_dirty` arm. That
+                        // was invisible only because nothing ever wrote the
+                        // record, so the arm never fired. With a server-side
+                        // agent-state detector publishing transitions, an
+                        // ungated `paint_full_frame` here is an `ESC[2J`
+                        // full-screen clear per transition. Both halves of the
+                        // fix are required: gate on `refresh_window_chrome`'s
+                        // change report, AND route to the in-place chrome
+                        // painter via the accumulator.
                         if outcome.agent_meta_changed {
-                            refresh_window_chrome(
+                            let chrome_changed = refresh_window_chrome(
                                 status_bar.as_mut(),
                                 &mut sidebar_painter,
                                 &workspace,
@@ -2676,24 +2712,11 @@ async fn main_loop<W: super::RenderSink>(
                                 focused_pane.as_ref(),
                                 zoomed.as_ref(),
                                 own_client_id,
-                                &agent_meta.records,
+                                &agent_meta,
                             &mut vcs,
                             );
-                            if !overlays.is_active()
-                                && let Some(ls) =
-                                    workspace.render_window(zoomed.as_ref()).as_deref()
-                            {
-                                paint_full_frame(
-                                    out,
-                                    ls,
-                                    &mut panes,
-                                    focused_pane.as_ref(),
-                                    viewport_dims,
-                                    status_bar.as_mut(),
-                                    sidebar,
-                                    Some(&mut sidebar_painter),
-                                    &session_name,
-                                );
+                            if chrome_changed && !overlays.is_active() {
+                                repaint.raise_chrome();
                             }
                         }
                         // phux-foz.5: the `phux config reload` doorbell
@@ -2758,6 +2781,42 @@ async fn main_loop<W: super::RenderSink>(
                                 &foreign_agents,
                             );
                         }
+                        }
+                        // ADR-0029 §2: the ONE drain. Every loop-level repaint
+                        // trigger in this batch has raised; the highest level
+                        // wins and paints exactly once. `Chrome` repaints the
+                        // sidebar strip + status bar in place (no ED2, no pane
+                        // re-render); `Full` clears and recomposites because
+                        // the pane rects moved under us.
+                        let (level, _cleared) = repaint.drain();
+                        if !overlays.is_active()
+                            && let Some(ls) = workspace.render_window(zoomed.as_ref()).as_deref()
+                        {
+                            match level {
+                                RepaintLevel::None => {}
+                                RepaintLevel::Chrome => paint_chrome_in_place(
+                                    out,
+                                    ls,
+                                    &panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
+                                    &session_name,
+                                ),
+                                RepaintLevel::Full => paint_full_frame(
+                                    out,
+                                    ls,
+                                    &mut panes,
+                                    focused_pane.as_ref(),
+                                    viewport_dims,
+                                    status_bar.as_mut(),
+                                    sidebar,
+                                    Some(&mut sidebar_painter),
+                                    &session_name,
+                                ),
+                            }
                         }
                     }
                     Err(AttachError::Disconnected) if detach_pending => {
@@ -2917,7 +2976,7 @@ async fn main_loop<W: super::RenderSink>(
                         focused_pane.as_ref(),
                         zoomed.as_ref(),
                         own_client_id,
-                        &agent_meta.records,
+                        &agent_meta,
                     &mut vcs,
                     );
                 }
@@ -3636,12 +3695,29 @@ fn window_infos(
 ///
 /// A pane matching neither produces no row: the agents section lists
 /// agents, not shells.
+///
+/// # Ordering — the attention ladder
+///
+/// Rows are NOT in layout order. They are sorted by
+/// [`attention_rank`](crate::render::chrome::sidebar::attention_rank)
+/// descending, then by most-recent state change descending (a pane that has
+/// never changed sorts last), with a STABLE sort so equal-rank, equal-clock
+/// rows keep window/leaf order.
+///
+/// This is the whole "which of my nine agents needs me?" feature. Nine panes
+/// tiling a screen is nine rows the user has to read; one row pinned to the
+/// top that they must act on is a glance. The rung that carries it is
+/// "finished but unreviewed" outranking "still working" — a `done` agent is
+/// holding a result hostage until a human reads it; a `working` agent wants
+/// nothing.
 fn agent_entries(
     workspace: &Workspace,
     panes: &HashMap<TerminalId, PaneSlot>,
-    agent_meta: &HashMap<TerminalId, AgentRecord>,
+    agent_meta: &AgentMetaIndex,
 ) -> Vec<AgentEntry> {
-    let mut entries = Vec::new();
+    // (entry, rank, last-change) — rank and clock drive the sort but never
+    // enter `AgentEntry`, which is the sidebar painter's content-cache key.
+    let mut rows: Vec<(AgentEntry, u8, Option<std::time::Instant>)> = Vec::new();
     for (i, w) in workspace.windows.iter().enumerate() {
         let leaves = w
             .state
@@ -3651,13 +3727,20 @@ fn agent_entries(
             .unwrap_or_default();
         for id in &leaves {
             let asked = panes.get(id).is_some_and(|slot| slot.attention);
-            if let Some(record) = agent_meta.get(id) {
-                entries.push(AgentEntry {
+            let seen = panes.get(id).is_some_and(|slot| slot.seen);
+            let change_at = agent_meta.change_at.get(id).copied();
+            let mut push = |entry: AgentEntry| {
+                let rank = attention_rank(entry.state, entry.attention, entry.seen);
+                rows.push((entry, rank, change_at));
+            };
+            if let Some(record) = agent_meta.records.get(id) {
+                push(AgentEntry {
                     window: i,
                     window_name: w.name.clone(),
                     name: record.name.clone(),
                     state: record.state,
                     attention: asked || record.effective_attention() == AgentAttention::High,
+                    seen,
                 });
                 continue;
             }
@@ -3666,7 +3749,7 @@ fn agent_entries(
                 .and_then(|slot| slot.terminal.title().ok())
                 .and_then(agent_name_from_title);
             if let Some(name) = title_name {
-                entries.push(AgentEntry {
+                push(AgentEntry {
                     window: i,
                     window_name: w.name.clone(),
                     name: name.to_owned(),
@@ -3676,11 +3759,15 @@ fn agent_entries(
                         AgentMetaState::Idle
                     },
                     attention: asked,
+                    seen,
                 });
             }
         }
     }
-    entries
+    // Stable: rank desc, then last-change desc (`None` — never changed — sorts
+    // last, since `None < Some(_)`), then declaration (window/leaf) order.
+    rows.sort_by(|a, b| b.1.cmp(&a.1).then_with(|| b.2.cmp(&a.2)));
+    rows.into_iter().map(|(entry, _, _)| entry).collect()
 }
 
 /// phux-foz.1: clear a pane's asked-attention flag because the user sent it
@@ -3726,6 +3813,9 @@ async fn sync_agent_meta_subscriptions(
     agent_meta.subscribed.retain(|id| pane_ids.contains(id));
     agent_meta.records.retain(|id, _| pane_ids.contains(id));
     agent_meta.pending.retain(|_, id| pane_ids.contains(id));
+    // Same hygiene for the attention ladder's clock: a closed pane must not
+    // leave a timestamp behind for a recycled TerminalId to inherit.
+    agent_meta.change_at.retain(|id, _| pane_ids.contains(id));
     for id in &pane_ids {
         if agent_meta.subscribed.contains(id) {
             continue;
@@ -3877,7 +3967,7 @@ fn handle_config_reload<W: super::RenderSink>(
                 focused_pane,
                 zoomed,
                 own_client_id,
-                &agent_meta.records,
+                agent_meta,
                 vcs,
             );
             if !overlays.is_active()
@@ -5018,6 +5108,112 @@ mod tests {
         assert_eq!(infos[0].name, "claude task");
     }
 
+    /// An `AgentMetaIndex` holding `records` and nothing else — the shape
+    /// `agent_entries` reads.
+    fn meta_index(records: HashMap<TerminalId, AgentRecord>) -> AgentMetaIndex {
+        AgentMetaIndex {
+            records,
+            ..AgentMetaIndex::default()
+        }
+    }
+
+    /// The attention ladder, end to end through `agent_entries`: an UNSEEN
+    /// `done` agent must sort ABOVE a `working` one, and a `blocked` one above
+    /// both. This is the "which of my agents needs me?" contract — a finished
+    /// agent is holding a result hostage until a human reads it, so it must
+    /// outrank one that is merely still busy.
+    #[test]
+    fn agent_entries_rank_unreviewed_done_above_working() {
+        let working = TerminalId::local(1);
+        let done = TerminalId::local(2);
+        let blocked = TerminalId::local(3);
+        let mut workspace = Workspace::single(working.clone());
+        workspace.add_window("w2".to_owned(), done.clone());
+        workspace.add_window("w3".to_owned(), blocked.clone());
+
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        for id in [&working, &done, &blocked] {
+            panes.insert(id.clone(), PaneSlot::new_with_size(80, 24).expect("slot"));
+        }
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        for (id, name, state) in [
+            (&working, "w", AgentMetaState::Working),
+            (&done, "d", AgentMetaState::Done),
+            (&blocked, "b", AgentMetaState::Blocked),
+        ] {
+            records.insert(
+                id.clone(),
+                AgentRecord {
+                    name: name.to_owned(),
+                    state,
+                    ..AgentRecord::default()
+                },
+            );
+        }
+
+        // Layout order is working, done, blocked. The ladder must reorder.
+        let entries = agent_entries(&workspace, &panes, &meta_index(records.clone()));
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["b", "d", "w"],
+            "blocked > unreviewed done > working"
+        );
+
+        // Visiting the finished pane demotes it below the working one: it has
+        // been reviewed, so it is no longer asking for anything.
+        panes.get_mut(&done).expect("slot").seen = true;
+        let entries = agent_entries(&workspace, &panes, &meta_index(records));
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["b", "w", "d"],
+            "a reviewed done drops below working"
+        );
+    }
+
+    /// Equal-rank rows break the tie on the last-change clock: the agent that
+    /// JUST blocked sits above one that has been blocked for an hour. Rows with
+    /// no recorded change sort last, and the sort is stable, so a tie in both
+    /// keys preserves window/leaf order.
+    #[test]
+    fn agent_entries_break_rank_ties_by_most_recent_change() {
+        let old = TerminalId::local(1);
+        let fresh = TerminalId::local(2);
+        let never = TerminalId::local(3);
+        let mut workspace = Workspace::single(old.clone());
+        workspace.add_window("w2".to_owned(), fresh.clone());
+        workspace.add_window("w3".to_owned(), never.clone());
+
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        let mut records: HashMap<TerminalId, AgentRecord> = HashMap::new();
+        for (id, name) in [(&old, "old"), (&fresh, "fresh"), (&never, "never")] {
+            panes.insert(id.clone(), PaneSlot::new_with_size(80, 24).expect("slot"));
+            records.insert(
+                id.clone(),
+                AgentRecord {
+                    name: name.to_owned(),
+                    state: AgentMetaState::Blocked,
+                    ..AgentRecord::default()
+                },
+            );
+        }
+
+        let now = std::time::Instant::now();
+        let mut index = meta_index(records);
+        index.change_at.insert(
+            old,
+            now.checked_sub(std::time::Duration::from_secs(60))
+                .expect("clock has an hour of headroom"),
+        );
+        index.change_at.insert(fresh, now);
+        // `never` has no clock entry at all.
+
+        let entries = agent_entries(&workspace, &panes, &index);
+        let names: Vec<&str> = entries.iter().map(|e| e.name.as_str()).collect();
+        assert_eq!(names, vec!["fresh", "old", "never"]);
+    }
+
     /// phux-foz.9: a declared `phux.agent/v1` record produces an agents-row
     /// entry with the record's name + state; the pane's OSC title (set to a
     /// conflicting agent name here) is never consulted when a record exists.
@@ -5039,7 +5235,7 @@ mod tests {
             },
         );
 
-        let entries = agent_entries(&workspace, &panes, &records);
+        let entries = agent_entries(&workspace, &panes, &meta_index(records));
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].window, 0);
         assert_eq!(
@@ -5071,7 +5267,7 @@ mod tests {
         shell_slot.terminal.vt_write(b"\x1b]2;~/src/phux\x07");
         panes.insert(shell, shell_slot);
 
-        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        let entries = agent_entries(&workspace, &panes, &AgentMetaIndex::default());
         assert_eq!(entries.len(), 1, "the plain shell pane must not list");
         assert_eq!(entries[0].name, "claude");
         assert_eq!(entries[0].state, AgentMetaState::Idle);
@@ -5080,7 +5276,7 @@ mod tests {
         // The asked flag (ADR-0035) is the one structured state signal the
         // fallback trusts: it flips the row to blocked + attention.
         panes.get_mut(&claude).expect("slot").attention = true;
-        let entries = agent_entries(&workspace, &panes, &HashMap::new());
+        let entries = agent_entries(&workspace, &panes, &AgentMetaIndex::default());
         assert_eq!(entries[0].state, AgentMetaState::Blocked);
         assert!(entries[0].attention);
     }
@@ -5104,7 +5300,7 @@ mod tests {
             },
         );
 
-        let entries = agent_entries(&workspace, &panes, &records);
+        let entries = agent_entries(&workspace, &panes, &meta_index(records));
         assert!(entries[0].attention);
     }
 

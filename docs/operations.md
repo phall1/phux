@@ -71,6 +71,44 @@ ls --json` for the published session/pane view and the environment-controlled
 tracing sinks above for diagnosis. [ADR-0028](../ADR/0028-runtime-log-control.md)
 records the remaining operator surface.
 
+## Agent-state detection
+
+The server derives each pane's `phux.agent/v1` record on a timer
+([ADR-0046](../ADR/0046-server-side-agent-state-detection.md)). What it reads,
+exactly, and nothing else:
+
+- **The pane's own PTY.** Its foreground process group id, and that process's
+  `argv` (`/proc/<pid>/cmdline` on Linux, a `sysctl` on macOS; unavailable
+  elsewhere, where the detector simply never identifies an agent). This is used
+  only to answer "which agent binary is running here", and only for terminals
+  this server owns.
+- **That terminal's OSC title and its live viewport rows.** Both are already in
+  the server's own engine state; the detector reads them, matches them against
+  its rule manifests, and derives a state word.
+
+Nothing leaves the process: no network call, no subprocess, no file write. Screen
+content is **not** logged — the detector logs its derived state transitions at
+`debug` and its rule-match bookkeeping at `trace`, never the matched text.
+
+**Kill switch.** `PHUX_AGENT_DETECT=0` in the server's environment loads an empty
+rule set, so no detector is constructed and no pane is scanned. Consumers fall
+back to their pre-ADR-0046 title heuristics.
+
+**Rule manifests.** Built-in manifests are compiled into the binary. Additional
+or replacement manifests are read from `$PHUX_AGENT_RULES_DIR` (default
+`$XDG_CONFIG_HOME/phux/agent-rules`), one TOML file per agent kind; a manifest
+replaces the built-in of the same `kind`. Manifests are loaded and their patterns
+compiled **once**, on first use. A manifest that fails to parse, or that carries
+an invalid pattern, is logged at `warn` and **dropped whole** — never partially
+applied — so a bad rule file degrades detection for that agent kind rather than
+wedging a pane. Grep the log for the manifest's path to find it.
+
+**When it is wrong.** Detection is level-triggered and fail-safe: a pane whose
+screen matches no rule reads `idle`, never `blocked`, and the next tick
+re-derives from scratch, so a wrong value corrects itself rather than sticking.
+A stale manifest therefore shows up as agents that never leave `idle` — not as a
+sidebar stuck on red.
+
 ## Workspace continuity and update survival
 
 phux has two different continuity mechanisms. They are intentionally separate:

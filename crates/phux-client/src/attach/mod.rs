@@ -52,6 +52,11 @@ pub mod reflow;
 mod reload;
 pub mod render;
 pub mod rendered;
+// ADR-0029 §2: the monotone repaint accumulator. Loop-level triggers raise a
+// level; the driver drains it once per iteration, so a burst of chrome
+// triggers collapses into a single in-place chrome paint instead of N
+// full-screen clears.
+mod repaint;
 pub mod server_frame;
 mod stdout_writer;
 mod terminal_probe;

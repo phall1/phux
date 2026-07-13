@@ -9,6 +9,8 @@
 #![deny(missing_docs)]
 
 pub(crate) mod agent_asked;
+pub(crate) mod agent_detect;
+pub(crate) mod agent_state;
 pub mod auth;
 pub mod cwd_query;
 pub mod downsample;
@@ -19,6 +21,7 @@ pub mod hub;
 pub mod id_bridge;
 pub mod input;
 pub mod policy;
+pub(crate) mod proc_query;
 pub mod runtime;
 pub mod search;
 pub mod state;

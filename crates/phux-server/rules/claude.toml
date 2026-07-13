@@ -1,0 +1,140 @@
+# Agent-state detection manifest for Claude Code (ADR-0046).
+#
+# Every predicate here is derived from the shipped CLI's own observable
+# output. Provenance for each is recorded on the rule, because a rule whose
+# provenance nobody can restate is a rule nobody can safely change.
+#
+# The governing doctrine (ADR-0046 §D): a MISSED signal is cheap, a FALSE
+# `blocked` is not. A permanently-red sidebar destroys trust in the whole
+# feature and is strictly worse than having no feature. So: when in doubt,
+# do not write the rule. An under-specified manifest degrades to `idle`,
+# which is the fail-safe the detector applies when nothing matches.
+#
+# Claude Code's own internal state is a tri-state (idle / busy / waiting).
+# Only `busy` animates the title prefix; `waiting` (a permission dialog is
+# up) carries the SAME static prefix as `idle`. So the title proves
+# `working` and nothing else — `blocked` must come from the screen. That
+# asymmetry is why the title rules below only ever assert `working`.
+
+kind = "claude"
+name = "claude"
+
+# `claude` is the argv[0] basename of the native binary. `claude-code` is a
+# path component of the npm install (`.../@anthropic-ai/claude-code/cli.js`),
+# which runs under a `node` wrapper; see `agent_detect::identify`.
+binaries = ["claude", "claude-code"]
+
+# --- Title rules (highest-value, cheapest signal) ---------------------------
+
+# While Claude Code is busy, it writes an ANIMATED prefix glyph into the OSC 0
+# title, alternating between U+2802 (BRAILLE DOTS-2) and U+2810 (BRAILLE
+# DOTS-5) every ~960 ms. When it is NOT busy the prefix is the static U+2733
+# (EIGHT SPOKED ASTERISK). The title is therefore a direct, structural,
+# no-substring statement by the agent about whether it is working — and it
+# flips the instant the turn starts or ends.
+#
+# The static U+2733 is deliberately NOT given an `idle` rule: it means "not
+# busy", which covers BOTH idle and waiting-on-a-permission-dialog. Asserting
+# `idle` from it would outrank (title beats screen) the prompt-box `blocked`
+# rule below and mask every permission prompt. "Not busy" is already the
+# detector's fail-safe default, so the absence of a match says it for us.
+[[rules]]
+id = "title-busy-spinner"
+state = "working"
+priority = 100
+region = "title"
+visible-working = true
+match = { line-regex = "^[⠂⠐]" }
+
+# --- Screen rules -----------------------------------------------------------
+
+# A permission prompt. Claude Code renders it as a bordered box containing the
+# question and a numbered option list ("1. Yes", "2. Yes, and don't ask
+# again...", "3. No, and tell Claude what to do differently"), with a U+276F
+# caret on the selected row.
+#
+# Scoped to `prompt-box` — the live, bottom-most bordered box — and NOT to the
+# bottom lines, which is the entire point of regions: the string "do you want
+# to proceed?" inside a diff Claude just printed means nothing, while the same
+# string inside the live prompt box means a human is being asked. Requiring
+# BOTH the question AND a numbered-option line is a second, independent guard:
+# prose that merely quotes the question cannot trip it.
+#
+# The question stem is dynamic in the CLI ("Do you want to " + proceed? /
+# make this edit to / create / overwrite / write to / insert / delete), so we
+# match the stable prefix rather than each leaf.
+#
+# VERIFIED against Claude Code 2.1.207 (captured screen:
+# `tests/fixtures/claude/blocked_permission.txt`). The dialog REPLACES the
+# input box and is the only thing below the final rule:
+#
+#     ────────────────────────────────────────
+#      Bash command
+#        touch /tmp/probe.txt
+#      Do you want to proceed?
+#      ❯ 1. Yes
+#        2. Yes, and allow access to tmp/
+#        3. No
+#      Esc to cancel · Tab to amend · ctrl+e to explain
+#
+# `after-last-rule` is what makes this safe: the transcript — where Claude
+# might legitimately PRINT the words "do you want to proceed?" inside a diff
+# or a quoted shell session — always sits ABOVE the rules, so it is
+# structurally outside the region and cannot be seen. Requiring a numbered
+# option line as well is a second, independent guard.
+#
+# The question stem is dynamic in the CLI ("Do you want to " + proceed? /
+# make this edit to / create / overwrite / …), so we match the stable prefix.
+[[rules]]
+id = "prompt-permission-dialog"
+state = "blocked"
+priority = 80
+region = "after-last-rule"
+visible-blocker = true
+match = { all = [
+  { any = [
+    { contains = "do you want to " },
+    { contains = "would you like to proceed" },
+  ] },
+  { line-regex = '^\s*(❯\s*)?\d+\.\s+\S' },
+] }
+
+# --- Freeze rules -----------------------------------------------------------
+
+# The transcript viewer (ctrl+o) is a pager over scrolled-back history. It
+# hides the live chrome entirely, so the screen carries NO information about
+# what the agent is doing. Freeze the last derivation rather than guess.
+#
+# VERIFIED against 2.1.207: the viewer's footer reads
+#   "Showing detailed transcript · ctrl+o to toggle · ↑↓ scroll · …"
+#
+# This also covers the dialog-pending-behind-the-viewer case without needing
+# a rule of its own: a permission dialog is on screen BEFORE the user can
+# press ctrl+o, so `blocked` is already the published state by the time the
+# viewer opens, and freezing preserves it.
+[[rules]]
+id = "transcript-viewer"
+priority = 200
+region = "bottom-lines"
+skip-state-update = true
+match = { contains = "showing detailed transcript" }
+
+# --- Rules deliberately NOT written ------------------------------------------
+#
+# Earlier drafts carried three more rules, each keyed on a string that does
+# not exist in the shipped CLI: a "dialog waiting" blocked badge, a
+# "<chord> to interrupt" working hint, and a "? for shortcuts" idle hint.
+# All three were removed after being checked against the real TUI.
+#
+# The last is the instructive one. "? for shortcuts" DOES appear in 2.1.207 —
+# but only in the transcript viewer's footer, never beneath the idle input
+# box. As an `idle` + `visible-idle` rule it would therefore have asserted
+# positive idle evidence in the one state that carries no information at all,
+# and `visible-idle` is precisely what bypasses the working -> idle debounce.
+# A plausible-sounding string is not a verified one.
+#
+# Their absence costs nothing: `idle` is the detector's fail-safe default
+# (ADR-0046 §D), so it needs no rule to be reached, and `working` is proven
+# by the title above. What is missing is a screen-side `working` backstop for
+# installs that set `CLAUDE_CODE_DISABLE_TERMINAL_TITLE=1`; that wants a
+# verified string, and is filed rather than guessed.

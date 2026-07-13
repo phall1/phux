@@ -96,6 +96,52 @@ pub struct AgentEntry {
     /// `true` when the agent is waiting on a human (declared high
     /// attention, or the pane's ADR-0035 asked flag).
     pub attention: bool,
+    /// `true` once the user has visited this agent's pane since its last
+    /// state change. Drives the "finished but unreviewed" tier of
+    /// [`attention_rank`] and the row's glyph: a `done` agent you have not
+    /// looked at yet reads as "look at me"; one you have is quiet.
+    ///
+    /// A real display input, so it belongs in the struct (which is the
+    /// [`SidebarPainter`]'s content-cache key). The *timestamp* of the last
+    /// change deliberately does NOT: a per-frame-varying value in here would
+    /// miss the cache every frame and repaint the strip forever. The driver
+    /// keeps `last_change` in a side map and lets it influence only the row
+    /// ORDER.
+    pub seen: bool,
+}
+
+/// Where an agent row sits on the attention ladder — higher demands a human
+/// sooner.
+///
+/// The sidebar sorts its agent rows by this (descending), then by most recent
+/// state change, so the row that needs a person is always on top.
+///
+/// ```text
+/// blocked  >  done AND !seen  >  working  >  done/idle AND seen  >  unknown
+/// ```
+///
+/// The load-bearing rung is the second: **"finished, and you have not looked
+/// at it yet" outranks "still working"**. That is the entire "which of my nine
+/// agents needs me?" feature — a `done` agent is holding a completed result
+/// hostage until a human reads it, while a `working` agent needs nothing. Once
+/// the user visits the pane (`seen`), the row drops to the quiet tier and stops
+/// competing for the top of the strip.
+///
+/// `attention` (a declared high-attention record, or the ADR-0035 asked flag)
+/// pins the row to the top rung regardless of state: an agent that has
+/// explicitly asked for a human IS blocked on one.
+#[must_use]
+pub const fn attention_rank(state: AgentMetaState, attention: bool, seen: bool) -> u8 {
+    if attention {
+        return 4;
+    }
+    match state {
+        AgentMetaState::Blocked => 4,
+        AgentMetaState::Done if !seen => 3,
+        AgentMetaState::Working => 2,
+        AgentMetaState::Done | AgentMetaState::Idle => 1,
+        AgentMetaState::Unknown => 0,
+    }
 }
 
 /// One row of the strip, top to bottom. Both the painter and [`hit_test`]
@@ -447,11 +493,21 @@ impl SidebarPainter {
     /// then `state - agent-name` colored by state. The state segment keeps
     /// first claim on width — it is the row's information — with a small
     /// floor reserved for the window name so it stays identifiable.
+    ///
+    /// The glyph carries the attention ladder ([`attention_rank`]), not just
+    /// the state: an UNSEEN `done` agent gets the filled diamond and bold —
+    /// it finished and nobody has read the result — while a `done` agent whose
+    /// pane you already visited relaxes to the same hollow ring as `idle`. A
+    /// `working` agent gets the half-filled ring: alive, but wanting nothing.
     fn agent_line(&self, e: &AgentEntry, text_w: u16) -> Line<'static> {
         let color = self.state_color(e.state);
+        let unreviewed_done = e.state == AgentMetaState::Done && !e.seen;
         let glyph = match e.state {
-            AgentMetaState::Working | AgentMetaState::Blocked | AgentMetaState::Done => "●",
-            AgentMetaState::Idle | AgentMetaState::Unknown => "○",
+            AgentMetaState::Blocked => "●",
+            // "look at me": finished, unread.
+            AgentMetaState::Done if !e.seen => "◆",
+            AgentMetaState::Working => "◐",
+            AgentMetaState::Done | AgentMetaState::Idle | AgentMetaState::Unknown => "○",
         };
         let avail = usize::from(text_w).saturating_sub(2); // glyph + space
         let state_text = format!("{} - {}", e.state.as_str(), e.name);
@@ -467,7 +523,7 @@ impl SidebarPainter {
             .saturating_sub(1);
         let state_label = truncate(&state_text, state_budget);
         let mut glyph_style = Style::default().fg(color);
-        if e.attention {
+        if e.attention || unreviewed_done {
             glyph_style = glyph_style.add_modifier(Modifier::BOLD);
         }
         Line::from(vec![
@@ -623,7 +679,93 @@ mod tests {
             name: name.to_owned(),
             state,
             attention: false,
+            seen: false,
         }
+    }
+
+    /// The attention ladder, rung by rung. The one that matters: an UNSEEN
+    /// `done` agent outranks a `working` one — "finished but you haven't
+    /// looked at it" is a request for a human; "still working" is not.
+    #[test]
+    fn attention_rank_puts_unreviewed_done_above_working() {
+        use AgentMetaState as S;
+        let blocked = attention_rank(S::Blocked, false, false);
+        let done_unseen = attention_rank(S::Done, false, false);
+        let working = attention_rank(S::Working, false, false);
+        let done_seen = attention_rank(S::Done, false, true);
+        let idle = attention_rank(S::Idle, false, true);
+        let unknown = attention_rank(S::Unknown, false, true);
+
+        assert!(blocked > done_unseen, "blocked outranks unreviewed done");
+        assert!(done_unseen > working, "unreviewed done outranks working");
+        assert!(working > done_seen, "working outranks a reviewed done");
+        assert_eq!(done_seen, idle, "a reviewed done is as quiet as idle");
+        assert!(idle > unknown, "an undeclared agent ranks last");
+
+        // Visiting the pane is what demotes a finished agent — nothing else.
+        assert!(attention_rank(S::Done, false, true) < attention_rank(S::Working, false, false));
+
+        // An explicit attention flag (a declared high-attention record, or the
+        // ADR-0035 asked flag) pins the row to the top rung whatever the state
+        // says — an agent that asked for a human IS blocked on one.
+        for state in [S::Idle, S::Working, S::Done, S::Unknown, S::Blocked] {
+            assert_eq!(attention_rank(state, true, true), blocked, "{state:?}");
+        }
+
+        // `seen` is inert for every state but `done`: a blocked agent you
+        // looked at is still blocked.
+        for state in [S::Idle, S::Working, S::Blocked, S::Unknown] {
+            assert_eq!(
+                attention_rank(state, false, true),
+                attention_rank(state, false, false),
+                "{state:?}"
+            );
+        }
+    }
+
+    /// The unreviewed-`done` row must be visually distinct from both a
+    /// `working` row and a reviewed-`done` row — the glyph is what the user
+    /// scans for.
+    #[test]
+    fn unreviewed_done_gets_its_own_glyph() {
+        let mut p = SidebarPainter::new(Theme::default());
+        p.set_windows(vec![win("a", true)]);
+        let rect = Rect {
+            x: 0,
+            y: 0,
+            w: 30,
+            h: 12,
+        };
+
+        let mut unseen = agent(0, "a", "claude", AgentMetaState::Done);
+        unseen.seen = false;
+        p.set_agents(vec![unseen.clone()]);
+        let row = row_text(&p.compose_buffer(rect), rect, 5);
+        assert!(row.contains('◆'), "unreviewed done: {row:?}");
+
+        let seen = AgentEntry {
+            seen: true,
+            ..unseen
+        };
+        p.set_agents(vec![seen]);
+        let row = row_text(&p.compose_buffer(rect), rect, 5);
+        assert!(row.contains('○'), "reviewed done relaxes: {row:?}");
+
+        p.set_agents(vec![agent(0, "a", "claude", AgentMetaState::Working)]);
+        let row = row_text(&p.compose_buffer(rect), rect, 5);
+        assert!(row.contains('◐'), "working: {row:?}");
+    }
+
+    /// `seen` is a real display input, so a flip must bust the paint cache —
+    /// otherwise visiting a finished pane would leave the "look at me" glyph
+    /// on screen.
+    #[test]
+    fn seen_flip_busts_the_paint_cache() {
+        let mut p = SidebarPainter::new(Theme::default());
+        let done = agent(0, "a", "claude", AgentMetaState::Done);
+        assert!(p.set_agents(vec![done.clone()]));
+        assert!(!p.set_agents(vec![done.clone()]));
+        assert!(p.set_agents(vec![AgentEntry { seen: true, ..done }]));
     }
 
     fn paint_to_string(painter: &mut SidebarPainter, rect: Rect) -> String {

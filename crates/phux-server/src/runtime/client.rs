@@ -8,7 +8,7 @@ use bytes::BytesMut;
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, LayerSet, ServerCapabilities};
 use phux_protocol::policy::{ConsumerId as PolicyConsumerId, PeerIdentity};
-use phux_protocol::wire::frame::{AgentEvent, ErrorCode, FrameKind};
+use phux_protocol::wire::frame::{AgentEvent, ErrorCode, FrameKind, TERMINAL_AGENT_KEY};
 use tokio::net::UnixStream;
 use tokio::sync::oneshot;
 use tokio::task::JoinSet;
@@ -33,6 +33,66 @@ pub(crate) fn spawn_pane_event_drain(
     tokio::task::spawn_local(async move {
         while let Some(event) = event_rx.recv().await {
             broadcast_event(&state, Some(&wire_terminal_id), &event);
+        }
+    });
+}
+
+/// Spawn the per-pane agent-state drain (ADR-0046).
+///
+/// The `TerminalActor` derives the state — it owns the grid and the PTY — but
+/// it cannot write it: `ServerState` (and therefore the metadata store, the
+/// L3 subscriber set, and the arbiter) lives out here. So the actor emits an
+/// edge-filtered [`AgentDetectEvent`] and this task performs the authority
+/// check and the write.
+///
+/// The write rides the shipped `SET_METADATA` / `METADATA_CHANGED` path for
+/// `phux.agent/v1`. There is no new wire surface, no new frame, and no
+/// `PROTOCOL_VERSION` bump: the detector is simply another *writer* of a key
+/// the protocol already carries.
+///
+/// `metadata_set` suppresses a broadcast when the bytes are unchanged, which
+/// — together with the detector's own edge filter — is what makes a `working`
+/// agent that streams output for ten minutes cost zero writes and zero events.
+pub(crate) fn spawn_agent_state_drain(
+    state: SharedState,
+    wire_terminal_id: phux_protocol::ids::TerminalId,
+    mut rx: tokio::sync::mpsc::Receiver<crate::agent_detect::AgentDetectEvent>,
+) {
+    use crate::agent_detect::AgentDetectEvent;
+    use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+
+    tokio::task::spawn_local(async move {
+        while let Some(event) = rx.recv().await {
+            state.with_mut(|s| {
+                let scope = Scope::Terminal(wire_terminal_id.clone());
+                match event {
+                    AgentDetectEvent::Retract => {
+                        // Only ever delete a record we authored. A human's
+                        // declaration is not ours to retract.
+                        if s.agent_records().detector_owns(&wire_terminal_id) {
+                            s.metadata_delete(&scope, TERMINAL_AGENT_KEY);
+                            s.agent_records_mut()
+                                .note_detector_retract(&wire_terminal_id);
+                        }
+                    }
+                    AgentDetectEvent::State(report) => {
+                        // ADR-0046 §E: an explicit SET_METADATA that supplied
+                        // a `state` outranks the detector entirely.
+                        if s.agent_records().is_declared(&wire_terminal_id) {
+                            return;
+                        }
+                        let existing = s.metadata().get(&scope, TERMINAL_AGENT_KEY);
+                        let bytes = crate::agent_state::compose(
+                            existing.as_deref(),
+                            &report.kind,
+                            &report.name,
+                            report.state.as_str(),
+                        );
+                        s.metadata_set(&scope, TERMINAL_AGENT_KEY, bytes);
+                        s.agent_records_mut().note_detector_write(&wire_terminal_id);
+                    }
+                }
+            });
         }
     });
 }
@@ -1057,7 +1117,25 @@ pub(crate) fn handle_set_metadata(
         }
         return;
     }
-    let delivered = state.with_mut(|s| s.metadata_set(scope, key, value));
+    // ADR-0046 §E. This is the ONLY entry point an *explicit* agent-record
+    // write passes through — the detector's own drain calls `metadata_set`
+    // directly — which is precisely what makes the arbiter's bookkeeping
+    // honest. It cannot be reconstructed from the stored bytes: the client's
+    // `AgentMetaState` decodes an absent `state` and an unrecognized one both
+    // to `Unknown`, and the detector's writes carry a `state` too, so "was
+    // this declared by a human?" is not a question the value can answer.
+    let declared_agent_record = matches!(scope, phux_protocol::wire::frame::Scope::Terminal(_))
+        && key == TERMINAL_AGENT_KEY;
+    let agent_value = declared_agent_record.then(|| value.clone());
+
+    let delivered = state.with_mut(|s| {
+        if let (Some(bytes), phux_protocol::wire::frame::Scope::Terminal(terminal)) =
+            (agent_value.as_deref(), scope)
+        {
+            s.agent_records_mut().note_explicit_set(terminal, bytes);
+        }
+        s.metadata_set(scope, key, value)
+    });
     trace!(
         ?client_id,
         request_id,
@@ -1074,7 +1152,16 @@ pub(crate) fn handle_delete_metadata(
     key: &str,
 ) {
     debug!(?client_id, request_id, ?scope, %key, "DELETE_METADATA");
-    let delivered = state.with_mut(|s| s.metadata_delete(scope, key));
+    let delivered = state.with_mut(|s| {
+        // ADR-0046 §E: deleting the record withdraws any human declaration,
+        // so the detector resumes ownership of this Terminal.
+        if let phux_protocol::wire::frame::Scope::Terminal(terminal) = scope
+            && key == TERMINAL_AGENT_KEY
+        {
+            s.agent_records_mut().note_explicit_delete(terminal);
+        }
+        s.metadata_delete(scope, key)
+    });
     trace!(
         ?client_id,
         request_id,

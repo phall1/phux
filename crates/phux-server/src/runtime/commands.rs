@@ -10,7 +10,9 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
-use super::{AttachPrepared, spawn_pane_event_drain, spawn_terminal_exit_watcher};
+use super::{
+    AttachPrepared, spawn_agent_state_drain, spawn_pane_event_drain, spawn_terminal_exit_watcher,
+};
 use crate::agent_asked::{AskedPayload, AskedSource};
 use crate::state::{ClientId, Outbound, SharedState, TerminalInput};
 use crate::terminal_actor::{
@@ -122,11 +124,17 @@ pub fn seed_session_with_pty_and_colors(
     // up front (stable for the pane's lifetime) and captured by the drain.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_SINK_CAPACITY);
     actor.set_event_sink(event_tx);
+    // ADR-0046: same shape as the event sink, and for the same reason — the
+    // sink MUST be installed before `actor.run()` moves the actor into the
+    // spawn, while the wire `TerminalId` the drain needs only exists after.
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(AGENT_STATE_SINK_CAPACITY);
+    actor.set_agent_state_sink(agent_tx);
     let wire_terminal_id = state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
     spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
+    spawn_agent_state_drain(state.clone(), wire_terminal_id.clone(), agent_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     // docs/consumers/tui.md §9 (phux-r82.1): the pane's actor is live and
     // its PTY child spawned.
@@ -202,11 +210,17 @@ pub fn spawn_pane_with_pty_and_colors(
     // up front and spawn the per-pane event drain.
     let (event_tx, event_rx) = tokio::sync::mpsc::channel(EVENT_SINK_CAPACITY);
     actor.set_event_sink(event_tx);
+    // ADR-0046: same shape as the event sink, and for the same reason — the
+    // sink MUST be installed before `actor.run()` moves the actor into the
+    // spawn, while the wire `TerminalId` the drain needs only exists after.
+    let (agent_tx, agent_rx) = tokio::sync::mpsc::channel(AGENT_STATE_SINK_CAPACITY);
+    actor.set_agent_state_sink(agent_tx);
     let wire_terminal_id = state.with_mut(|s| {
         let _ = s.spawn_terminal_actor(terminal, handle, terminal_token, actor.run());
         s.intern_terminal_wire(terminal)
     });
     spawn_pane_event_drain(state.clone(), wire_terminal_id.clone(), event_rx);
+    spawn_agent_state_drain(state.clone(), wire_terminal_id.clone(), agent_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     // docs/consumers/tui.md §9 (phux-r82.1): the split pane's actor is live.
     let session_name = state.with(|s| s.registry.session(session).map(|sess| sess.name.clone()));
@@ -255,6 +269,17 @@ fn stamp_spawn_cwd(
 /// `idle` to close it) and the stream tolerates loss — a full sink drops
 /// the event rather than stalling the actor's hot PTY-pump loop.
 pub(crate) const EVENT_SINK_CAPACITY: usize = 64;
+
+/// Bounded capacity of the per-pane agent-state sink (ADR-0046).
+///
+/// Tiny, because the detector is edge-filtered: it emits only on a real
+/// change of the derived `(kind, name, state)` tuple, so a steady `working`
+/// pane produces nothing at all. Eight is already far more than a pane can
+/// plausibly queue between drains, and a full sink drops rather than stalls —
+/// which is safe here in a way it would not be for an edge-triggered design:
+/// the detector re-derives from scratch on its next tick, so a dropped event
+/// is re-published, not lost.
+pub(crate) const AGENT_STATE_SINK_CAPACITY: usize = 8;
 
 /// message to the socket. Encodes [`Outbound::Frame`] via
 /// `FrameKind::encode`.

@@ -38,6 +38,7 @@ use std::path::PathBuf;
 use std::sync::{Arc, Mutex, MutexGuard};
 
 use crate::agent_asked::AskedDetector;
+use crate::agent_state::AgentRecordArbiter;
 use crate::id_bridge::IdBridge;
 use crate::terminal_actor::TerminalHandle;
 use phux_core::ids::{SessionId, TerminalId, WindowId};
@@ -226,6 +227,11 @@ pub struct ServerState {
     /// watcher never creates.
     event_subscriptions: HashMap<ClientId, EventSubscription>,
     agent_asked: AskedDetector,
+    /// Who owns each Terminal's `phux.agent/v1` record: a human's explicit
+    /// `SET_METADATA`, or the server-side detector (ADR-0046 §E). An explicit
+    /// declaration of `state` outranks the detector, which stands down until
+    /// the record is deleted.
+    agent_records: AgentRecordArbiter,
     /// Whether `AttachTarget::CreateIfMissing` (phux-k61.3) should spawn
     /// a real PTY-backed actor for the newly created session's seed
     /// pane. Mirrors [`crate::runtime::ServerConfig::seed_with_pty`] so

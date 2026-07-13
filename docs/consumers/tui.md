@@ -1110,8 +1110,11 @@ every pane of the attached session, grouped under session headers, each
 row carrying
 
 - the agent's **name and kind** from its structured `phux.agent/v1`
-  record (ADR-0040) when one is declared, falling back to the pane's OSC
-  title otherwise (the record outranks the title);
+  record (ADR-0040) when one is present — declared by an agent or derived
+  by the server ([ADR-0046](../../ADR/0046-server-side-agent-state-detection.md),
+  so the state glyph below is live for a recognized agent CLI rather than
+  permanently `?`) — falling back to the pane's OSC title otherwise (the
+  record outranks the title);
 - a one-character **state glyph**: `!` blocked, `*` working, `-` idle,
   `.` done, `?` unknown (also used when no record is declared);
 - an **attention highlight** — the row's label paints in the theme's
@@ -1342,31 +1345,54 @@ window's stored name, and `state - agent-name` (e.g. `idle - claude`,
 `agent_working` / `agent_blocked` / `agent_done` theme slots (an
 undeclared state renders in `dim`). Per pane, in preference order:
 
-1. **The structured `phux.agent/v1` record** (ADR-0040), when the pane
-   declares one — name and state come straight from the record, exactly
-   as `phux agent set` wrote them.
-2. **The OSC-title identity heuristic** — the compatibility path for
-   plain `claude` / `codex` CLI panes, which never write a record. The
-   name comes from the title token; the state is `blocked` while the
-   pane's §8.6 asked flag is up, else `idle`. Screen text is never
-   scanned on the render path. Title changes refresh the chrome
-   directly: the client diffs each pane's title as content frames
-   apply, so the row appears when the agent sets its title and
-   disappears when the shell resets it on exit — no unrelated chrome
-   event needed.
+1. **The structured `phux.agent/v1` record** (ADR-0040). The server
+   derives and writes this record for a pane it owns
+   ([ADR-0046](../../ADR/0046-server-side-agent-state-detection.md)), so
+   the four lifecycle states are live for a recognized agent CLI with no
+   integration on the agent's side: `working` while it runs, `blocked`
+   when it is waiting on a human, `idle` otherwise. An explicit
+   `phux agent set` outranks the derivation for whatever fields it
+   supplies, so a wrapper or hook that declares its own state still wins.
+2. **The OSC-title identity heuristic** — the compatibility path for a
+   pane the server did not recognize (an unknown agent, or a platform
+   where process introspection is unavailable). The name comes from the
+   title token; the state is `blocked` while the pane's §8.6 asked flag
+   is up, else `idle`. Screen text is never scanned on the render path.
+   Title changes refresh the chrome directly: the client diffs each
+   pane's title as content frames apply, so the row appears when the
+   agent sets its title and disappears when the shell resets it on exit.
 
-Panes matching neither source produce no row — the section lists
-agents, not shells. When no pane matches, the section still renders its
-header with a quiet `no agents` empty-state line (dim + italic) rather
-than vanishing, so the strip reads as two composed sections; the `spaces`
+Rows are ordered by **how much they want a human**, not by window index:
+
+    blocked  >  done (unvisited)  >  working  >  done/idle (visited)  >  unknown
+
+"Finished, and you have not looked at it yet" therefore sorts above
+"still working" — the whole point of the section is to answer "which of
+my agents needs me?" without reading it top to bottom. Ties break by most
+recent state change, then by window order. A pane is **seen** once you
+focus it; a *new* state landing on a pane you are not looking at marks it
+unseen again, so an agent that finishes in a background window rises back
+to the top rather than staying quietly settled from an hour ago.
+
+Panes matching neither source produce no row — the section lists agents,
+not shells. When no pane matches, the section still renders its header
+with a quiet `no agents` empty-state line (dim + italic) rather than
+vanishing, so the strip reads as two composed sections; the `spaces`
 section shows an equivalent `no spaces` placeholder when there are no
 windows. The empty-state lines are inert — never click targets. (A short
 strip that cannot fit the gap + header + one row drops the whole agents
-section as before.) Getting first-class rows for CLI agents without the heuristic
-means something has to write the record: an agent-tools integration (a
-wrapper or hook that runs `phux agent set` when the agent starts and
-updates state as it works) upgrades the same pane from the fallback row
-to declared name + live lifecycle with no sidebar change.
+section as before.)
+
+Two environment knobs govern the server-side derivation (the client has
+no switch of its own; it renders whatever the record says):
+
+| Variable | Effect |
+|---|---|
+| `PHUX_AGENT_DETECT=0` | Disable detection entirely. Rows fall back to the OSC-title heuristic, exactly as before ADR-0046. |
+| `PHUX_AGENT_RULES_DIR=<dir>` | Load agent rule manifests from `<dir>` instead of `$XDG_CONFIG_HOME/phux/agent-rules`. A manifest replaces the built-in of the same `kind`. |
+
+See [`../operations.md`](../operations.md) for what the detector reads and
+how a bad manifest surfaces.
 
 Branch inference is **client-local and read-only**: the pane's working
 directory (carried by the `ATTACHED` snapshot) is walked up to the

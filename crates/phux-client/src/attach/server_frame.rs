@@ -36,6 +36,17 @@ pub(super) struct AgentMetaIndex {
     pub(super) pending: HashMap<u32, TerminalId>,
     /// Terminals with a live `SUBSCRIBE_METADATA` on the agent key.
     pub(super) subscribed: std::collections::HashSet<TerminalId>,
+    /// Terminal → when its record last actually changed. The attention
+    /// ladder's tiebreak: rows of equal rank sort most-recently-changed
+    /// first, so the agent that just flipped to `blocked` sits above one that
+    /// has been blocked for an hour.
+    ///
+    /// Lives HERE, driver-side, and never inside
+    /// [`crate::render::chrome::sidebar::AgentEntry`]: that struct is the
+    /// sidebar painter's content-cache key, and a timestamp in it would miss
+    /// the cache on every frame and repaint the strip forever. This map
+    /// influences only the row ORDER.
+    pub(super) change_at: HashMap<TerminalId, std::time::Instant>,
 }
 
 impl AgentMetaIndex {
@@ -43,11 +54,46 @@ impl AgentMetaIndex {
     /// `METADATA_CHANGED` broadcast; `None` bytes = tombstone). Returns
     /// `true` when the stored record actually changed, so the driver only
     /// repaints chrome for real transitions.
+    ///
+    /// A real change also stamps [`Self::change_at`]; a tombstone clears it,
+    /// so a retracted record (the agent exited) leaves nothing behind to sort
+    /// by.
     fn apply(&mut self, terminal: &TerminalId, bytes: Option<&[u8]>) -> bool {
-        match bytes.and_then(parse_agent_record) {
+        let changed = match bytes.and_then(parse_agent_record) {
             Some(record) => self.records.insert(terminal.clone(), record.clone()) != Some(record),
             None => self.records.remove(terminal).is_some(),
+        };
+        if changed {
+            if self.records.contains_key(terminal) {
+                self.change_at
+                    .insert(terminal.clone(), std::time::Instant::now());
+            } else {
+                self.change_at.remove(terminal);
+            }
         }
+        changed
+    }
+}
+
+/// Fold a real agent-record change into the attention ladder's per-pane
+/// bookkeeping.
+///
+/// A NEW state on a pane the user is not currently looking at is UNSEEN — even
+/// if they visited that pane an hour ago. That is precisely the signal the
+/// sidebar's "finished but unreviewed" tier is built on: the pane went `done`
+/// while the user's attention was elsewhere, so it must climb above the agents
+/// that are merely still working. A change on the FOCUSED pane is seen by
+/// definition — the user is watching it happen — so it never re-arms.
+fn note_agent_change(
+    panes: &mut HashMap<TerminalId, PaneSlot>,
+    focused_pane: Option<&TerminalId>,
+    terminal: &TerminalId,
+) {
+    if focused_pane == Some(terminal) {
+        return;
+    }
+    if let Some(slot) = panes.get_mut(terminal) {
+        slot.seen = false;
     }
 }
 
@@ -854,6 +900,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             // `value: None` (key absent) clears any stale record.
             if let Some(terminal) = agent_meta.pending.remove(&request_id) {
                 let changed = agent_meta.apply(&terminal, value.as_deref());
+                if changed {
+                    note_agent_change(panes, focused_pane.as_ref(), &terminal);
+                }
                 return Ok(FrameOutcome {
                     agent_meta_changed: changed,
                     ..FrameOutcome::default()
@@ -898,6 +947,9 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             if key == TERMINAL_AGENT_KEY {
                 if let Scope::Terminal(terminal) = &scope {
                     let changed = agent_meta.apply(terminal, value.as_deref());
+                    if changed {
+                        note_agent_change(panes, focused_pane.as_ref(), terminal);
+                    }
                     return Ok(FrameOutcome {
                         agent_meta_changed: changed,
                         ..FrameOutcome::default()
