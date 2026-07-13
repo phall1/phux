@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors
 stability: stable
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-12
 ---
 
 # Install
@@ -94,6 +94,27 @@ phux
 
 If you are developing rather than installing, use `nix develop` or `direnv
 allow` and then the `just` commands in [`QUICKSTART.md`](./QUICKSTART.md).
+For a checkout you edit continuously, install the current debug build with:
+
+```sh
+direnv allow                 # once per checkout
+just install-dev             # build phux + phux-mcp and install both
+hash -r                      # refresh an older shell's command cache if needed
+command -v phux              # should print ~/.cargo/bin/phux
+```
+
+`install-dev` writes the binaries atomically to `${CARGO_HOME:-~/.cargo}/bin`,
+matching a normal source install. That directory must precede
+`/opt/homebrew/bin` in `PATH`; the standard phux developer environment uses
+that order. The Homebrew package can remain installed as a released fallback.
+`just rebuild` installs the next build and asks a source-installed server to
+re-exec the newly installed binary while preserving its live sessions.
+
+A server already launched from Homebrew cannot change its executable path via
+the same-path re-exec mechanism. Detach and stop that server once, verify
+`command -v phux` resolves to `~/.cargo/bin/phux`, then start `phux` again.
+Existing source-installed servers under `~/.cargo/bin` can upgrade in place;
+subsequent `just rebuild` invocations stay entirely on the developer binary.
 
 ## crates.io
 

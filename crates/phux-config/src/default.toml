@@ -171,13 +171,13 @@ which-key-delay-ms = 600
 #       directly selectable in one step.
 #
 #   s — session picker (`session-picker`, phux-4li.20). A filterable list
-#       of the server's other sessions, built from the ATTACHED snapshot.
-#       Choosing a row commits `switch-session { name }` through the single
-#       dispatch path, which drives an in-process re-attach to the chosen
-#       session on the same connection (phux-eb0): the client detaches from
-#       the current session, re-runs the ATTACH handshake against the
-#       target, rebuilds all session-scoped state, and repaints — no
-#       reconnect, no flicker.
+#       of all server sessions, built from the ATTACHED snapshot. The current
+#       session appears first and is marked; choosing it simply closes the
+#       picker. Choosing another row commits `switch-session { name }` through
+#       the single dispatch path, which drives an in-process re-attach on the
+#       same connection (phux-eb0): the client detaches from the current
+#       session, re-runs the ATTACH handshake against the target, rebuilds all
+#       session-scoped state, and repaints — no reconnect, no flicker.
 #
 #   a — alias for the session picker, kept for muscle memory (the original
 #       binding before s/w landed). Same action as `s`.
