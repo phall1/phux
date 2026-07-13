@@ -1035,6 +1035,15 @@ word-boundary hits, and earliness all raise a row's rank), so typing `sp`
 floats `split-pane` to the top. Enter commits the selected row through the
 same `run_action` path a keybinding takes.
 
+The rows are a **scroll viewport**, not the whole list: a palette (or
+picker) with more rows than fit the box shows a window onto them, always
+kept around the selection, and paints a scrollbar in the right border
+column whose thumb shows how much list there is and where you are in it.
+Navigate with arrows / `C-n` / `C-p` (`j` / `k` too while the query is
+empty), `PageUp` / `PageDown` for a screenful, `Home` / `End` for the ends,
+or the mouse wheel. Every list overlay shares this — the pickers and the
+agent dashboard (§5.6) as much as the palette.
+
 Enabled plugins' manifest `[[actions]]` appear under a trailing
 **Plugin** header, one namespaced row per action
 (`plugin: <plugin-name>: <action title>`). Committing one runs

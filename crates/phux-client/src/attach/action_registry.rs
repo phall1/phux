@@ -429,6 +429,96 @@ mod tests {
     use super::*;
     use std::collections::BTreeSet;
 
+    /// The glyphs of a VT byte stream: drop every CSI escape (the overlay paint
+    /// emits SGR per styled cell and a CUP per row), leaving the text a user
+    /// would read off the screen.
+    fn strip_csi(vt: &str) -> String {
+        let mut out = String::new();
+        let mut chars = vt.chars();
+        while let Some(c) = chars.next() {
+            if c != '\u{1b}' {
+                out.push(c);
+                continue;
+            }
+            // Skip the `[` and the parameter bytes through the final byte
+            // (0x40-0x7E). Only CSI sequences are emitted here.
+            for esc in chars.by_ref() {
+                if esc != '[' && ('@'..='~').contains(&esc) {
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    /// phux-ep9s, end-to-end over the real registry: the full palette has more
+    /// rows than a modal can show on any terminal, so the rows past the fold
+    /// must be *reachable* — before the scroll viewport landed they were
+    /// painted straight off the bottom edge of the box and the selection went
+    /// with them.
+    ///
+    /// Drives the real overlay stack (`OverlayState::paint` → VT bytes) at a
+    /// full-screen terminal size, not a synthetic list at a toy size.
+    #[test]
+    fn the_real_palette_scrolls_to_its_last_row() {
+        use crate::render::Theme;
+        use crate::render::overlay::{OverlayState, SelectList};
+        use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+
+        let items = palette_items(None, &[], &[]);
+        let last = items
+            .iter()
+            .rev()
+            .find(|i| !i.is_header())
+            .expect("the registry has at least one action")
+            .label
+            .clone();
+
+        let mut overlays = OverlayState::new();
+        overlays.push(Box::new(SelectList::new(
+            "command palette",
+            items,
+            &Theme::default(),
+        )));
+        // A roomy terminal — the palette still overflows it, which is the
+        // whole point: this is the geometry the bug was reported against.
+        // The paint re-emits an SGR escape before every styled cell, so read
+        // the glyphs the user actually sees, not the raw byte stream.
+        let paint = |overlays: &OverlayState| {
+            let mut out = Vec::new();
+            overlays.paint(&mut out, (160, 48)).expect("paint");
+            strip_csi(&String::from_utf8_lossy(&out))
+        };
+
+        let opened = paint(&overlays);
+        assert!(
+            !opened.contains(&last),
+            "the real palette must overflow its modal for this test to prove \
+             anything — `{last}` was expected below the fold",
+        );
+        assert!(
+            opened.contains('█'),
+            "an overflowing palette must paint a scrollbar so the user can see \
+             there is more list:\n{opened:?}",
+        );
+
+        // End jumps to the last row: it must now be painted inside the box.
+        overlays.handle_key(&KeyEvent {
+            action: KeyAction::Press,
+            key: PhysicalKey::End,
+            mods: ModSet::empty(),
+            consumed_mods: ModSet::empty(),
+            composing: false,
+            text: None,
+            unshifted_codepoint: None,
+        });
+        let scrolled = paint(&overlays);
+        assert!(
+            scrolled.contains(&last),
+            "the last action `{last}` must be reachable, not clipped away",
+        );
+    }
+
     #[test]
     fn registry_covers_every_dispatched_action() {
         // `command-palette` and `select-window` are dispatched but

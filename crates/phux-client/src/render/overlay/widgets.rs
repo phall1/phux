@@ -130,6 +130,72 @@ pub fn centered(outer: Rect, frac_num: u16, min_w: u16, min_h: u16) -> Rect {
     Rect::new(x, y, w, h)
 }
 
+/// Scroll `offset` by the minimum needed to bring row `cursor` inside a
+/// `height`-row window over `total` rows, and clamp it to the content.
+///
+/// This is the "scroll into view" rule every list widget wants: the window
+/// does not move while the cursor stays inside it, so paging down through a
+/// long list scrolls one row at a time at the bottom edge and the view holds
+/// still in the middle. Returns the new first-visible row. A window that can
+/// show everything (`total <= height`) always sits at `0`.
+#[must_use]
+pub const fn scroll_into_view(offset: usize, cursor: usize, total: usize, height: usize) -> usize {
+    if height == 0 || total <= height {
+        return 0;
+    }
+    // Clamp first: a shrinking list (or a narrowing filter) can strand the
+    // offset past the end, which would paint a window of blank rows.
+    let max_offset = total - height;
+    let mut offset = if offset > max_offset {
+        max_offset
+    } else {
+        offset
+    };
+    if cursor < offset {
+        offset = cursor;
+    } else if cursor >= offset + height {
+        offset = cursor + 1 - height;
+    }
+    offset
+}
+
+/// Paint a vertical scrollbar into `track` — a one-column [`Rect`], meant to
+/// be the modal's right *border* column beside the scrolling region.
+///
+/// The thumb (a block glyph in [`Theme::accent`]) is sized to the visible
+/// fraction of `total` and positioned by `offset`, so it reads as both "how
+/// much list is there" and "where am I in it". Track cells keep the border
+/// glyph in [`Theme::border`], so the bar looks like part of the box rather
+/// than a widget bolted onto it. No-op when the content fits (`total <=
+/// track.height`) — an unscrollable list shows a plain border.
+pub fn paint_scrollbar(buf: &mut Buffer, track: Rect, theme: &Theme, total: usize, offset: usize) {
+    let height = track.height as usize;
+    if track.width == 0 || height == 0 || total <= height {
+        return;
+    }
+    // Thumb length is the visible fraction of the content, never zero (a
+    // 500-row list in a 4-row window still needs something to grab onto).
+    let thumb_len = (height * height / total).max(1);
+    // The thumb travels `height - thumb_len` rows as the offset travels
+    // `total - height` rows, so both ends land exactly flush.
+    let travel = height - thumb_len;
+    let max_offset = total - height;
+    let thumb_top = offset.min(max_offset) * travel / max_offset;
+
+    let thumb = Style::default().fg(theme.accent).bg(theme.surface);
+    let rail = Style::default().fg(theme.border).bg(theme.surface);
+    for row in 0..track.height {
+        let on_thumb = {
+            let row = usize::from(row);
+            row >= thumb_top && row < thumb_top + thumb_len
+        };
+        if let Some(cell) = buf.cell_mut((track.x, track.y + row)) {
+            cell.set_symbol(if on_thumb { "█" } else { "│" });
+            cell.set_style(if on_thumb { thumb } else { rail });
+        }
+    }
+}
+
 /// One row in a [`KeyChordTable`] section: a chord (left column) and its
 /// description (right column).
 #[derive(Debug, Clone)]
@@ -398,6 +464,110 @@ mod tests {
         let para = Paragraph::new(table.body_lines());
         para.render(area, &mut buf);
         insta::assert_snapshot!(buf_to_string(&buf));
+    }
+
+    // ---------- phux-ep9s: scroll viewport + scrollbar ----------
+
+    #[test]
+    fn scroll_into_view_pins_to_zero_when_everything_fits() {
+        // No window movement is possible (or wanted) while the content fits,
+        // wherever the cursor is — an unscrollable list never scrolls.
+        assert_eq!(scroll_into_view(0, 0, 3, 10), 0);
+        assert_eq!(scroll_into_view(0, 2, 3, 10), 0);
+        // Even a stale non-zero offset (list shrank under it) snaps back.
+        assert_eq!(scroll_into_view(7, 2, 3, 10), 0);
+    }
+
+    #[test]
+    fn scroll_into_view_holds_still_while_the_cursor_is_inside() {
+        // Window [5, 10) over 100 rows: a cursor anywhere inside it must not
+        // move the view. This is the property that makes the list feel calm.
+        for cursor in 5..10 {
+            assert_eq!(
+                scroll_into_view(5, cursor, 100, 5),
+                5,
+                "cursor {cursor} inside the window must not scroll it",
+            );
+        }
+    }
+
+    #[test]
+    fn scroll_into_view_follows_the_cursor_off_each_edge() {
+        // Off the bottom: scroll just enough to put the cursor on the last row.
+        assert_eq!(scroll_into_view(5, 10, 100, 5), 6);
+        // Off the top: scroll just enough to put it on the first row.
+        assert_eq!(scroll_into_view(5, 3, 100, 5), 3);
+        // A jump to the end (End key) lands the window flush with the bottom.
+        assert_eq!(scroll_into_view(0, 99, 100, 5), 95);
+    }
+
+    #[test]
+    fn scroll_into_view_clamps_a_stranded_offset() {
+        // The filter narrowed 100 rows to 8 while the offset sat at 90: the
+        // window must clamp to the content, not paint 5 blank rows.
+        assert_eq!(scroll_into_view(90, 0, 8, 5), 0);
+        assert_eq!(scroll_into_view(90, 7, 8, 5), 3);
+        // A zero-height viewport is degenerate, not a panic.
+        assert_eq!(scroll_into_view(4, 9, 100, 0), 0);
+    }
+
+    /// Read the scrollbar track column out of a buffer as a string.
+    fn track_column(buf: &Buffer, track: Rect) -> String {
+        (0..track.height)
+            .map(|row| buf[(track.x, track.y + row)].symbol().to_owned())
+            .collect()
+    }
+
+    #[test]
+    fn scrollbar_is_absent_when_the_content_fits() {
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 8));
+        let track = Rect::new(3, 0, 1, 8);
+        paint_scrollbar(&mut buf, track, &Theme::default(), 8, 0);
+        // Untouched: the cells keep the buffer's default blank symbol, so the
+        // modal's plain border shows through.
+        assert_eq!(track_column(&buf, track), " ".repeat(8));
+    }
+
+    #[test]
+    fn scrollbar_thumb_tracks_the_offset() {
+        let theme = Theme::default();
+        let track = Rect::new(3, 0, 1, 8);
+        // 8-row window over 32 rows ⇒ thumb is a quarter of the track (2 rows),
+        // travelling 6 rows as the offset travels 24.
+        let paint = |offset: usize| {
+            let mut buf = Buffer::empty(Rect::new(0, 0, 4, 8));
+            paint_scrollbar(&mut buf, track, &theme, 32, offset);
+            track_column(&buf, track)
+        };
+        // At the top the thumb is flush with the first row...
+        assert_eq!(paint(0), "██││││││");
+        // ...at the bottom, flush with the last (so "am I at the end?" is
+        // answerable at a glance)...
+        assert_eq!(paint(24), "││││││██");
+        // ...and in between it sits proportionally.
+        assert_eq!(paint(12), "│││██│││");
+    }
+
+    #[test]
+    fn scrollbar_thumb_never_vanishes_on_a_long_list() {
+        // 4-row window over 500 rows: the proportional thumb rounds to zero
+        // rows, but a scrollbar you cannot see is not a scrollbar.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 2, 4));
+        let track = Rect::new(1, 0, 1, 4);
+        paint_scrollbar(&mut buf, track, &Theme::default(), 500, 0);
+        assert_eq!(
+            track_column(&buf, track).matches('█').count(),
+            1,
+            "the thumb must stay at least one row tall",
+        );
+    }
+
+    #[test]
+    fn scrollbar_ignores_a_degenerate_track() {
+        // Zero-width / zero-height tracks are a no-op, not an index panic.
+        let mut buf = Buffer::empty(Rect::new(0, 0, 4, 4));
+        paint_scrollbar(&mut buf, Rect::new(3, 0, 0, 4), &Theme::default(), 99, 0);
+        paint_scrollbar(&mut buf, Rect::new(3, 0, 1, 0), &Theme::default(), 99, 0);
     }
 
     #[test]
