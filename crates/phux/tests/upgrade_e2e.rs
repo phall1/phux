@@ -1,7 +1,8 @@
 //! Binary-level acceptance drill for graceful server upgrade (ADR-0032,
 //! phux-fak5): a real `phux server` child, a real PTY-backed pane, a real
 //! in-place `execve`, and the assertion that the headline promise holds —
-//! **the pane's child process and its scrollback survive a binary update.**
+//! **the pane's child process and its scrollback survive a binary update, and
+//! the resumed pane retains its normal kill/reap lifecycle.**
 //!
 //! The decisive signal is that the server's PID is *unchanged* after the
 //! upgrade: a kill-and-restart would replace it, but a graceful `execve`
@@ -204,5 +205,26 @@ fn child_and_scrollback_survive_graceful_upgrade() {
     assert!(
         snap.contains(&marker),
         "the pane's scrollback marker should survive the upgrade; got:\n{snap}"
+    );
+
+    // Rebuilt actors must regain their exit watchers. Without that watcher a
+    // kill stops the actor and child but never reaps the pane/window/session,
+    // leaving a ghost row in `phux ls`. This harness never attaches a client,
+    // so the server intentionally stays alive after becoming empty; the
+    // authoritative session list is the reap assertion here.
+    assert_eq!(
+        server.status(&["kill", SESSION]),
+        0,
+        "the resumed session should accept a kill"
+    );
+    assert!(
+        poll(Duration::from_secs(10), || !server
+            .stdout(&["ls"])
+            .contains(SESSION)),
+        "the killed resumed session should be reaped from the authoritative list"
+    );
+    assert!(
+        !alive(child_pid),
+        "killing the resumed session should terminate its pane child"
     );
 }

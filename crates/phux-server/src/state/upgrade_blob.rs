@@ -275,7 +275,9 @@ impl ServerState {
     /// re-exec'd image (ADR-0032): recreate every entity under its recorded
     /// wire id, restore the id allocators + cwd/last-touched metadata, and
     /// spawn a pane actor that re-adopts the inherited PTY (or, for a pane with
-    /// no handoff, replays its snapshot into a fresh no-PTY actor).
+    /// no handoff, replays its snapshot into a fresh no-PTY actor). Returns each
+    /// rebuilt pane's exit receiver so the runtime can restore its lifecycle
+    /// watcher after releasing the state lock.
     ///
     /// Must run inside the `LocalSet` that owns pane actors (it spawns them).
     ///
@@ -286,11 +288,19 @@ impl ServerState {
         clippy::too_many_lines,
         reason = "linear reconstruction: create entities, bind wire ids, spawn actors, re-link the tree, restore counters — three short passes whose order is the meaning; splitting fragments it."
     )]
-    pub fn rebuild_from_blob(&mut self, blob: &StateBlob) -> Result<(), RebuildError> {
+    #[allow(
+        clippy::type_complexity,
+        reason = "the runtime immediately consumes each rebuilt pane id and its one-shot exit receiver"
+    )]
+    pub fn rebuild_from_blob(
+        &mut self,
+        blob: &StateBlob,
+    ) -> Result<Vec<(TerminalId, oneshot::Receiver<Option<i32>>)>, RebuildError> {
         let max_scrollback = self.history_limit;
         let mut session_core: HashMap<u32, SessionId> = HashMap::new();
         let mut window_core: HashMap<u32, WindowId> = HashMap::new();
         let mut pane_core: HashMap<u32, TerminalId> = HashMap::new();
+        let mut exit_watchers = Vec::with_capacity(blob.panes.len());
 
         for s in &blob.sessions {
             let core = self.registry.new_session(s.name.clone());
@@ -364,7 +374,16 @@ impl ServerState {
                 .insert(core, WireTerminalId::local(p.wire_id));
             self.terminal_wire_reverse
                 .insert(WireTerminalId::local(p.wire_id), core);
-            self.spawn_terminal_actor(core, bundle.handle, bundle.token, bundle.actor.run());
+            let crate::terminal_actor::TerminalActorBundle {
+                actor,
+                handle,
+                token,
+                exit_notify,
+            } = bundle;
+            self.spawn_terminal_actor(core, handle, token, actor.run());
+            if let Some(exit_notify) = exit_notify {
+                exit_watchers.push((core, exit_notify));
+            }
             pane_core.insert(p.wire_id, core);
         }
 
@@ -407,7 +426,7 @@ impl ServerState {
         self.next_window_wire_id = blob.counters.next_window_wire_id;
         self.next_touch_timestamp = blob.counters.next_touch_timestamp;
 
-        Ok(())
+        Ok(exit_watchers)
     }
 }
 
@@ -550,7 +569,12 @@ mod tests {
 
                 // Rebuild into a brand-new state, then re-emit a blob from it.
                 let mut fresh = ServerState::new();
-                fresh.rebuild_from_blob(&blob).expect("rebuild");
+                let exit_watchers = fresh.rebuild_from_blob(&blob).expect("rebuild");
+                assert_eq!(
+                    exit_watchers.len(),
+                    blob.panes.len(),
+                    "every rebuilt pane must return an exit receiver for the runtime watcher"
+                );
                 let blob2 = fresh.build_upgrade_blob(7).await;
 
                 assert_eq!(blob.sessions, blob2.sessions, "sessions round-trip");
