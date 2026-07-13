@@ -1497,11 +1497,24 @@ impl TerminalActor {
         // that one is cleared every ~30 ms by `tick_emit`, so a detector
         // ticking at 100-500 ms would observe it as `false` almost always and
         // skip every single scan.
-        let dirty = std::mem::replace(&mut self.agent_dirty_since_detect, false);
-        let screen = detector
-            .wants_screen(dirty)
-            .then(|| self.viewport_lines())
-            .flatten();
+        //
+        // The flag is CONSUMED only by a scan that actually happened. A tick
+        // that skips the scan must not eat the evidence that a scan is owed:
+        // `wants_screen` is false for the whole of a pane's unidentified life,
+        // so consuming it unconditionally threw away every grid mutation an
+        // agent made before we noticed it existed — including the one that
+        // painted the permission dialog we were supposed to see. Likewise a
+        // failed projection leaves the flag set, so the next tick retries.
+        let dirty = self.agent_dirty_since_detect;
+        let screen = if detector.wants_screen(dirty) {
+            let lines = self.viewport_lines();
+            if lines.is_some() {
+                self.agent_dirty_since_detect = false;
+            }
+            lines
+        } else {
+            None
+        };
         let master_fd = self
             .pty
             .as_ref()
@@ -1725,6 +1738,11 @@ impl TerminalActor {
                 actor,
             } => {
                 self.emit_terminal_control(action, input_holder, Some(actor), None);
+            }
+            ControlRequest::AgentRecordInvalidated => {
+                if let Some(detector) = self.agent_detect.as_mut() {
+                    detector.invalidate_published();
+                }
             }
             ControlRequest::Signal {
                 signal,
@@ -6120,6 +6138,63 @@ mod tests {
         assert!(
             lowest > 1,
             "oldest emit instants should have been evicted; lowest retained seq = {lowest}",
+        );
+    }
+
+    // --- agent-detector dirty-flag accounting (ADR-0046) -------------------
+
+    /// `agent_dirty_since_detect` is the ONLY record that the grid changed
+    /// since the detector last looked. `detect_tick` must consume it only on a
+    /// tick that actually scanned.
+    ///
+    /// While no agent is identified, `wants_screen` is unconditionally false —
+    /// there is nothing to derive against. So a `detect_tick` in that window
+    /// performs no scan, and eating the flag there discards every grid mutation
+    /// the agent made before we noticed it existed: the permission dialog it
+    /// painted, and then went silent behind, is exactly such a mutation. The
+    /// detector then derives `idle` from a screen it never read and latches
+    /// there, because `wants_screen` sees `current == Some(Idle)` and never
+    /// asks for the scan that would correct it.
+    #[test]
+    fn detect_tick_keeps_the_dirty_flag_when_it_performs_no_scan() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        actor.agent_detect = Some(AgentDetector::new(
+            crate::agent_detect::rules::global(),
+            std::time::Instant::now(),
+        ));
+
+        // The agent paints. No agent is identified yet (no PTY, so identity
+        // never resolves), so this tick cannot scan.
+        actor.vt_write_for_test(b"a permission dialog");
+        assert!(actor.agent_dirty_since_detect, "the grid changed");
+
+        assert!(actor.detect_tick().is_some(), "the detector ran");
+        assert!(
+            actor.agent_dirty_since_detect,
+            "a tick that performed no scan must not consume the evidence that a scan is owed",
+        );
+    }
+
+    /// The converse, so the flag is not simply never cleared: once an agent IS
+    /// identified, the scan runs and consumes the flag — which is what keeps
+    /// the steady state cheap.
+    #[test]
+    fn detect_tick_consumes_the_dirty_flag_when_it_scans() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let now = std::time::Instant::now();
+        let mut detector = AgentDetector::new(crate::agent_detect::rules::global(), now);
+        detector.force_identity("claude", now);
+        actor.agent_detect = Some(detector);
+
+        actor.vt_write_for_test(b"some output");
+        assert!(actor.agent_dirty_since_detect);
+
+        assert!(actor.detect_tick().is_some(), "the detector ran");
+        assert!(
+            !actor.agent_dirty_since_detect,
+            "a scan consumes the flag; otherwise every tick re-projects the grid forever",
         );
     }
 }

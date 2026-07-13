@@ -69,11 +69,30 @@ pub(crate) fn spawn_agent_state_drain(
                     AgentDetectEvent::Retract => {
                         // Only ever delete a record we authored. A human's
                         // declaration is not ours to retract.
-                        if s.agent_records().detector_owns(&wire_terminal_id) {
-                            s.metadata_delete(&scope, TERMINAL_AGENT_KEY);
-                            s.agent_records_mut()
-                                .note_detector_retract(&wire_terminal_id);
+                        if !s.agent_records().detector_owns(&wire_terminal_id) {
+                            return;
                         }
+                        // ... and "we authored it" is not the same as "all of
+                        // it is ours". After `phux agent set --name reviewer`
+                        // the detector keeps filling `state` in, and that write
+                        // re-acquires ownership — of a record whose NAME the
+                        // human chose. Deleting the key on retract would take
+                        // their name, session and attention with it. Withdraw
+                        // only the field we own.
+                        if s.agent_records().has_explicit_identity(&wire_terminal_id) {
+                            let existing = s.metadata().get(&scope, TERMINAL_AGENT_KEY);
+                            if let Some(bytes) =
+                                crate::agent_state::withdraw_state(existing.as_deref())
+                            {
+                                s.metadata_set(&scope, TERMINAL_AGENT_KEY, bytes);
+                                s.agent_records_mut()
+                                    .note_detector_retract(&wire_terminal_id);
+                                return;
+                            }
+                        }
+                        s.metadata_delete(&scope, TERMINAL_AGENT_KEY);
+                        s.agent_records_mut()
+                            .note_detector_retract(&wire_terminal_id);
                     }
                     AgentDetectEvent::State(report) => {
                         // ADR-0046 §E: an explicit SET_METADATA that supplied
@@ -95,6 +114,48 @@ pub(crate) fn spawn_agent_state_drain(
             });
         }
     });
+}
+
+/// Re-arm the pane detector's edge filter after someone ELSE wrote its
+/// `phux.agent/v1` record (ADR-0046 §E).
+///
+/// `AgentDetector::published` is a model of the detector's own emissions, so
+/// an explicit `SET_METADATA` / `DELETE_METADATA` leaves it modelling a store
+/// that no longer exists. The detector then derives the same tuple, its edge
+/// filter suppresses it, and nothing is written — so a `DELETE` on an idle
+/// agent's record does not mean "the detector resumes", it means "the pane has
+/// no agent until the agent's state next changes", which for an agent waiting
+/// on a human is never. Same for the identity-only `SET` that is supposed to
+/// leave the detector filling `state` in.
+///
+/// So the store tells the detector. Resolved under the state lock, sent off
+/// it, on the same actor control mailbox the ADR-0033 lease broadcasts ride. A
+/// saturated or closed mailbox is benign: the actor is wedged or gone, and a
+/// gone actor has no detector to re-arm. A no-op for a non-agent key, a
+/// non-Terminal scope, and a Terminal with no local actor (a satellite pane's
+/// record is written where its actor lives).
+fn invalidate_agent_detector(
+    state: &SharedState,
+    scope: &phux_protocol::wire::frame::Scope,
+    key: &str,
+) {
+    use phux_protocol::wire::frame::Scope;
+
+    if key != TERMINAL_AGENT_KEY {
+        return;
+    }
+    let Scope::Terminal(wire) = scope else {
+        return;
+    };
+    let handle = state.with(|s| {
+        s.terminal_from_wire(wire)
+            .and_then(|pane| s.terminal_handle(pane).cloned())
+    });
+    if let Some(handle) = handle {
+        let _ = handle
+            .control
+            .try_send(crate::terminal_actor::ControlRequest::AgentRecordInvalidated);
+    }
 }
 
 /// Spawn the per-pane EOF watcher task (phux-it8, reshaped by phux-4r1).
@@ -1136,6 +1197,8 @@ pub(crate) fn handle_set_metadata(
         }
         s.metadata_set(scope, key, value)
     });
+    // The store just changed under the detector's edge filter.
+    invalidate_agent_detector(state, scope, key);
     trace!(
         ?client_id,
         request_id,
@@ -1162,6 +1225,10 @@ pub(crate) fn handle_delete_metadata(
         }
         s.metadata_delete(scope, key)
     });
+    // ADR-0046 §E's "the detector resumes" is only true if the detector is
+    // told: its edge filter still holds the state it derived before the
+    // delete, and would silently suppress the republish.
+    invalidate_agent_detector(state, scope, key);
     trace!(
         ?client_id,
         request_id,
@@ -1359,4 +1426,203 @@ pub(crate) async fn writer_task<W: FrameWriter>(
         }
     }
     debug!(?client_id, "writer task exiting (channel closed)");
+}
+
+#[cfg(test)]
+#[allow(clippy::expect_used, reason = "tests")]
+mod agent_drain_tests {
+    use phux_protocol::ids::TerminalId as WireTerminalId;
+    use phux_protocol::wire::frame::{Scope, TERMINAL_AGENT_KEY};
+
+    use super::spawn_agent_state_drain;
+    use crate::agent_detect::record::AgentRecordJson;
+    use crate::agent_detect::{AgentDetectEvent, AgentReport, DetectedState};
+    use crate::state::SharedState;
+
+    fn report(state: DetectedState) -> AgentReport {
+        AgentReport {
+            kind: "claude".to_owned(),
+            name: "claude".to_owned(),
+            state,
+        }
+    }
+
+    /// Drive the real drain task to quiescence over `events`, and hand back the
+    /// stored `phux.agent/v1` bytes.
+    async fn drain(state: &SharedState, terminal: &WireTerminalId, events: Vec<AgentDetectEvent>) {
+        let (tx, rx) = tokio::sync::mpsc::channel(8);
+        spawn_agent_state_drain(state.clone(), terminal.clone(), rx);
+        for event in events {
+            tx.send(event).await.expect("drain is alive");
+        }
+        drop(tx);
+        // The drain is a `spawn_local` task; yield until it has consumed the
+        // channel and closed.
+        for _ in 0..64 {
+            tokio::task::yield_now().await;
+        }
+    }
+
+    fn stored(state: &SharedState, terminal: &WireTerminalId) -> Option<AgentRecordJson> {
+        let scope = Scope::Terminal(terminal.clone());
+        state
+            .with(|s| s.metadata().get(&scope, TERMINAL_AGENT_KEY))
+            .and_then(|bytes| AgentRecordJson::decode(&bytes))
+    }
+
+    /// THE label-eater, end to end through the real drain.
+    ///
+    /// A human runs `phux agent set --name reviewer --session fleet-7`. That is
+    /// identity only, so it is NOT a declaration: the detector keeps running and
+    /// fills `state` in around them — and that write re-acquires `detector_owned`.
+    /// When the agent exits back to the shell, the retract used to `DELETE` the
+    /// whole key on the strength of that bit alone, destroying the name and the
+    /// session the human chose.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retract_does_not_delete_a_humans_name_from_the_record() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                let terminal = WireTerminalId::new(1);
+                let scope = Scope::Terminal(terminal.clone());
+
+                // The human names the pane.
+                let declared = br#"{"name":"reviewer","kind":"claude","session":"fleet-7"}"#;
+                state.with_mut(|s| {
+                    s.agent_records_mut().note_explicit_set(&terminal, declared);
+                    s.metadata_set(&scope, TERMINAL_AGENT_KEY, declared.to_vec());
+                });
+
+                // The agent works, then exits back to the shell.
+                drain(
+                    &state,
+                    &terminal,
+                    vec![
+                        AgentDetectEvent::State(report(DetectedState::Working)),
+                        AgentDetectEvent::Retract,
+                    ],
+                )
+                .await;
+
+                let record = stored(&state, &terminal).expect(
+                    "the record must SURVIVE the agent's exit: the human authored its identity, \
+                     and the detector only ever owned `state`",
+                );
+                assert_eq!(record.name, "reviewer", "the human's name survives");
+                assert_eq!(
+                    record.session.as_deref(),
+                    Some("fleet-7"),
+                    "and their label"
+                );
+                assert_eq!(
+                    record.state, "unknown",
+                    "but a dead agent must not leave a `working` badge spinning",
+                );
+            })
+            .await;
+    }
+
+    /// The other half: a record the detector authored ENTIRELY is its to delete.
+    /// Otherwise every pane that ever ran an agent keeps a tombstone record
+    /// forever.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retract_deletes_a_record_the_detector_wrote_alone() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                let terminal = WireTerminalId::new(1);
+
+                drain(
+                    &state,
+                    &terminal,
+                    vec![
+                        AgentDetectEvent::State(report(DetectedState::Working)),
+                        AgentDetectEvent::Retract,
+                    ],
+                )
+                .await;
+
+                assert!(
+                    stored(&state, &terminal).is_none(),
+                    "a purely detector-authored record is deleted on retract",
+                );
+            })
+            .await;
+    }
+
+    /// A human who DECLARED a state stands the detector down entirely: it makes
+    /// no writes at all, retract included.
+    #[tokio::test(flavor = "current_thread")]
+    async fn a_retract_never_touches_a_declared_record() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                let terminal = WireTerminalId::new(1);
+                let scope = Scope::Terminal(terminal.clone());
+
+                let declared = br#"{"name":"me","kind":"claude","state":"done"}"#;
+                state.with_mut(|s| {
+                    s.agent_records_mut().note_explicit_set(&terminal, declared);
+                    s.metadata_set(&scope, TERMINAL_AGENT_KEY, declared.to_vec());
+                });
+
+                drain(
+                    &state,
+                    &terminal,
+                    vec![
+                        AgentDetectEvent::State(report(DetectedState::Working)),
+                        AgentDetectEvent::Retract,
+                    ],
+                )
+                .await;
+
+                let record = stored(&state, &terminal).expect("the declaration stands");
+                assert_eq!(record.state, "done", "the detector never wrote over it");
+                assert_eq!(record.name, "me");
+            })
+            .await;
+    }
+
+    /// The efficiency contract at the store: a `working` agent whose detector
+    /// re-emits the same tuple produces ZERO broadcasts after the first. The
+    /// detector's edge filter normally means the drain never even sees these —
+    /// this pins the store-side backstop that makes the invariant hold anyway.
+    #[tokio::test(flavor = "current_thread")]
+    async fn re_emitting_an_unchanged_state_writes_nothing() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let state = SharedState::new();
+                let terminal = WireTerminalId::new(1);
+                let scope = Scope::Terminal(terminal.clone());
+
+                drain(
+                    &state,
+                    &terminal,
+                    vec![AgentDetectEvent::State(report(DetectedState::Working))],
+                )
+                .await;
+                let first = state
+                    .with(|s| s.metadata().get(&scope, TERMINAL_AGENT_KEY))
+                    .expect("written once");
+
+                // Nine more identical emissions.
+                let repeats = (0..9)
+                    .map(|_| AgentDetectEvent::State(report(DetectedState::Working)))
+                    .collect();
+                drain(&state, &terminal, repeats).await;
+
+                let after = state
+                    .with(|s| s.metadata().get(&scope, TERMINAL_AGENT_KEY))
+                    .expect("still there");
+                assert_eq!(
+                    first, after,
+                    "byte-identical: metadata_set dedups the write"
+                );
+            })
+            .await;
+    }
 }

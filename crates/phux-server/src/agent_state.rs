@@ -40,6 +40,17 @@ pub(crate) struct AgentRecordArbiter {
     /// Terminals whose current record the detector authored — so it may
     /// rewrite or retract it, and only it.
     detector_owned: HashSet<WireTerminalId>,
+    /// Terminals whose STORED record carries identity a human authored
+    /// (`name` / `session` / `attention`).
+    ///
+    /// Distinct from [`Self::detector_owned`], and it has to be: after an
+    /// identity-only `SET_METADATA` the detector is deliberately left running
+    /// to fill `state` in, and its very next write re-acquires ownership. So
+    /// "the detector wrote the record currently stored" is TRUE of a record
+    /// whose name the human chose — and using that alone to authorize a
+    /// `DELETE` on retract destroys their label. The detector owns the `state`
+    /// field; it never owns the identity.
+    explicit_identity: HashSet<WireTerminalId>,
 }
 
 impl AgentRecordArbiter {
@@ -52,23 +63,50 @@ impl AgentRecordArbiter {
     /// the agent, the detector tracks its lifecycle.
     ///
     /// Either way the detector no longer owns the record, so it must not
-    /// delete it.
+    /// delete it. A write that supplies `name`, `session` or `attention` also
+    /// marks the record as carrying human-authored identity, which the
+    /// detector must never retract even once it owns the `state` again.
+    ///
+    /// `SET_METADATA` replaces the stored value wholesale, so a later write
+    /// that drops those fields drops the mark with them: this tracks what is
+    /// IN THE STORE, not what was ever written.
     pub(crate) fn note_explicit_set(&mut self, terminal: &WireTerminalId, value: &[u8]) {
         self.detector_owned.remove(terminal);
-        let declares_state = AgentRecordJson::decode(value)
+        let record = AgentRecordJson::decode(value);
+        let declares_state = record
+            .as_ref()
             .is_some_and(|r| !r.state.is_empty() && r.state != "unknown");
         if declares_state {
             self.declared.insert(terminal.clone());
         } else {
             self.declared.remove(terminal);
         }
+        // `kind` is not identity: the detector derives it itself, and a record
+        // holding nothing but a kind is not something a human would miss.
+        let supplies_identity = record
+            .as_ref()
+            .is_some_and(|r| !r.name.is_empty() || r.session.is_some() || r.attention.is_some());
+        if supplies_identity {
+            self.explicit_identity.insert(terminal.clone());
+        } else {
+            self.explicit_identity.remove(terminal);
+        }
     }
 
-    /// Note an explicit `DELETE_METADATA`. The declaration is withdrawn and
-    /// the detector resumes.
+    /// Note an explicit `DELETE_METADATA`. The declaration is withdrawn, the
+    /// human's identity is gone from the store with the rest of the record,
+    /// and the detector resumes full ownership.
     pub(crate) fn note_explicit_delete(&mut self, terminal: &WireTerminalId) {
         self.declared.remove(terminal);
         self.detector_owned.remove(terminal);
+        self.explicit_identity.remove(terminal);
+    }
+
+    /// Whether the stored record carries identity a human authored, in which
+    /// case the detector may withdraw its `state` but must not `DELETE` the
+    /// key.
+    pub(crate) fn has_explicit_identity(&self, terminal: &WireTerminalId) -> bool {
+        self.explicit_identity.contains(terminal)
     }
 
     /// Whether a human has declared this Terminal's state, in which case the
@@ -97,6 +135,7 @@ impl AgentRecordArbiter {
     pub(crate) fn forget(&mut self, terminal: &WireTerminalId) {
         self.declared.remove(terminal);
         self.detector_owned.remove(terminal);
+        self.explicit_identity.remove(terminal);
     }
 }
 
@@ -137,12 +176,32 @@ pub(crate) fn compose(existing: Option<&[u8]>, kind: &str, name: &str, state: &s
     record.encode()
 }
 
+/// Withdraw the detector's `state` from a stored record, preserving every
+/// field a human authored.
+///
+/// The counterpart to [`compose`], for the retract path when the record also
+/// carries human-authored identity (see
+/// [`AgentRecordArbiter::has_explicit_identity`]). `DELETE`ing the key there
+/// would wipe the name, session and attention the human chose — and they are
+/// unrecoverable, because restarting the agent only re-creates the detector's
+/// own view of it. So the detector withdraws the one field it owns, and the
+/// state falls back to the vocabulary's `unknown`: the agent is gone, and a
+/// dead process must not lie about being `working`.
+///
+/// `None` when there is no stored record to rewrite.
+pub(crate) fn withdraw_state(existing: Option<&[u8]>) -> Option<Vec<u8>> {
+    let mut record = AgentRecordJson::decode(existing?)?;
+    record.state.clear();
+    record.state.push_str("unknown");
+    Some(record.encode())
+}
+
 #[cfg(test)]
 #[allow(clippy::expect_used, reason = "tests")]
 mod tests {
     use phux_protocol::ids::TerminalId as WireTerminalId;
 
-    use super::{AgentRecordArbiter, compose};
+    use super::{AgentRecordArbiter, compose, withdraw_state};
     use crate::agent_detect::record::AgentRecordJson;
 
     fn terminal(id: u32) -> WireTerminalId {
@@ -211,6 +270,72 @@ mod tests {
         assert!(!arb.is_declared(&t), "but it may still fill in `state`");
     }
 
+    /// THE label-eater. `phux agent set --name reviewer` is deliberately NOT a
+    /// declaration — the detector keeps running so it can fill `state` in. But
+    /// its very next write re-acquires `detector_owned`, so by the time the
+    /// agent exits, "the detector authored the stored record" is true of a
+    /// record whose NAME the human chose. Authorizing the retract `DELETE` off
+    /// that bit alone destroys their name, session and attention — and
+    /// unrecoverably, since restarting the agent only re-creates the detector's
+    /// own view of it. Ownership of `state` is not ownership of the identity.
+    #[test]
+    fn a_detector_write_over_a_humans_name_does_not_make_the_record_deletable() {
+        let mut arb = AgentRecordArbiter::default();
+        let t = terminal(1);
+        arb.note_explicit_set(
+            &t,
+            br#"{"name":"reviewer","kind":"claude","session":"fleet-7"}"#,
+        );
+        assert!(!arb.is_declared(&t), "identity only: the detector runs on");
+        assert!(arb.has_explicit_identity(&t));
+
+        // The detector fills `state` in, re-acquiring ownership of the record.
+        arb.note_detector_write(&t);
+        assert!(arb.detector_owns(&t), "it did write the record");
+        assert!(
+            arb.has_explicit_identity(&t),
+            "but the human's identity is still in there, and is not ours to delete",
+        );
+    }
+
+    /// A `SET_METADATA` replaces the stored value wholesale, so a later write
+    /// that drops the identity fields drops the mark with them. The set tracks
+    /// what is IN THE STORE, not what was ever written to it.
+    #[test]
+    fn an_explicit_set_without_identity_fields_clears_the_mark() {
+        let mut arb = AgentRecordArbiter::default();
+        let t = terminal(1);
+        arb.note_explicit_set(&t, br#"{"name":"reviewer"}"#);
+        assert!(arb.has_explicit_identity(&t));
+        arb.note_explicit_set(&t, br#"{"name":"","state":"done"}"#);
+        assert!(
+            !arb.has_explicit_identity(&t),
+            "the name is gone from the store; there is nothing left to preserve",
+        );
+    }
+
+    /// A `kind` is not identity: the detector derives it itself, so a record
+    /// holding nothing else is not something a human would miss.
+    #[test]
+    fn a_bare_kind_is_not_human_authored_identity() {
+        let mut arb = AgentRecordArbiter::default();
+        let t = terminal(1);
+        arb.note_explicit_set(&t, br#"{"name":"","kind":"claude"}"#);
+        assert!(!arb.has_explicit_identity(&t));
+    }
+
+    #[test]
+    fn a_delete_drops_the_human_authored_identity_mark() {
+        let mut arb = AgentRecordArbiter::default();
+        let t = terminal(1);
+        arb.note_explicit_set(&t, br#"{"name":"reviewer"}"#);
+        arb.note_explicit_delete(&t);
+        assert!(
+            !arb.has_explicit_identity(&t),
+            "the record is gone from the store, and the identity with it",
+        );
+    }
+
     #[test]
     fn malformed_bytes_declare_nothing() {
         let mut arb = AgentRecordArbiter::default();
@@ -228,6 +353,7 @@ mod tests {
         arb.forget(&t);
         assert!(!arb.is_declared(&t));
         assert!(!arb.detector_owns(&t));
+        assert!(!arb.has_explicit_identity(&t));
     }
 
     #[test]
@@ -297,5 +423,27 @@ mod tests {
         let first = compose(None, "claude", "claude", "working");
         let second = compose(Some(&first), "claude", "claude", "working");
         assert_eq!(first, second, "a steady state must produce identical bytes");
+    }
+
+    // --- withdraw_state ----------------------------------------------------
+
+    /// The retract path for a record a human named. Their fields survive; the
+    /// one field the detector owns is withdrawn — and a dead agent must not
+    /// leave a `working` badge spinning behind it.
+    #[test]
+    fn withdraw_state_keeps_the_human_fields_and_drops_the_detectors() {
+        let stored = br#"{"name":"reviewer","kind":"claude","state":"working","attention":"high","session":"fleet-7"}"#;
+        let bytes = withdraw_state(Some(stored)).expect("a record to rewrite");
+        let got = AgentRecordJson::decode(&bytes).expect("decodes");
+        assert_eq!(got.name, "reviewer", "the human's name survives the agent");
+        assert_eq!(got.session.as_deref(), Some("fleet-7"));
+        assert_eq!(got.attention.as_deref(), Some("high"));
+        assert_eq!(got.state, "unknown", "and the detector's verdict is gone");
+    }
+
+    #[test]
+    fn withdraw_state_has_nothing_to_rewrite_without_a_record() {
+        assert!(withdraw_state(None).is_none());
+        assert!(withdraw_state(Some(b"}{ nonsense")).is_none());
     }
 }

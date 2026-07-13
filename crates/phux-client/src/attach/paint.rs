@@ -309,9 +309,16 @@ pub(super) fn paint_full_frame<W: super::RenderSink>(
 ///   exists to provide — an unchanged strip must cost nothing.
 ///
 /// Order is load-bearing: the sidebar paint moves the host cursor into the
-/// strip, so [`paint_bar_after_pane`] runs last and its
-/// [`end_of_frame_cursor`] puts the cursor back at the focused pane's
-/// authoritative position (ADR-0020 invariant 4 / ADR-0029).
+/// strip, so the bar row is emitted next and this function ALWAYS ends in its
+/// own [`end_of_frame_cursor`], which puts the cursor back at the focused
+/// pane's authoritative position (ADR-0020 invariant 4 / ADR-0029).
+///
+/// The cursor tail is emitted here, NOT delegated to [`paint_bar_after_pane`]:
+/// that function early-returns when there is no [`StatusBarPainter`], and a
+/// status bar is optional (an empty widget list yields `None` — a legitimate
+/// config for someone who runs the sidebar instead of a bar). Delegating would
+/// strand the host cursor wherever the sidebar strip's last cell left it, on
+/// every agent-state transition, for a bar-less config.
 #[allow(
     clippy::too_many_arguments,
     reason = "mirrors paint_full_frame's chrome context minus the pane map's mutability; same arg-list refactor follow-up"
@@ -349,18 +356,16 @@ pub(super) fn paint_chrome_in_place<W: super::RenderSink>(
         let _ = painter.paint(out, sidebar_rect(viewport_dims, res));
     }
     // `bar_row_clobbered = false`: nothing cleared the bar row, so the
-    // painter's cache decides. Ends in `end_of_frame_cursor` — the sole
-    // CUP + DECTCEM + flush authority.
-    paint_bar_after_pane(
-        status_bar,
-        out,
-        viewport_dims,
-        sidebar,
-        session_name,
-        restore,
-        fallback,
-        false,
-    );
+    // painter's cache decides. Skipped entirely when the config has no bar.
+    if let Some(painter) = status_bar {
+        paint_bar_row(painter, out, viewport_dims, sidebar, session_name, false);
+    }
+    // The sole CUP + DECTCEM + flush authority for this paint, reached on EVERY
+    // path — bar or no bar. The sidebar's own emit parks the host cursor at the
+    // end of the last strip row, so an early return here leaves the user's
+    // cursor sitting in the strip until the next pane render (never, for an
+    // idle pane).
+    let _ = end_of_frame_cursor(out, restore, fallback);
 }
 
 /// phux-nz4.5: shared helper invoked after every pane render so the
@@ -411,6 +416,39 @@ pub(super) fn paint_bar_after_pane<W: Write>(
     let Some(painter) = status_bar else {
         return;
     };
+    paint_bar_row(
+        painter,
+        out,
+        viewport_dims,
+        sidebar,
+        session_name,
+        bar_row_clobbered,
+    );
+    // After the bar repaints, the cursor sits on the bar row. Put it
+    // back at the focused pane's known position when we have one;
+    // otherwise fall back to the focused pane's Rect origin (hidden)
+    // so the cursor doesn't remain stranded at the bar's tail —
+    // bottom-right of the host terminal. See phux-9xn.
+    // All cursor placement (restore / fallback / safety-net) and the
+    // load-bearing flush are owned by the one composite authority (ADR-0029).
+    let _ = end_of_frame_cursor(out, restore_cursor, fallback_origin);
+}
+
+/// Emit the status-bar row and NOTHING else — no cursor placement, no flush.
+///
+/// The shared body of [`paint_bar_after_pane`] and [`paint_chrome_in_place`].
+/// It exists so the cursor tail is a decision of the CALLER: the bar is
+/// optional, and a caller whose earlier emits moved the host cursor (the
+/// sidebar strip) must own its `end_of_frame_cursor` whether or not a bar
+/// exists. See [`paint_bar_after_pane`] for `bar_row_clobbered`.
+fn paint_bar_row<W: Write>(
+    painter: &mut StatusBarPainter,
+    out: &mut W,
+    viewport_dims: (u16, u16),
+    sidebar: Option<SidebarReservation>,
+    session_name: &str,
+    bar_row_clobbered: bool,
+) {
     // Force a re-emit only when the bar row was physically overwritten
     // (e.g. the full-frame `ED2`). On the incremental path the pane
     // render stays above the bar row, so the painter's content/dims
@@ -429,14 +467,6 @@ pub(super) fn paint_bar_after_pane<W: Write>(
         // `paint`; this context carries none.
         &make_context(session_name, SystemTime::now()),
     );
-    // After the bar repaints, the cursor sits on the bar row. Put it
-    // back at the focused pane's known position when we have one;
-    // otherwise fall back to the focused pane's Rect origin (hidden)
-    // so the cursor doesn't remain stranded at the bar's tail —
-    // bottom-right of the host terminal. See phux-9xn.
-    // All cursor placement (restore / fallback / safety-net) and the
-    // load-bearing flush are owned by the one composite authority (ADR-0029).
-    let _ = end_of_frame_cursor(out, restore_cursor, fallback_origin);
 }
 
 /// Effective viewport available to pane rendering: outer dims with the
@@ -1196,6 +1226,69 @@ mod tests {
         assert!(
             !s.contains("\x1b[2;1H"),
             "unchanged strip must not re-emit its rows; out = {s:?}"
+        );
+    }
+
+    /// A config with a sidebar and NO status bar (an empty widget list makes
+    /// `build_status_bar_painter` return `None`) must still end the frame with
+    /// a cursor placement. The sidebar's own emit parks the host cursor at the
+    /// end of the last strip row; with the cursor tail delegated to
+    /// `paint_bar_after_pane` — which early-returns without a painter — the
+    /// user's cursor was stranded in the strip's columns on every agent-state
+    /// transition, until the next pane render (never, for an idle pane).
+    #[test]
+    fn paint_chrome_in_place_restores_the_cursor_without_a_status_bar() {
+        let id = TerminalId::local(1);
+        // A real leaf so the focused pane HAS a rect: with a 20-column left
+        // strip its origin is (x = 20, y = 0).
+        let layout = LayoutState {
+            tree: Some(LayoutNode::Leaf(id.clone())),
+            focus: Some(id.clone()),
+        };
+        let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        panes.insert(id.clone(), PaneSlot::new_with_size(60, 24).expect("slot"));
+        let (mut sidebar_painter, res) = build_sidebar();
+
+        let mut out: Vec<u8> = Vec::new();
+        paint_chrome_in_place(
+            &mut out,
+            &layout,
+            &panes,
+            Some(&id),
+            (80, 24),
+            // No status bar: the config runs the sidebar instead.
+            None,
+            Some(res),
+            Some(&mut sidebar_painter),
+            "demo",
+        );
+        let s = String::from_utf8_lossy(&out);
+        // The strip painted (so the cursor really is inside it) ...
+        assert!(
+            s.contains("\x1b[2;1H"),
+            "sidebar strip rows must be emitted; out = {s:?}"
+        );
+        // ... and the frame still ends in the one composite cursor authority.
+        assert!(
+            s.contains("\x1b[?25h") || s.contains("\x1b[?25l"),
+            "bar-less chrome paint must still end with an explicit cursor \
+             visibility; out = {s:?}"
+        );
+        // The tail is LAST: nothing may be emitted after the cursor is placed.
+        let tail = s
+            .rfind("\x1b[?25")
+            .expect("cursor visibility present in the tail");
+        assert_eq!(
+            &s[tail..],
+            "\x1b[?25l",
+            "the cursor tail must be the final emit of the frame; out = {s:?}"
+        );
+        // The pane never rendered, so the fallback parks (hidden) at the
+        // focused pane's rect origin — column 21, right of the 20-col strip.
+        assert!(
+            s.contains("\x1b[1;21H\x1b[?25l"),
+            "cursor must park at the focused pane's origin, not in the strip; \
+             out = {s:?}"
         );
     }
 

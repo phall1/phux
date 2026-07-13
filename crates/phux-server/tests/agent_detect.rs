@@ -256,3 +256,166 @@ fn a_plain_shell_pane_never_gets_an_agent_record() {
         let _ = server_handle.await;
     });
 }
+
+/// ADR-0046 §E promises that `DELETE`ing the record hands it back: "the
+/// detector makes no further writes to that Terminal **until the record is
+/// `DELETE`d**". It did not.
+///
+/// The detector's edge filter is a model of its OWN emissions, so after the
+/// `DELETE` it still held the tuple it last derived. The next tick re-derived
+/// the same tuple, the filter suppressed it, and nothing was written — so the
+/// pane showed NO agent at all until the agent's state next changed. For an
+/// agent sitting `blocked` on a human (this one), that is never: it is waiting
+/// for the answer, so it emits nothing, so the grid never changes, so no
+/// transition ever comes. The pane is invisible in the sidebar indefinitely,
+/// which is the exact opposite of what the delete was supposed to do.
+///
+/// Reachable from the shipped CLI: `phux agent clear`.
+#[test]
+fn deleting_the_record_hands_it_back_to_the_detector() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let agent = write_fake_agent(tmp.path());
+
+        let cmd = CommandBuilder::new(&agent);
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(&mut stream, &attach_by_name("demo")).await;
+        let (_type_byte, attached) = recv_typed(&mut stream).await;
+        let FrameKind::Attached { snapshot, .. } = attached else {
+            panic!("expected ATTACHED");
+        };
+        let terminal = snapshot.focused_pane.clone();
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SubscribeMetadata {
+                scope: Scope::Terminal(terminal.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+            },
+        )
+        .await;
+
+        let first = collect_agent_record(&mut stream, &terminal, DETECT_DEADLINE).await;
+        assert_eq!(
+            first
+                .as_ref()
+                .and_then(|r| r.get("state"))
+                .and_then(serde_json::Value::as_str),
+            Some("blocked"),
+            "precondition: the detector published `blocked`",
+        );
+
+        // `phux agent clear`. The row is gone; the screen is unchanged and the
+        // agent — being blocked on a human — will never emit another byte.
+        send_frame(
+            &mut stream,
+            &FrameKind::DeleteMetadata {
+                request_id: 7,
+                scope: Scope::Terminal(terminal.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+            },
+        )
+        .await;
+
+        // The detector must resume: the record comes back, WITHOUT the agent
+        // having to change state. (`collect_agent_record` skips the delete's
+        // tombstone, which carries no value, so this is the republish.)
+        let again = collect_agent_record(&mut stream, &terminal, DETECT_DEADLINE).await;
+        let again = again.expect(
+            "after a DELETE the detector must resume ownership and rewrite the record; \
+             an idle or blocked agent never changes state again, so a detector whose edge \
+             filter still models the pre-delete store leaves the pane blank forever",
+        );
+        assert_eq!(
+            again.get("state").and_then(serde_json::Value::as_str),
+            Some("blocked"),
+            "and it republishes the truth it can still see on the screen: {again}",
+        );
+
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+    });
+}
+
+/// The documented "useful half" of the feature (ADR-0046 §8): a human supplies
+/// the identity, the detector fills the lifecycle in around it. An
+/// identity-only `SET_METADATA` is deliberately NOT a declaration, so the
+/// detector keeps running — but its edge filter still held the state it had
+/// already derived, so it wrote nothing, and `state` stayed as the human left
+/// it (absent => `unknown`) forever. The half of the feature that is supposed
+/// to work did not.
+#[test]
+fn an_identity_only_set_gets_its_state_filled_in_by_the_detector() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let agent = write_fake_agent(tmp.path());
+
+        let cmd = CommandBuilder::new(&agent);
+        let (shutdown_tx, server_handle) =
+            spawn_server_with_seed_cmd(socket_path.clone(), "demo", cmd);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        send_frame(&mut stream, &attach_by_name("demo")).await;
+        let (_type_byte, attached) = recv_typed(&mut stream).await;
+        let FrameKind::Attached { snapshot, .. } = attached else {
+            panic!("expected ATTACHED");
+        };
+        let terminal = snapshot.focused_pane.clone();
+
+        send_frame(
+            &mut stream,
+            &FrameKind::SubscribeMetadata {
+                scope: Scope::Terminal(terminal.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+            },
+        )
+        .await;
+
+        let first = collect_agent_record(&mut stream, &terminal, DETECT_DEADLINE).await;
+        assert!(first.is_some(), "precondition: the detector published");
+
+        // `phux agent set --name reviewer --session fleet-7` — no `--state`.
+        send_frame(
+            &mut stream,
+            &FrameKind::SetMetadata {
+                request_id: 9,
+                scope: Scope::Terminal(terminal.clone()),
+                key: TERMINAL_AGENT_KEY.to_owned(),
+                value: br#"{"name":"reviewer","session":"fleet-7"}"#.to_vec(),
+            },
+        )
+        .await;
+
+        // The detector must fill `state` in around them, without ever having to
+        // wait for the agent to change state.
+        let end = tokio::time::Instant::now() + DETECT_DEADLINE;
+        let filled = loop {
+            let left = end.saturating_duration_since(tokio::time::Instant::now());
+            assert!(!left.is_zero(), "the detector never filled `state` in");
+            let Some(record) = collect_agent_record(&mut stream, &terminal, left).await else {
+                panic!("the detector never filled `state` in");
+            };
+            if record.get("state").and_then(serde_json::Value::as_str) == Some("blocked") {
+                break record;
+            }
+        };
+        assert_eq!(
+            filled.get("name").and_then(serde_json::Value::as_str),
+            Some("reviewer"),
+            "and the human's name is preserved field-for-field: {filled}",
+        );
+        assert_eq!(
+            filled.get("session").and_then(serde_json::Value::as_str),
+            Some("fleet-7"),
+            "as is their label: {filled}",
+        );
+
+        let _ = shutdown_tx.send(());
+        let _ = server_handle.await;
+    });
+}

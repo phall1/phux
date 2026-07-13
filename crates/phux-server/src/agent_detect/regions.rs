@@ -70,6 +70,14 @@ const RULE_CHARS: &str = "─━═╌┄┈—-_╭╮╯╰┌┐└┘├┤�
 /// Characters that can open a box-drawn line's left border.
 const BOX_OPEN_CHARS: [char; 8] = ['│', '╭', '╰', '┌', '└', '┃', '┏', '┗'];
 
+/// The subset of [`BOX_OPEN_CHARS`] that opens a box's top or bottom BORDER
+/// row, as opposed to a body row (which opens with a vertical).
+///
+/// A border row is chrome, never text — even when the agent draws a label into
+/// it (`╭─ Input ─╮`, the ratatui `Block::title` default). Its label must not
+/// reach a predicate.
+const BOX_CORNER_CHARS: [char; 6] = ['╭', '╰', '┌', '└', '┏', '┗'];
+
 /// Minimum width for a line to count as a horizontal rule.
 const RULE_MIN_WIDTH: usize = 8;
 
@@ -90,12 +98,18 @@ fn is_box_line(line: &str) -> bool {
 
 /// Strip a box line's leading and trailing border glyphs.
 ///
-/// `│ > hello   │` becomes `> hello`. A pure border row (`╭────╮`) becomes
-/// the empty string: it is rule, not text, and letting its dashes through
-/// would put characters into the region that no predicate should ever be
-/// able to see.
+/// `│ > hello   │` becomes `> hello`. A border row (`╭────╮`, and equally the
+/// labelled `╭─ Input ─╮`) becomes the empty string: it is rule, not text, and
+/// letting its dashes — or its label — through would put characters into the
+/// region that no predicate should ever be able to see.
 fn strip_borders(line: &str) -> &str {
     let s = line.trim();
+    // A corner opens a border row. Decided on the OPENING glyph, not on the
+    // row's contents: a labelled border is not all rule characters, so the
+    // all-rule-chars test below would let `─ Input ─` straight through.
+    if s.starts_with(|c| BOX_CORNER_CHARS.contains(&c)) {
+        return "";
+    }
     let s = s.strip_prefix(|c| BOX_OPEN_CHARS.contains(&c)).unwrap_or(s);
     let s = s
         .strip_suffix(|c: char| {
@@ -191,24 +205,52 @@ fn prompt_box(lines: &[String]) -> Vec<&str> {
     }
     let Some(end) = end else { return Vec::new() };
 
-    // A rule closes a rule-delimited box: the body runs up to the next rule
-    // above it. Without an opening fence there is no box — a lone rule is a
-    // separator (the permission dialog's), not an input box.
-    if is_rule(&lines[end]) {
-        let Some(open) = lines[..end].iter().rposition(|l| is_rule(l)) else {
-            return Vec::new();
-        };
-        return lines[open + 1..end]
+    // A BOX IS A BOX BEFORE IT IS A RULE. This test order is the whole
+    // correctness of the extractor, not a stylistic choice.
+    //
+    // `RULE_CHARS` contains the corner and vertical glyphs, so a closed box's
+    // bottom border (`╰──────────────────╯`) is made entirely of rule
+    // characters and satisfies `is_rule` too, at any width >= RULE_MIN_WIDTH.
+    // Asking `is_rule` first therefore routed every real-width box into the
+    // rule-delimited branch, whose upward search is not bounded to the box: it
+    // would keep climbing past the box's own top border and fence the region
+    // against a markdown rule the agent had printed into its TRANSCRIPT. The
+    // "live prompt box" then contained transcript lines, and a blocked-asserting
+    // prompt-box rule would fire on a question the agent merely PRINTED — the
+    // false `blocked` that ADR-0046 §D forbids and that this whole module
+    // exists to prevent. A bare fence (`─────`) is not opened by a box glyph,
+    // so it still reaches the branch below.
+    if is_box_line(&lines[end]) {
+        let mut start = end;
+        while start > 0 && is_box_line(&lines[start - 1]) {
+            start -= 1;
+        }
+        return lines[start..=end]
             .iter()
             .map(|l| strip_borders(l))
             .collect();
     }
 
-    let mut start = end;
-    while start > 0 && is_box_line(&lines[start - 1]) {
-        start -= 1;
+    // Rule-delimited: `lines[end]` is a bare horizontal fence, and the body
+    // runs up to the opening fence. The search stops at the first box line it
+    // meets rather than climbing over it, for the same reason: a box border is
+    // a box, not a fence, and fencing against one would splice the rows
+    // between a transcript box and the live input into the region. Without an
+    // opening fence there is no box at all — a lone rule is a separator (the
+    // permission dialog's), not an input box. No box, no region, no match:
+    // fail safe.
+    let mut open = None;
+    for idx in (0..end).rev() {
+        if is_box_line(&lines[idx]) {
+            return Vec::new();
+        }
+        if is_rule(&lines[idx]) {
+            open = Some(idx);
+            break;
+        }
     }
-    lines[start..=end]
+    let Some(open) = open else { return Vec::new() };
+    lines[open + 1..end]
         .iter()
         .map(|l| strip_borders(l))
         .collect()
@@ -316,17 +358,94 @@ mod tests {
         assert!(extract(Region::PromptBox, &screen("", &buf)).is_empty());
     }
 
+    /// Boxes here are drawn at a REALISTIC width (>= `RULE_MIN_WIDTH`), because
+    /// a narrow box is a different code path: a box border is made entirely of
+    /// rule characters, so at 8 columns or more it satisfies `is_rule` as well
+    /// as `is_box_line`. A 5-char box exercises a branch no production screen
+    /// ever reaches.
     #[test]
     fn prompt_box_strips_borders_and_skips_the_hint_row() {
         let buf = lines(&[
             "transcript line",
-            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
-            "\u{2502} > hello  \u{2502}",
-            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} > hello           \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
             "  ? for shortcuts",
         ]);
         let got = extract(Region::PromptBox, &screen("", &buf));
         assert_eq!(got, vec!["", "> hello", ""]);
+    }
+
+    /// THE false-`blocked` path, and the reason `is_box_line` is tested before
+    /// `is_rule`.
+    ///
+    /// A closed box's bottom border is made entirely of `RULE_CHARS`, so
+    /// `is_rule` accepts it. Classifying it as a horizontal fence sent the
+    /// extractor searching UPWARD past the box for an "opening fence" — and a
+    /// markdown rule the agent had printed into its own transcript served. The
+    /// "live prompt box" then contained transcript lines, so a blocked-asserting
+    /// prompt-box rule (a question stem plus numbered options — exactly the
+    /// shape of the shipped permission-dialog rule) would fire on a question the
+    /// agent merely PRINTED. A permanently-red pane: the one failure mode
+    /// ADR-0046 §D forbids, arrived at through the very region the region model
+    /// exists to protect.
+    ///
+    /// A TITLED top border (`╭─ Input ─╮`, the ratatui default, and what codex /
+    /// aider / gemini-cli draw) is what makes it bite: an untitled one is itself
+    /// `is_rule`, so the upward search stops on it by luck.
+    #[test]
+    fn prompt_box_reads_a_titled_box_as_a_box_not_a_rule_fence() {
+        let buf = lines(&[
+            "assistant text",
+            // A markdown horizontal rule the agent rendered into its TRANSCRIPT.
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            // Transcript text the agent merely PRINTED. Not a live prompt.
+            "  Do you want to proceed?",
+            "  \u{276f} 1. Yes",
+            "    2. No",
+            "  more prose",
+            // The live input box, with a labelled top border.
+            "\u{256d}\u{2500} Input \u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} \u{276f}                \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "  ? for shortcuts",
+        ]);
+        let got = extract(Region::PromptBox, &screen("", &buf));
+        assert_eq!(
+            got,
+            vec!["", "\u{276f}", ""],
+            "the region is the live box body and nothing else",
+        );
+        assert!(
+            !got.iter()
+                .any(|l| l.contains("proceed") || l.contains("Yes")),
+            "transcript text must never appear inside the live prompt box: {got:?}",
+        );
+        assert!(
+            !got.iter().any(|l| l.contains("Input")),
+            "and neither must the border's own label: {got:?}",
+        );
+    }
+
+    /// The rule-delimited branch must not fence itself against a BOX border
+    /// either: a transcript box sitting above Claude's rule-fenced input box
+    /// would otherwise splice the rows between them into the region.
+    #[test]
+    fn prompt_box_does_not_fence_a_rule_delimited_body_against_a_transcript_box() {
+        let buf = lines(&[
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} a rendered diff  \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "  Do you want to proceed?",
+            "\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}",
+            "\u{276f} typing here",
+        ]);
+        // The bottom-most fence is a LONE rule (no opening fence above it that
+        // is not a box), so there is no rule-delimited box at all.
+        assert!(
+            extract(Region::PromptBox, &screen("", &buf)).is_empty(),
+            "no box, no region — fail safe rather than swallow the transcript",
+        );
     }
 
     #[test]
@@ -341,9 +460,9 @@ mod tests {
         // could plausibly be, so the box in the transcript is NOT the
         // prompt box.
         let buf = lines(&[
-            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
-            "\u{2502} old diff \u{2502}",
-            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} old diff          \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
             "a",
             "b",
             "c",
@@ -356,13 +475,13 @@ mod tests {
     #[test]
     fn prompt_box_picks_the_bottom_most_box_not_a_transcript_box() {
         let buf = lines(&[
-            "\u{256d}\u{2500}\u{2500}\u{2500}\u{256e}",
-            "\u{2502} old \u{2502}",
-            "\u{2570}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} old               \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
             "prose in between",
-            "\u{256d}\u{2500}\u{2500}\u{2500}\u{256e}",
-            "\u{2502} live \u{2502}",
-            "\u{2570}\u{2500}\u{2500}\u{2500}\u{256f}",
+            "\u{256d}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256e}",
+            "\u{2502} live              \u{2502}",
+            "\u{2570}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{2500}\u{256f}",
         ]);
         let got = extract(Region::PromptBox, &screen("", &buf));
         assert_eq!(got, vec!["", "live", ""]);
