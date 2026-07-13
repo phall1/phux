@@ -2058,12 +2058,12 @@ async fn main_loop<W: super::RenderSink>(
                     continue;
                 }
                 let events = parser.feed(&stdin_buf[..n]);
-                // phux-x2hm: capture the PRE-dispatch zoom view's rects so a
-                // zoom toggle in this batch can diff against them and resize
-                // each changed pane's PTY (the reflow handshake below). Taken
-                // before `dispatch_input_events` mutates `zoomed`.
+                // Capture the pre-dispatch view so zoom and sidebar toggles can
+                // diff against it and resize each changed pane's PTY. Taken
+                // before dispatch mutates either piece of view geometry.
                 let prev_zoomed = zoomed.clone();
-                let prev_zoom_rects = zoom_rects(
+                let prev_sidebar = sidebar;
+                let prev_view_rects = view_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
                     content_rect(
@@ -2134,16 +2134,15 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(target) = switch_request.take() {
                     return Ok(LoopExit::SwitchTo(target));
                 }
-                // phux-x2hm: the zoom state flipped this batch — emit a
-                // TERMINAL_RESIZE per pane whose dims changed (the zoomed pane
-                // grows to fill the window; on un-zoom every pane shrinks back).
-                // Sent BEFORE the repaint, mirroring the close/SIGWINCH reflow.
-                if zoomed != prev_zoomed {
-                    emit_zoom_reflow(
+                // Zoom and sidebar toggles both change pane geometry. Resize
+                // every affected PTY before repainting so applications reflow
+                // to the same rectangle the client is about to render.
+                if zoomed != prev_zoomed || sidebar != prev_sidebar {
+                    emit_view_reflow(
                         conn,
                         &workspace,
                         zoomed.as_ref(),
-                        &prev_zoom_rects,
+                        &prev_view_rects,
                         content_rect(
                         viewport_dims,
                         status_bar.as_ref().map(StatusBarPainter::position),
@@ -2813,10 +2812,12 @@ async fn main_loop<W: super::RenderSink>(
             () = flush_sleep => {
                 let events = parser.flush();
                 // phux-x2hm: a flushed bare-ESC chord can also resolve to
-                // `toggle-zoom`; capture the pre-toggle zoom rects for the
-                // reflow handshake, exactly as the stdin arm does.
+                // A flushed event may complete `toggle-zoom` or
+                // `toggle-sidebar`; capture the old view for the same reflow
+                // handshake as the stdin arm.
                 let prev_zoomed = zoomed.clone();
-                let prev_zoom_rects = zoom_rects(
+                let prev_sidebar = sidebar;
+                let prev_view_rects = view_rects(
                     &workspace,
                     prev_zoomed.as_ref(),
                     content_rect(
@@ -2884,12 +2885,12 @@ async fn main_loop<W: super::RenderSink>(
                 if let Some(target) = switch_request.take() {
                     return Ok(LoopExit::SwitchTo(target));
                 }
-                if zoomed != prev_zoomed {
-                    emit_zoom_reflow(
+                if zoomed != prev_zoomed || sidebar != prev_sidebar {
+                    emit_view_reflow(
                         conn,
                         &workspace,
                         zoomed.as_ref(),
-                        &prev_zoom_rects,
+                        &prev_view_rects,
                         content_rect(
                         viewport_dims,
                         status_bar.as_ref().map(StatusBarPainter::position),
@@ -3748,10 +3749,10 @@ async fn sync_agent_meta_subscriptions(
     Ok(())
 }
 
-/// phux-x2hm: the per-leaf rect map of the **zoom-honoring** view, used as the
+/// The per-leaf rect map of the zoom- and sidebar-honoring view, used as the
 /// pre-toggle snapshot for the reflow handshake. Returns an empty map when
 /// there is no active window or its tree is unseeded (single-pane bootstrap).
-fn zoom_rects(
+fn view_rects(
     workspace: &Workspace,
     zoomed: Option<&TerminalId>,
     content: crate::layout::Rect,
@@ -3767,13 +3768,11 @@ fn zoom_rects(
         .unwrap_or_default()
 }
 
-/// phux-x2hm: on a pane-zoom toggle, emit one `TERMINAL_RESIZE` per pane whose
-/// dimensions changed between the pre-toggle view (`prev_rects`) and the new
-/// `zoomed` view. Zooming grows the focused pane to the whole window; un-zooming
-/// shrinks every pane back to its tile. Reuses the close/SIGWINCH reflow path so
-/// each PTY's winsize (TIOCSWINSZ) tracks the on-screen geometry. Sent before
-/// the repaint, mirroring the other reflow sites.
-async fn emit_zoom_reflow(
+/// On a pane-zoom or sidebar toggle, emit one `TERMINAL_RESIZE` per pane whose
+/// dimensions changed between the pre-toggle view and the new content view.
+/// Reuses the close/SIGWINCH reflow path so each PTY's winsize tracks the
+/// on-screen geometry. Sent before repainting, mirroring the other reflow sites.
+async fn emit_view_reflow(
     conn: &mut Connection,
     workspace: &Workspace,
     zoomed: Option<&TerminalId>,
@@ -4428,6 +4427,36 @@ mod tests {
     use tokio::net::UnixStream;
 
     static TERMINAL_RESET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn sidebar_reservation_changes_view_rects_for_pty_reflow() {
+        let id = TerminalId::local(1);
+        let workspace = Workspace::single(id.clone());
+        let viewport = (100, 30);
+        let full = view_rects(
+            &workspace,
+            None,
+            content_rect(viewport, None, None),
+            viewport,
+        );
+        let inset = view_rects(
+            &workspace,
+            None,
+            content_rect(
+                viewport,
+                None,
+                Some(SidebarReservation {
+                    edge: SidebarEdge::Left,
+                    width: 20,
+                }),
+            ),
+            viewport,
+        );
+
+        assert_eq!(full.get(&id).expect("full rect").w, 100);
+        assert_eq!(inset.get(&id).expect("inset rect").w, 80);
+        assert_eq!(inset.get(&id).expect("inset rect").x, 20);
+    }
 
     #[test]
     fn pane_slot_initializes_nonzero_cell_pixels_for_live_kitty_render() {

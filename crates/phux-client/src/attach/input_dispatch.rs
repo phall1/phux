@@ -75,8 +75,8 @@ pub(super) struct DispatchCtx<'a> {
     pub theme: &'a Theme,
     /// phux-4li.20: the server's session graph, cached from the latest
     /// `ATTACHED` snapshot. The `session-picker` action builds its rows
-    /// from this list. Empty until the first snapshot lands (picker then
-    /// bells).
+    /// from this list. Empty until the first snapshot lands (the picker then
+    /// still offers its new-session row).
     pub sessions: &'a [phux_protocol::wire::info::SessionInfo],
     /// phux-foz.8: peer sessions' persisted L3 workspaces, fetched by the
     /// driver right after ATTACH (one `GET_METADATA` per peer on the
@@ -98,15 +98,14 @@ pub(super) struct DispatchCtx<'a> {
     /// no asked flag or cwd/branch).
     pub foreign_agents: &'a HashMap<TerminalId, crate::agent_meta::AgentRecord>,
     /// phux-4li.20: id of the session this client is attached to. The
-    /// picker marks this row and excludes it from selection (switching
-    /// to the current session is a no-op). `None` before the first
+    /// picker places this row first and marks it `current`; selecting it
+    /// dismisses the picker without reattaching. `None` before the first
     /// snapshot.
     pub focused_session: Option<phux_protocol::ids::SessionId>,
     /// phux-eb0: the name of the session this client is attached to,
     /// resolved from the latest ATTACHED snapshot. A `switch-session`
-    /// targeting this name is a no-op (guarded in
-    /// [`apply_action_effects`]) even though the picker already excludes
-    /// the current row. Empty before the first snapshot.
+    /// targeting this name without a window/pane target is a silent no-op
+    /// (guarded in [`apply_action_effects`]). Empty before the first snapshot.
     ///
     /// Mutable so the `rename-session` action can optimistically update it
     /// the moment the user commits a rename: the client sends the
@@ -1260,20 +1259,19 @@ async fn apply_action_effects<W: super::RenderSink>(
     // it after this dispatch batch and returns a `SwitchTo` exit so the
     // outer loop tears down the current session and re-attaches.
     //
-    // Switching to the CURRENT session is a no-op (the picker excludes it,
-    // but guard here too in case `switch-session { name }` is reached via
-    // the command palette or a config-bound chord naming it); it bells so
-    // the user gets feedback. `new-session` is never a no-op — naming an
-    // existing session just attaches to it.
+    // Switching to the CURRENT session without a window/pane target is a
+    // silent no-op. The session picker includes that row for orientation;
+    // committing it has already dismissed the overlay, so no reattach is
+    // needed. `new-session` is never a no-op — naming an existing session
+    // just attaches to it.
     if let Some(target) = effects.reattach {
         match target {
-            ReattachTarget::Existing { name, .. } if &name == ctx.session_name => {
-                // A `window` arg naming the CURRENT session is not a
-                // switch; the picker never emits it (current-session rows
-                // commit `select-window` directly), so bell rather than
-                // grow a second local window-select path here.
+            ReattachTarget::Existing {
+                name,
+                window: None,
+                pane: None,
+            } if &name == ctx.session_name => {
                 tracing::debug!(target_session = %name, "switch-session to current session; no-op");
-                let _ = actions::write_bell(out);
             }
             ReattachTarget::Existing { name, window, pane } => {
                 tracing::info!(target_session = %name, target_window = ?window, target_pane = ?pane, "switch-session requested");
@@ -1428,7 +1426,8 @@ struct ActionEffects {
     /// hands it up via `DispatchCtx::switch_request`; the driver's
     /// `main_loop` returns a `SwitchTo` exit and the outer loop detaches
     /// and re-attaches on the same connection. An `Existing` request
-    /// matching the current session is a no-op (bells).
+    /// matching the current session without a window/pane target is a silent
+    /// no-op (the session picker uses that row to dismiss in place).
     reattach: Option<ReattachTarget>,
     /// rename-session: a committed rename. Carries the new name. The async
     /// caller ([`apply_action_effects`]) sends a `RENAME_SESSION` command
@@ -1974,17 +1973,12 @@ fn run_action(
                 .push(Box::new(SelectList::new("windows", items, ctx.theme)));
         }
         "session-picker" => {
-            // phux-4li.20: push the `<leader> a` session picker. Each row
-            // is a peer session (name, window/client count as the
-            // secondary) that commits `switch-session { name }` — the
-            // same single dispatch path. The session this client is
-            // attached to is excluded (switching to it is a no-op). With
-            // no peer sessions it bells.
-            // Peer sessions (current excluded) plus a trailing
-            // "+ New session" row, so a session can always be created from
-            // here. Each session row commits `switch-session { name }`; the
-            // new-session row opens the name prompt. Always opens — even
-            // with no peers you can still create one.
+            // phux-4li.20: push the session picker. The current session is
+            // first and marked in its secondary text so the list is a full
+            // inventory and opens with useful orientation. Committing that
+            // row dismisses the picker as a silent no-op; peer rows commit
+            // `switch-session { name }`. A trailing "+ New session" row
+            // keeps creation reachable even when no sessions are cached.
             let mut items = session_picker_items(ctx.sessions, ctx.focused_session);
             items.push(new_session_item());
             ctx.overlays
@@ -2525,33 +2519,40 @@ fn foreign_session_window_rows(session_name: &str, workspace: &Workspace) -> Vec
         .collect()
 }
 
-/// Build the `<leader> a` session picker's rows from the client's cached
+/// Build the session picker's rows from the client's cached
 /// session graph (phux-4li.20).
 ///
-/// One row per session **other than** `focused` (the session this client
-/// is attached to) — switching to the current session is a no-op, so it
-/// is excluded rather than disabled. Each row's label is the session
-/// name with a window/attached-client summary as the dimmed secondary;
-/// choosing it commits `switch-session { name }`, which `run_action`
-/// routes through the single dispatch path.
+/// One row per session, with `focused` first and marked `current`. Each row's
+/// label is the session name with a window/attached-client summary as the
+/// dimmed secondary. Choosing it commits `switch-session { name }`; the
+/// current row dismisses as a silent no-op and peer rows reattach through the
+/// same dispatch path.
 fn session_picker_items(
     sessions: &[phux_protocol::wire::info::SessionInfo],
     focused: Option<phux_protocol::ids::SessionId>,
 ) -> Vec<SelectItem> {
-    sessions
-        .iter()
-        .filter(|s| Some(s.id) != focused)
+    let mut ordered: Vec<_> = sessions.iter().collect();
+    ordered.sort_by(|a, b| {
+        let a_current = Some(a.id) == focused;
+        let b_current = Some(b.id) == focused;
+        b_current.cmp(&a_current).then_with(|| a.name.cmp(&b.name))
+    });
+
+    ordered
+        .into_iter()
         .map(|s| {
             let windows = if s.window_count == 1 {
                 "1 window".to_owned()
             } else {
                 format!("{} windows", s.window_count)
             };
-            let secondary = if s.attached_client_count == 0 {
-                windows
-            } else {
-                format!("{windows}, {} attached", s.attached_client_count)
-            };
+            let mut details = vec![windows];
+            if Some(s.id) == focused {
+                details.push("current".to_owned());
+            }
+            if s.attached_client_count != 0 {
+                details.push(format!("{} attached", s.attached_client_count));
+            }
             let mut args = std::collections::BTreeMap::new();
             args.insert("name".to_owned(), toml::Value::String(s.name.clone()));
             SelectItem::new(
@@ -2561,7 +2562,7 @@ fn session_picker_items(
                     args,
                 },
             )
-            .secondary(secondary)
+            .secondary(details.join(", "))
         })
         .collect()
 }
@@ -4249,20 +4250,21 @@ mod tests {
     }
 
     #[test]
-    fn session_picker_items_exclude_focused_and_commit_switch_session() {
+    fn session_picker_items_include_focused_first_and_commit_switch_session() {
         let sessions = [sinfo(1, "work"), sinfo(2, "scratch"), sinfo(3, "logs")];
         let items = session_picker_items(&sessions, Some(phux_protocol::ids::SessionId::new(1)));
-        // Focused session ("work") is excluded; the two peers remain.
-        assert_eq!(items.len(), 2);
-        assert_eq!(items[0].label, "scratch");
+        assert_eq!(items.len(), 3);
+        assert_eq!(items[0].label, "work");
+        assert_eq!(items[0].secondary.as_deref(), Some("1 window, current"));
         assert_eq!(items[1].label, "logs");
+        assert_eq!(items[2].label, "scratch");
         // Each row commits switch-session with the session name.
         assert_eq!(items[0].action.action, "switch-session");
         assert_eq!(
             items[0].action.args.get("name"),
-            Some(&toml::Value::String("scratch".to_owned()))
+            Some(&toml::Value::String("work".to_owned()))
         );
-        assert_eq!(items[0].secondary.as_deref(), Some("1 window"));
+        assert_eq!(items[1].secondary.as_deref(), Some("1 window"));
     }
 
     #[test]
@@ -4318,7 +4320,11 @@ mod tests {
         let mut workspace = Workspace::single(tid(1));
         let sessions = [sinfo(1, "work"), sinfo(2, "scratch")];
         let items = session_picker_items(&sessions, Some(phux_protocol::ids::SessionId::new(1)));
-        let effects = run(&items[0].action, &mut workspace);
+        let scratch = items
+            .iter()
+            .find(|item| item.label == "scratch")
+            .expect("peer session row");
+        let effects = run(&scratch.action, &mut workspace);
         assert_eq!(
             effects.reattach,
             Some(ReattachTarget::Existing {

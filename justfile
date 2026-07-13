@@ -23,11 +23,28 @@ build:
 build-release:
     cargo build --workspace --release
 
-# Rebuild the phux binary and hot-swap the running server in place,
-# preserving live sessions (ADR-0032).
+# Build the current checkout and atomically install its developer binaries.
+# The binaries live in Cargo's bin dir, matching normal source installs. Keep
+# that directory ahead of Homebrew in PATH so there is one developer binary.
+install-dev:
+    #!/usr/bin/env bash
+    set -euo pipefail
+    cargo build -p phux -p phux-mcp
+    install_dir="${CARGO_HOME:-$HOME/.cargo}/bin"
+    mkdir -p "$install_dir"
+    install -m 755 target/debug/phux "$install_dir/.phux.new"
+    install -m 755 target/debug/phux-mcp "$install_dir/.phux-mcp.new"
+    mv -f "$install_dir/.phux.new" "$install_dir/phux"
+    mv -f "$install_dir/.phux-mcp.new" "$install_dir/phux-mcp"
+    echo "installed development binaries to $install_dir"
+    echo "phux -> $install_dir/phux"
+
+# Install the rebuilt developer binaries, then hot-swap a server that was
+# already started from the source-install path, preserving sessions (ADR-0032).
+# A server originally started by Homebrew needs a one-time restart first.
 rebuild:
-    cargo build -p phux
-    phux upgrade
+    just install-dev
+    "${CARGO_HOME:-$HOME/.cargo}/bin/phux" upgrade
 
 # Format every Rust file in place.
 fmt:
