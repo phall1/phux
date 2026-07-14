@@ -111,6 +111,12 @@ If your change conflicts with these, open a [Discussion] before a PR.
 - **One commit per task.** Squash WIP commits before merge. The
   commit message tells the story of the change, not the keystrokes
   that produced it.
+- **The squashed subject is what release-please reads.** Releases are cut
+  from the conventional-commit log on `main` (see
+  [`docs/RELEASING.md`](./docs/RELEASING.md)), so the *squashed* subject —
+  not the WIP messages underneath it — decides the version bump and the
+  changelog entry. A `feat:` bumps the minor, a `fix:` the patch, and a
+  non-conventional subject is silently omitted from both.
 - **Never `--no-verify`.** Pre-commit hooks are load-bearing. If a
   hook fails, fix the root cause.
 

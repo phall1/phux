@@ -45,7 +45,7 @@ require_fixed README.md "macOS arm64, Linux x86_64, and Linux arm64"
 require_fixed README.md "first portable public release"
 forbid_fixed README.md "macOS x86_64"
 
-require_fixed docs/INSTALL.md "Use Homebrew on supported Homebrew platforms"
+require_fixed docs/INSTALL.md "Homebrew is the recommended install on supported macOS and Linux"
 require_fixed docs/INSTALL.md "Supported install channels"
 require_fixed docs/INSTALL.md "Homebrew"
 require_fixed docs/INSTALL.md "Curl installer"
@@ -53,13 +53,13 @@ require_fixed docs/INSTALL.md "Release tarball"
 require_fixed docs/INSTALL.md "From source"
 require_fixed docs/INSTALL.md "nix develop -c cargo install --locked --path crates/phux"
 require_fixed docs/INSTALL.md "nix develop -c cargo install --locked --path crates/phux-mcp"
-require_fixed docs/INSTALL.md "portable public release"
-require_fixed docs/INSTALL.md "phux-mcp is bundled"
+require_fixed docs/INSTALL.md 'seeded `v0.0.1` Linux tarball outside Nix environments'
+require_fixed docs/INSTALL.md 'Every portable tarball and installer path includes `phux-mcp`'
 require_fixed docs/INSTALL.md "cargo install phux is unsupported"
 require_fixed docs/INSTALL.md "Windows is not supported"
 require_fixed docs/INSTALL.md "First run: persistent session + agent loop"
-require_fixed docs/INSTALL.md "verifies the release .sha256 sidecar before unpacking"
-require_fixed docs/INSTALL.md "| macOS (x86_64) | Source: yes. No official release artifact. |"
+require_fixed docs/INSTALL.md 'verifies the release `.sha256` sidecar before unpacking'
+require_fixed docs/INSTALL.md "| macOS (x86_64) | Not supported. No official release artifact; Homebrew and the curl installer both refuse. Source: yes. |"
 require_fixed docs/INSTALL.md "| Linux aarch64 | Curl/tarball: yes. Homebrew: yes where Linuxbrew supports the host. Source: yes. |"
 
 require_fixed docs/RELEASING.md "phux and phux-mcp artifacts"
@@ -67,14 +67,22 @@ require_fixed docs/RELEASING.md "cargo install phux is unsupported"
 require_fixed docs/RELEASING.md "Windows is not supported"
 require_fixed docs/RELEASING.md "Release cockpit"
 require_fixed docs/RELEASING.md "just release-preflight vX.Y.Z"
-require_fixed docs/RELEASING.md "publish_protocol=true"
 require_fixed docs/RELEASING.md "CARGO_REGISTRY_TOKEN"
 require_fixed docs/RELEASING.md "portable public release"
 require_fixed docs/RELEASING.md 'explicit `v0.0.1` refusal'
 require_fixed docs/RELEASING.md "aarch64-apple-darwin"
 require_fixed docs/RELEASING.md "x86_64-unknown-linux-gnu"
 require_fixed docs/RELEASING.md "aarch64-unknown-linux-gnu"
+# The release flow is release-please-driven. The docs must describe THAT flow,
+# not the retired hand-typed-tag dispatch.
+require_fixed docs/RELEASING.md "release-please"
+require_fixed docs/RELEASING.md "Merge the open **release-please** PR"
+require_fixed docs/RELEASING.md "publish-crate.yml"
+# The old manual cockpit is gone; catch a doc that drifts back to it.
+forbid_fixed docs/RELEASING.md "publish_protocol"
+forbid_fixed docs/RELEASING.md "crates_io_confirm"
 
+require_fixed scripts/install.sh 'macOS x86_64 has no official release artifact; use a source build'
 require_fixed scripts/install.sh 'download "$sha_url" "$sha_path"'
 require_fixed scripts/install.sh 'sha256sum -c "$(basename "$sha_path")"'
 require_fixed scripts/install.sh 'shasum -a 256 -c "$(basename "$sha_path")"'
@@ -87,11 +95,23 @@ require_fixed scripts/release-preflight.sh "cargo publish --dry-run --allow-dirt
 
 require_fixed scripts/gen-formula.sh 'bin.install "phux-mcp"'
 require_fixed scripts/gen-formula.sh 'assert_match version.to_s, shell_output("#{bin}/phux --version 2>&1")'
+# A platform with no on_* override silently falls back to the formula's
+# top-level url. macOS ships arm64 only, so the generator must emit a fatal
+# arch guard or Intel Macs install an arm64 binary that cannot exec.
+require_fixed scripts/gen-formula.sh 'depends_on arch: :arm64'
+# The generator must not know about targets the release matrix never builds.
+forbid_fixed scripts/gen-formula.sh 'x86_64-apple-darwin'
+
 require_fixed .github/workflows/release.yml 'cargo +1.90.0 build --release --bin phux --bin phux-mcp'
 require_fixed .github/workflows/release.yml 'cp -f target/release/phux target/release/phux-mcp'
 require_fixed .github/workflows/release.yml 'target: aarch64-apple-darwin'
 require_fixed .github/workflows/release.yml 'target: x86_64-unknown-linux-gnu'
 require_fixed .github/workflows/release.yml 'target: aarch64-unknown-linux-gnu'
+# Intel macOS is deliberately unbuilt: the free macos-13 runner is retired and
+# the surviving Intel images are `-large` class, which GitHub bills even on
+# public repos. If this target is ever added, the guards above must come out
+# together with it.
+forbid_fixed .github/workflows/release.yml 'target: x86_64-apple-darwin'
 require_fixed .github/workflows/release.yml 'https://ziglang.org/download/${ZIG_VERSION}/${archive}'
 require_regex .github/workflows/release.yml 'test -x .*phux-mcp|command -v .*phux-mcp|./phux-mcp --'
 
@@ -100,6 +120,57 @@ forbid_fixed .github/workflows/release.yml 'actions/checkout@34e114876b0b11c390a
 forbid_fixed .github/workflows/release.yml 'actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02'
 forbid_fixed .github/workflows/release.yml 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093'
 forbid_fixed .github/workflows/release.yml 'softprops/action-gh-release@3bb12739c298aeb8a4eeaf626c5b8d85266b0e65'
+
+# --- Release ownership boundary (release-please) ------------------------------
+#
+# release-please owns the TAG, the RELEASE, and the release BODY. release.yml
+# owns only the ASSETS, which it adds with `gh release upload` — a command that
+# never rewrites the name or body, so the two cannot fight over the changelog.
+# Reintroducing a create-release action here would silently clobber the
+# generated notes, so forbid the ones that do that.
+require_fixed .github/workflows/release.yml 'gh release upload'
+forbid_fixed .github/workflows/release.yml 'softprops/action-gh-release'
+forbid_fixed .github/workflows/release.yml 'generate_release_notes'
+# release.yml is called by release-please and must stay dispatch/call-only. It
+# must never create a tag, and must never publish to crates.io: an irreversible
+# publish has no human in an automated path. publish-crate.yml is that path.
+forbid_fixed .github/workflows/release.yml 'publish_protocol'
+forbid_fixed .github/workflows/release.yml 'crates_io_confirm'
+forbid_fixed .github/workflows/release.yml 'cargo publish'
+
+require_fixed .github/workflows/release-please.yml 'googleapis/release-please-action'
+require_fixed .github/workflows/release-please.yml 'uses: ./.github/workflows/release.yml'
+# release-please cannot update Cargo.lock; cargo re-resolves it on the PR branch.
+require_fixed .github/workflows/release-please.yml 'cargo +1.90.0 update --workspace'
+
+# `release-type: rust` is fatally broken on this repo: its CargoToml updater
+# throws on our virtual workspace root (no [package] section) and on every
+# member crate (`version.workspace = true` is a table, not a tagged scalar).
+# The root Cargo.toml is bumped by a generic TOML jsonpath updater instead.
+require_fixed release-please-config.json '"release-type": "simple"'
+forbid_fixed release-please-config.json '"release-type": "rust"'
+require_fixed release-please-config.json '"jsonpath": "$.workspace.package.version"'
+# Without this, the first `feat!:` bumps 0.x straight to 1.0.0.
+require_fixed release-please-config.json '"bump-minor-pre-major": true'
+
+# TAG SHAPE. release-please defaults `include-component-in-tag` to TRUE, and with
+# `"package-name": "phux"` that renders the tag as `phux-v0.2.0`. Every downstream
+# consumer of the tag assumes a bare `vX.Y.Z`: release.yml's `^v[0-9]+...` regex,
+# check-release-version.sh, install.sh's `case "$version" in v*)` guard, and
+# gen-formula.sh's artifact URLs. A component-prefixed tag would sail past all of
+# them and publish a release with zero attached artifacts.
+require_fixed release-please-config.json '"include-component-in-tag": false'
+
+# The release PR is opened, and the Cargo.lock sync is pushed, as a GitHub App —
+# NOT GITHUB_TOKEN. main's ruleset requires the `check`/`test` contexts with an
+# empty bypass list, and GitHub raises no workflow runs for GITHUB_TOKEN events,
+# so a GITHUB_TOKEN-authored release PR is unmergeable by anyone. See the header
+# of release-please.yml.
+require_fixed .github/workflows/release-please.yml 'actions/create-github-app-token'
+forbid_fixed .github/workflows/release-please.yml 'token: ${{ secrets.GITHUB_TOKEN }}'
+
+require_fixed .github/workflows/publish-crate.yml 'workflow_dispatch'
+require_fixed .github/workflows/publish-crate.yml 'environment: crates-io'
 
 if [ "$failures" -ne 0 ]; then
   printf 'install surface check failed: %d missing contract item(s)\n' "$failures" >&2

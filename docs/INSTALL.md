@@ -36,6 +36,10 @@ brew install phall1/phux/phux
 This installs both `phux` and `phux-mcp`. Use a source build if the Formula has
 not reached your target yet.
 
+The Formula ships arm64 macOS, x86_64 Linux, and arm64 Linux. On an Intel Mac it
+refuses with "The arm64 architecture is required for this software" rather than
+installing an arm64 binary that cannot run; build from source there.
+
 ## Curl installer
 
 The installer is a convenience wrapper over the same GitHub release assets:
@@ -173,7 +177,7 @@ plain-CLI version of the same surface: [`consumers/agents.md`](./consumers/agent
 | Platform | Status |
 |---|---|
 | macOS (Apple Silicon) | Homebrew: yes. Curl/tarball: yes. Source: yes. |
-| macOS (x86_64) | Source: yes. No official release artifact. |
+| macOS (x86_64) | Not supported. No official release artifact; Homebrew and the curl installer both refuse. Source: yes. |
 | Linux x86_64 | Curl/tarball: yes. Homebrew: yes where Linuxbrew supports the host. Source: yes. |
 | Linux aarch64 | Curl/tarball: yes. Homebrew: yes where Linuxbrew supports the host. Source: yes. |
 | Windows | No. Windows is not supported and is not on the near roadmap. |

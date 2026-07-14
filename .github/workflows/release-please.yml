@@ -1,0 +1,173 @@
+# release-please — the single entry point for cutting a phux release.
+#
+# Flow:
+#   1. Every push to main, release-please reads the conventional-commit log
+#      since the last release and maintains an open "release PR" that bumps
+#      [workspace.package] version in the root Cargo.toml and regenerates
+#      CHANGELOG.md.
+#   2. `sync-lockfile` re-resolves Cargo.lock on that PR branch. release-please
+#      CANNOT do this itself — see the comment on that job.
+#   3. When a human merges the release PR, release-please pushes the `vX.Y.Z`
+#      tag and creates the GitHub Release, with the changelog as its body.
+#   4. `release-artifacts` then calls release.yml (a reusable workflow) to build
+#      the binaries and ATTACH them to the release release-please just made.
+#
+# Ownership boundary (do not blur this):
+#   * release-please owns the TAG and the RELEASE (and its body/notes).
+#   * release.yml owns only the ASSETS. It uses `gh release upload`, which never
+#     touches the release body, so the two can never fight over the notes.
+#
+# Why release-artifacts is a workflow_call and not a `push: tags` /
+# `release: published` trigger on release.yml: GitHub does not fire
+# workflow-triggering events for refs/releases created by GITHUB_TOKEN, so a
+# `push: tags: v*` or `release: published` trigger could never fire. Calling
+# release.yml as a reusable workflow in this same run sidesteps that.
+#
+# WHY AN APP TOKEN AND NOT GITHUB_TOKEN (this is load-bearing — do not "simplify"
+# it back):
+#   `main` carries an ACTIVE ruleset ("main automation guardrails") requiring the
+#   `check` and `test` status contexts, with `bypass_actors: []` and
+#   `current_user_can_bypass: never`. Those contexts are produced only by ci.yml's
+#   `pull_request` trigger. GitHub suppresses workflow runs for events raised by
+#   GITHUB_TOKEN — so a release PR opened with GITHUB_TOKEN would get NO CI run,
+#   `check`/`test` would never report, and the PR would be permanently unmergeable
+#   BY ANYONE, owner included. The same applies to the sync-lockfile push: it
+#   moves the PR head to a SHA with no check runs. Both jobs therefore authenticate
+#   as a GitHub App, whose events DO trigger workflows.
+#
+# ONE-TIME SETUP (without it, this workflow fails closed at the token step):
+#   1. Create a GitHub App on the phall1 account: repo permissions
+#      `contents: write` + `pull requests: write`. Install it on phall1/phux.
+#   2. Repo secret  RELEASE_APP_PRIVATE_KEY = the App's generated .pem
+#      Repo variable RELEASE_APP_ID          = the App's numeric App ID
+#
+# crates.io is deliberately NOT wired in here. Publishing is irreversible and
+# there is no human in a tag-triggered path, so phux-protocol is published only
+# via the manual publish-crate.yml dispatch. See CONTRIBUTING.md.
+
+name: release-please
+
+on:
+  push:
+    branches: [main]
+
+permissions:
+  contents: write
+  pull-requests: write
+
+concurrency:
+  group: release-please-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-please:
+    name: release PR / github release
+    runs-on: ubuntu-latest
+    outputs:
+      release_created: ${{ steps.rp.outputs.release_created }}
+      tag_name: ${{ steps.rp.outputs.tag_name }}
+      prs_created: ${{ steps.rp.outputs.prs_created }}
+      # `pr` is a JSON string of release-please's PullRequest object, and is
+      # unset when no PR was touched — short-circuit so fromJSON never sees ''.
+      pr_branch: ${{ steps.rp.outputs.pr && fromJSON(steps.rp.outputs.pr).headBranchName || '' }}
+    steps:
+      # Fail closed and loudly if the App is not configured, rather than falling
+      # back to GITHUB_TOKEN and silently opening an unmergeable release PR.
+      - name: Require the release App
+        env:
+          APP_ID: ${{ vars.RELEASE_APP_ID }}
+          APP_KEY: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+        run: |
+          set -euo pipefail
+          if [ -z "${APP_ID}" ] || [ -z "${APP_KEY}" ]; then
+            echo "::error::RELEASE_APP_ID (variable) and RELEASE_APP_PRIVATE_KEY (secret) must be set. See this workflow's header comment. GITHUB_TOKEN cannot be used: main's ruleset requires check+test, and GITHUB_TOKEN-raised events do not trigger CI, so the release PR would be unmergeable."
+            exit 1
+          fi
+
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: googleapis/release-please-action@v4
+        id: rp
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          config-file: release-please-config.json
+          manifest-file: .release-please-manifest.json
+
+  sync-lockfile:
+    name: sync Cargo.lock on the release PR
+    needs: release-please
+    if: needs.release-please.outputs.prs_created == 'true' && needs.release-please.outputs.pr_branch != ''
+    runs-on: ubuntu-latest
+    # release-please cannot update Cargo.lock, and this is not a config mistake:
+    #
+    #   * Its `rust` strategy is unusable here (see the header of release.yml),
+    #     so we drive the root Cargo.toml with a generic TOML jsonpath updater.
+    #   * Its TOML updater resolves a jsonpath against a parse tree in which
+    #     every scalar is a {start,end,value} tagged object. A filter such as
+    #     `$.package[?(@.name=='phux-protocol')].version` therefore compares an
+    #     object to a string, matches nothing, and SILENTLY no-ops. There is no
+    #     jsonpath that can select the 11 workspace members out of Cargo.lock's
+    #     [[package]] array by name.
+    #   * Comment annotations (`# x-release-please-version`) are not durable in
+    #     Cargo.lock either: cargo rewrites the file and drops them.
+    #
+    # So cargo itself re-resolves the lock. `cargo update --workspace` touches
+    # only the workspace members' own entries and leaves every external pin
+    # alone. It resolves metadata only — no build, so no zig/libghostty needed.
+    steps:
+      - uses: actions/create-github-app-token@v2
+        id: app-token
+        with:
+          app-id: ${{ vars.RELEASE_APP_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+
+      - uses: actions/checkout@v7
+        with:
+          ref: ${{ needs.release-please.outputs.pr_branch }}
+          # MUST be the App token, not GITHUB_TOKEN. This job pushes a commit that
+          # becomes the release PR's new head; with GITHUB_TOKEN that push raises
+          # no `pull_request: synchronize` event, so ci.yml never runs against the
+          # new head SHA, `check`/`test` never report on it, and main's ruleset
+          # (bypass_actors: []) blocks the merge permanently. The App's push DOES
+          # trigger ci.yml — which is exactly what we want. This cannot recurse
+          # into release-please.yml: that is `on: push: branches: [main]`, and this
+          # pushes to the release PR branch.
+          token: ${{ steps.app-token.outputs.token }}
+          persist-credentials: true
+
+      - name: Install Rust toolchain
+        run: rustup toolchain install 1.90.0 --profile minimal
+
+      - name: Re-resolve workspace member versions
+        run: cargo +1.90.0 update --workspace
+
+      - name: Commit Cargo.lock
+        shell: bash
+        env:
+          PR_BRANCH: ${{ needs.release-please.outputs.pr_branch }}
+        run: |
+          set -euo pipefail
+          if git diff --quiet -- Cargo.lock; then
+            echo "Cargo.lock already in sync."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Cargo.lock
+          git commit -m "chore: sync Cargo.lock with the release version"
+          git push origin "HEAD:${PR_BRANCH}"
+
+  release-artifacts:
+    name: build + attach binaries
+    needs: release-please
+    if: needs.release-please.outputs.release_created == 'true'
+    uses: ./.github/workflows/release.yml
+    permissions:
+      contents: write
+    secrets: inherit
+    with:
+      tag: ${{ needs.release-please.outputs.tag_name }}
