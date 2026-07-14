@@ -563,23 +563,13 @@ impl<'alloc> TerminalRenderer<'alloc> {
         // Reset SGR before the final cursor placement so the visual
         // cursor isn't tainted by the last cell's attributes.
         out.write_all(b"\x1b[0m")?;
-        // Final cursor placement + visibility. Cache the (row, col) for
-        // the predictive-echo layer to read via [`Self::last_cursor`].
-        self.last_cursor = if let Some(viewport) = snapshot.cursor_viewport()? {
-            let abs_y = viewport.y.saturating_add(oy);
-            let abs_x = viewport.x.saturating_add(ox);
-            write_cup(out, abs_y, abs_x)?;
-            // Cache the pane-local cursor (pre-offset) for the predict layer
-            // alongside the outer-absolute one for the host-cursor restore.
-            self.last_cursor_local = Some((viewport.y, viewport.x));
-            Some((abs_y, abs_x))
-        } else {
-            self.last_cursor_local = None;
-            None
-        };
-        if snapshot.cursor_visible()? {
-            out.write_all(b"\x1b[?25h")?;
-        }
+        cache_and_render_cursor(
+            &snapshot,
+            out,
+            origin,
+            &mut self.last_cursor,
+            &mut self.last_cursor_local,
+        )?;
         // Optional cursor style — best-effort.
         emit_cursor_style(
             out,
@@ -595,6 +585,35 @@ impl<'alloc> TerminalRenderer<'alloc> {
     }
 }
 
+fn cache_and_render_cursor(
+    snapshot: &Snapshot<'_, '_>,
+    out: &mut impl Write,
+    origin: (u16, u16),
+    last_cursor: &mut Option<(u16, u16)>,
+    last_cursor_local: &mut Option<(u16, u16)>,
+) -> Result<(), RenderError> {
+    let visible = snapshot.cursor_visible()?;
+    let viewport = visible
+        .then(|| snapshot.cursor_viewport())
+        .transpose()?
+        .flatten();
+    if let Some(viewport) = viewport {
+        let absolute = (
+            viewport.y.saturating_add(origin.1),
+            viewport.x.saturating_add(origin.0),
+        );
+        write_cup(out, absolute.0, absolute.1)?;
+        *last_cursor = Some(absolute);
+        *last_cursor_local = Some((viewport.y, viewport.x));
+        out.write_all(b"\x1b[?25h")?;
+    } else {
+        *last_cursor = None;
+        *last_cursor_local = None;
+        out.write_all(b"\x1b[?25l")?;
+    }
+    Ok(())
+}
+
 fn render_clean_frame_cursor(
     snapshot: &Snapshot<'_, '_>,
     out: &mut impl Write,
@@ -606,7 +625,12 @@ fn render_clean_frame_cursor(
     // No row content changed, but the cursor may have MOVED — a pure cursor
     // advance. Reposition + refresh the cached cursor when it changed.
     let (ox, oy) = origin;
-    let new_local = snapshot.cursor_viewport()?.map(|v| (v.y, v.x));
+    let cursor_visible = snapshot.cursor_visible()?;
+    let new_local = cursor_visible
+        .then(|| snapshot.cursor_viewport())
+        .transpose()?
+        .flatten()
+        .map(|v| (v.y, v.x));
     let new_abs = new_local.map(|(y, x)| (y.saturating_add(oy), x.saturating_add(ox)));
     if new_abs == *last_cursor && !emitted_kitty {
         return Ok(());
@@ -614,9 +638,10 @@ fn render_clean_frame_cursor(
 
     if let Some((abs_y, abs_x)) = new_abs {
         write_cup(out, abs_y, abs_x)?;
-        if snapshot.cursor_visible()? {
-            out.write_all(b"\x1b[?25h")?;
-        }
+        out.write_all(b"\x1b[?25h")?;
+        out.flush()?;
+    } else if *last_cursor != new_abs {
+        out.write_all(b"\x1b[?25l")?;
         out.flush()?;
     } else if emitted_kitty {
         out.flush()?;
@@ -1187,6 +1212,38 @@ mod tests {
             Some((0, 2)),
             "cached cursor must follow the move so the bar-restore agrees"
         );
+    }
+
+    #[test]
+    fn hidden_cursor_is_not_cached_as_visible() {
+        let mut terminal = fresh(10, 2);
+        terminal.vt_write(b"hello");
+        let mut renderer = TerminalRenderer::new().expect("TerminalRenderer::new");
+        let mut first = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut first)
+            .expect("first render");
+        assert_eq!(renderer.last_cursor(), Some((0, 5)));
+
+        terminal.vt_write(b"\x1b[?25l");
+        let mut hidden = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut hidden)
+            .expect("hidden render");
+        assert!(
+            hidden.windows(6).any(|bytes| bytes == b"\x1b[?25l"),
+            "cursor visibility change must reach the host terminal"
+        );
+        assert_eq!(renderer.last_cursor(), None);
+        assert_eq!(renderer.last_cursor_local(), None);
+
+        terminal.vt_write(b"\x1b[?25h");
+        let mut shown = Vec::new();
+        let _ = renderer
+            .render(&terminal, &mut shown)
+            .expect("shown render");
+        assert!(shown.windows(6).any(|bytes| bytes == b"\x1b[?25h"));
+        assert_eq!(renderer.last_cursor(), Some((0, 5)));
     }
 
     /// A single changed row repaints only that row: the emitted CUP
