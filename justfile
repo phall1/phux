@@ -72,14 +72,44 @@ test:
 # the retries absorb residual environment-driven flakes (mirroring the
 # reconnect override in .config/nextest.toml). Finishes in minutes — fast
 # enough to block a PR on.
+#
+# The BUILD selection is `--workspace` on purpose, even though only four test
+# binaries actually run. It must resolve the SAME feature union as the unit
+# lane's `cargo nextest run --workspace`, so this lane reuses that build
+# instead of producing a second one.
+#
+# Narrowing the BUILD with `-p`/`--test` is what the old form did, and it cost
+# ~87s per CI run. Under the v2/v3 feature resolver a package's dev-dependency
+# features only join the unified feature set for packages whose test targets
+# are being built, so `-p phux` drops phux-server's dev-deps (tokio/test-util,
+# wtransport/dangerous-configuration) and `-p phux-server` drops phux-client's
+# tokio/io-std. Each selection therefore re-keys `tokio` into a DIFFERENT unit,
+# and every crate downstream of tokio (phux-core, phux-server, phux-client,
+# phux, quinn, tokio-util, tokio-rustls, ...) recompiles from scratch.
+#
+# Test selection is a nextest filterset instead, which is applied AFTER the
+# build and so costs nothing. Verified: same 18 tests, 0 crates recompiled.
+#
+# The filterset names binaries, not files, so renaming/moving one of these test
+# files does NOT silently drop it from the PR gate: nextest rejects a
+# `binary_id(...)` that matches no binary ("operator didn't match any binary
+# IDs") and exits 94. A rename fails this lane loudly, exactly as `--test
+# <name>` used to.
+#
+# Corollary: if ci.yml's unit step ever gains `--all-features`, this recipe
+# must gain it too — otherwise the double-compile comes straight back. (Do not
+# actually do that; `--all-features` turns on `phux/dhat-heap`, which installs
+# dhat as the global allocator and would make the perf gates below measure
+# dhat rather than phux.)
 
-# Fast e2e lane (run_wait_e2e + perf gates) — gates every PR.
+# Fast e2e lane (run_wait_e2e + agent_record_e2e + perf gates) — gates every PR.
 e2e:
-    cargo nextest run -p phux --test run_wait_e2e --test agent_record_e2e \
-      --run-ignored all --test-threads=1 --retries=2
-    cargo nextest run -p phux-server --run-ignored ignored-only \
+    cargo nextest run --workspace --run-ignored all \
       --test-threads=1 --retries=2 \
-      --test perf_latency --test perf_colored_output
+      -E 'binary_id(phux::run_wait_e2e) + binary_id(phux::agent_record_e2e)'
+    cargo nextest run --workspace --run-ignored ignored-only \
+      --test-threads=1 --retries=2 \
+      -E 'binary_id(phux-server::perf_latency) + binary_id(phux-server::perf_colored_output)'
 
 # Heavy stress/flywheel lane — runs OFF the PR critical path (the `stress`
 # GitHub workflow: post-merge on `main` + nightly). Resize/output/lifecycle

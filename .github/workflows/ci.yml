@@ -109,6 +109,20 @@ jobs:
   # shares the dependency build (including the zig blob) instead of paying for
   # it (and the flake eval) per check. fmt and deny are near-free and ride
   # along for a single pass/fail signal.
+  #
+  # clippy and doc run `--all-features` here to match `just lint` / `just doc`
+  # exactly. They previously ran with DEFAULT features while `just ci` used
+  # `--all-features`, which made the local bar STRICTER than CI: a change that
+  # broke `phux-server/tokio-console` or `phux/dhat-heap` (the entire
+  # `--all-features` delta) could merge green and then break every
+  # contributor's `just ci`. Compiling the default feature set is still covered
+  # — the `test` lane below builds the workspace with default features.
+  #
+  # `--all-features` belongs HERE and not in the `test` lane: it enables
+  # `phux/dhat-heap`, which installs dhat as the global allocator, and the e2e
+  # lane's `perf_latency` / `perf_colored_output` gates are wall-clock ceilings
+  # that exec the real `phux` binary. Building them with an instrumented
+  # allocator would measure dhat, not phux.
   check:
     name: check
     runs-on: ubuntu-latest
@@ -131,17 +145,27 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           nix develop -c bash -euo pipefail <<'EOF'
-          echo "::group::fmt";    cargo fmt --check;                                       echo "::endgroup::"
-          echo "::group::clippy"; cargo clippy --workspace --all-targets -- -D warnings;   echo "::endgroup::"
-          echo "::group::doc";    RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace; echo "::endgroup::"
-          echo "::group::deny";   cargo deny check;                                        echo "::endgroup::"
+          echo "::group::fmt";    cargo fmt --check;                                                          echo "::endgroup::"
+          echo "::group::clippy"; cargo clippy --workspace --all-targets --all-features -- -D warnings;      echo "::endgroup::"
+          echo "::group::doc";    RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace --all-features; echo "::endgroup::"
+          echo "::group::deny";   cargo deny check;                                                           echo "::endgroup::"
           EOF
       - name: docs-check
         run: nix develop -c bash scripts/check-docs.sh
 
   # Test lane: the default unit pool, then the FAST `#[ignore]`d e2e set
-  # (`run_wait_e2e` + the perf gates), both reusing this job's one test-profile
-  # build via a single `nix develop`, so the workspace compiles once here.
+  # (`run_wait_e2e` + `agent_record_e2e` + the perf gates). Both steps use the
+  # SAME cargo BUILD selection (`--workspace`, default features), so the e2e
+  # step reuses this job's one test-profile build and the workspace compiles
+  # exactly once here.
+  #
+  # That invariant is load-bearing and was NOT true until recently: `just e2e`
+  # used to narrow the build with `-p`/`--test`, which changes the resolved
+  # dev-dependency feature union, re-keys `tokio`, and forced a full recompile
+  # of everything downstream of it (~87s every run). `just e2e` now picks its
+  # tests with a nextest filterset, which is applied after the build. Keep the
+  # two steps' build selections identical — do NOT add `--all-features` (or any
+  # other feature/package narrowing) to one without the other.
   #
   # The e2e set drives real PTY-backed server spawns and is `#[ignore]`d out
   # of the default pool because those spawns starve the latency-sensitive

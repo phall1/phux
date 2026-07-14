@@ -1,9 +1,26 @@
-# phux release — create or verify a version tag, build distributable binaries,
-# publish a GitHub release, refresh the Homebrew tap formula, and optionally
-# publish phux-protocol to crates.io from the same button.
+# phux release artifacts — build distributable binaries, attach them to an
+# existing GitHub release, and refresh the Homebrew tap formula.
 #
-# Trigger: run manually with a `tag` input. Manual dispatch uses an existing
-# tag, or creates it from the default branch if it does not already exist.
+# Trigger: called by release-please.yml once release-please has pushed the tag
+# and created the GitHub release. Also dispatchable by hand against an existing
+# tag to re-build or re-attach assets.
+#
+# This workflow does NOT create tags and does NOT create or edit releases.
+# release-please owns both, and owns the release body (the generated changelog).
+# Assets are attached with `gh release upload`, which only adds files and never
+# rewrites the notes — so the two workflows cannot fight over the release.
+#
+# It also does NOT publish to crates.io. Publishing is irreversible and nothing
+# here is gated on a human, so phux-protocol goes out only via the manual
+# publish-crate.yml dispatch.
+#
+# NOTE for anyone tempted to switch release-please to `release-type: rust`:
+# it does not work on this repo. Its CargoToml updater throws
+# "is not a package manifest" on our virtual workspace root (no [package]
+# section), and throws "value at path package.version is not tagged" on every
+# member crate because they all use `version.workspace = true`. The root
+# Cargo.toml is bumped by a generic TOML jsonpath updater instead; see
+# release-please-config.json.
 #
 # Release binaries are built with rustup plus the official Zig tarballs. Nix is
 # useful for local development, but Nix-built release binaries can record
@@ -18,27 +35,24 @@
 name: release
 
 on:
+  workflow_call:
+    inputs:
+      tag:
+        description: "Existing tag to build and attach assets for (e.g. v0.1.0)."
+        required: true
+        type: string
   workflow_dispatch:
     inputs:
       tag:
-        description: "Tag to release (e.g. v0.1.0). Created from main if missing."
+        description: "Existing tag to build and attach assets for (e.g. v0.1.0). Must already exist."
         required: true
-        type: string
-      publish_protocol:
-        description: "Also publish phux-protocol to crates.io. Irreversible."
-        required: true
-        type: boolean
-        default: false
-      crates_io_confirm:
-        description: "Required when publishing crates.io: type `publish phux-protocol`."
-        required: false
         type: string
 
 permissions:
   contents: write
 
 concurrency:
-  group: release-${{ inputs.tag || github.ref_name }}
+  group: release-${{ inputs.tag }}
   cancel-in-progress: false
 
 jobs:
@@ -57,14 +71,10 @@ jobs:
         id: version
         shell: bash
         env:
-          RELEASE_REF: ${{ inputs.tag || github.ref_name }}
+          RELEASE_REF: ${{ inputs.tag }}
         run: |
           set -euo pipefail
-          ref="${RELEASE_REF}"
-          case "$ref" in
-            refs/tags/*) tag="${ref#refs/tags/}" ;;
-            *) tag="$ref" ;;
-          esac
+          tag="${RELEASE_REF#refs/tags/}"
           if [[ ! "$tag" =~ ^v[0-9]+[.][0-9]+[.][0-9]+([-.][0-9A-Za-z][0-9A-Za-z.-]*)?$ ]]; then
             echo "::error::invalid release tag: ${tag}"
             exit 1
@@ -72,33 +82,18 @@ jobs:
           echo "tag=${tag}" >> "$GITHUB_OUTPUT"
           echo "version=${tag#v}" >> "$GITHUB_OUTPUT"
 
-      - name: Require default branch for manual releases
-        if: github.event_name == 'workflow_dispatch'
-        shell: bash
-        env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          REF_NAME: ${{ github.ref_name }}
-        run: |
-          set -euo pipefail
-          if [ "$REF_NAME" != "$DEFAULT_BRANCH" ]; then
-            echo "::error::manual releases must be dispatched from ${DEFAULT_BRANCH}, got ${REF_NAME}"
-            exit 1
-          fi
-
-      - name: Create or verify release tag
+      - name: Require an existing release tag
         shell: bash
         env:
           TAG: ${{ steps.version.outputs.tag }}
         run: |
           set -euo pipefail
-          if git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
-            git fetch --force origin "refs/tags/${TAG}:refs/tags/${TAG}"
-            echo "${TAG} already exists; release will use the tagged commit."
-          else
-            head_sha="$(git rev-parse HEAD)"
-            bash scripts/check-release-version.sh "$TAG"
-            git tag "$TAG" "$head_sha"
-            git push origin "refs/tags/${TAG}"
+          # release-please is the sole tag creator. This workflow only ever
+          # attaches artifacts to a tag/release that already exists, so a
+          # missing tag is an error rather than something to create.
+          if ! git ls-remote --exit-code --tags origin "refs/tags/${TAG}" >/dev/null 2>&1; then
+            echo "::error::tag ${TAG} does not exist. Tags are created by release-please when the release PR merges."
+            exit 1
           fi
 
       - name: Check release version at tag
@@ -237,30 +232,44 @@ jobs:
           if-no-files-found: error
 
   release:
-    name: publish release
+    name: attach release artifacts
     needs: [prepare, build]
-    # Publish whatever built: a single failed target shouldn't block the
-    # release of the others. download-artifact below just collects what exists.
-    if: ${{ !cancelled() }}
+    # Attach whatever built: a single failed target shouldn't withhold the
+    # others (`build` is fail-fast: false), so this deliberately does not
+    # require `build` to have succeeded — download-artifact just collects what
+    # exists. But `prepare` is the tag/version gate: if it failed, the tag is
+    # missing or does not match Cargo's resolved versions, and there is nothing
+    # legitimate to attach. Require it, or a bad tag surfaces as a confusing
+    # "no build artifacts" error instead of the real cause.
+    if: ${{ !cancelled() && needs.prepare.result == 'success' }}
     runs-on: ubuntu-latest
+    permissions:
+      contents: write
     steps:
       - uses: actions/download-artifact@v8
         with:
           path: dist
           merge-multiple: true
 
-      - name: Create / update GitHub release
-        uses: softprops/action-gh-release@v3.0.1
-        with:
-          tag_name: ${{ needs.prepare.outputs.tag }}
-          name: phux ${{ needs.prepare.outputs.tag }}
-          generate_release_notes: true
-          # A partial matrix still publishes whatever built — don't fail if a
-          # target is missing (the glob still matches the ones that succeeded).
-          fail_on_unmatched_files: false
-          files: |
-            dist/phux-*.tar.gz
-            dist/phux-*.tar.gz.sha256
+      - name: Attach binaries to the release
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
+          TAG: ${{ needs.prepare.outputs.tag }}
+        run: |
+          set -euo pipefail
+          shopt -s nullglob
+          assets=(dist/phux-*.tar.gz dist/phux-*.tar.gz.sha256)
+          if (( ${#assets[@]} == 0 )); then
+            echo "::error::no build artifacts to attach for ${TAG}"
+            exit 1
+          fi
+          # `gh release upload` ADDS ASSETS ONLY. It never rewrites the release
+          # name or body, so it cannot clobber the changelog release-please
+          # generated. Do not swap this back to a create-release action.
+          gh release upload "$TAG" "${assets[@]}" --clobber
+          echo "attached ${#assets[@]} asset(s) to ${TAG}"
 
   homebrew:
     name: update homebrew tap
@@ -322,43 +331,15 @@ jobs:
             git push
           fi
 
-  protocol-crate:
-    name: publish phux-protocol crate
-    needs: [prepare, release]
-    if: ${{ github.event_name == 'workflow_dispatch' && !cancelled() && needs.release.result == 'success' && inputs.publish_protocol == true }}
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v7
-        with:
-          ref: ${{ needs.prepare.outputs.tag }}
-
-      - name: Confirm crates.io publish
-        shell: bash
-        env:
-          CONFIRM: ${{ inputs.crates_io_confirm }}
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: |
-          set -euo pipefail
-          if [ "$CONFIRM" != "publish phux-protocol" ]; then
-            echo "::error::to publish crates.io, set crates_io_confirm to: publish phux-protocol"
-            exit 1
-          fi
-          if [ -z "${CARGO_REGISTRY_TOKEN}" ]; then
-            echo "::error::CARGO_REGISTRY_TOKEN is not set"
-            exit 1
-          fi
-
-      - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: cachix/cachix-action@v15
-        with:
-          name: phux
-          authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
-          pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
-
-      - name: Package + verify phux-protocol
-        run: nix develop -c cargo publish --dry-run -p phux-protocol
-
-      - name: Publish phux-protocol to crates.io
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
-        run: nix develop -c cargo publish -p phux-protocol
+# The `protocol-crate` job that used to live here is gone on purpose.
+#
+# It published phux-protocol to crates.io, gated behind a typed confirmation
+# string ("publish phux-protocol"). Under release-please this workflow is
+# triggered by automation, not by a human filling in a dispatch form, so that
+# gate would have had nobody to type it — the confirmation would have had to be
+# hardcoded or dropped, turning an irreversible publish into an automatic one.
+#
+# crates.io publishes are irreversible (a version can never be reused, a name
+# never reclaimed), so it stays a separate, deliberate human action:
+# publish-crate.yml, dispatched by hand with an explicit tag and dry_run
+# defaulting to true.

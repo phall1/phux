@@ -10,6 +10,15 @@
 # target whose .sha256 file is present. Homebrew requires a formula to have a
 # stable URL even when the effective download is selected through on_* blocks.
 # Shared by release.yml and local seeding so the two paths never drift.
+#
+# That top-level URL is also a trap: a platform with no matching on_* override
+# silently FALLS BACK to it. phux ships no macOS x86_64 artifact, so without an
+# explicit guard an Intel Mac would download the aarch64-apple-darwin tarball,
+# pass the checksum, install, and only then fail at exec time with "bad CPU type
+# in executable". Every platform that has no artifact therefore gets a fatal
+# `depends_on` requirement so Homebrew refuses up front. The same applies to a
+# partial release (release.yml uses fail-fast: false and publishes whatever
+# built), where an entire OS can be missing from the matrix.
 set -euo pipefail
 
 tag="${1:?usage: gen-formula.sh <tag> <dist-dir> [out-file]}"
@@ -23,12 +32,15 @@ sha() {
   [ -f "$f" ] && cut -d' ' -f1 < "$f" || true
 }
 
+# The release matrix (.github/workflows/release.yml) builds exactly these three
+# targets. macOS x86_64 is deliberately absent: the last free Intel macOS runner
+# (macos-13) has been retired, and the surviving Intel images are `-large` class,
+# which GitHub bills even for public repositories. Intel Mac is source-only.
 arm_mac="$(sha aarch64-apple-darwin)"
-x86_mac="$(sha x86_64-apple-darwin)"
 x86_linux="$(sha x86_64-unknown-linux-gnu)"
 arm_linux="$(sha aarch64-unknown-linux-gnu)"
 
-if [ -z "${arm_mac}${x86_mac}${x86_linux}${arm_linux}" ]; then
+if [ -z "${arm_mac}${x86_linux}${arm_linux}" ]; then
   echo "error: no artifacts found in ${dist} for ${tag}" >&2
   exit 1
 fi
@@ -38,9 +50,6 @@ primary_sha=""
 if [ -n "$arm_mac" ]; then
   primary_target="aarch64-apple-darwin"
   primary_sha="$arm_mac"
-elif [ -n "$x86_mac" ]; then
-  primary_target="x86_64-apple-darwin"
-  primary_sha="$x86_mac"
 elif [ -n "$x86_linux" ]; then
   primary_target="x86_64-unknown-linux-gnu"
   primary_sha="$x86_linux"
@@ -63,28 +72,39 @@ class Phux < Formula
 
 EOF
 
-  if { [ -n "${arm_mac}" ] && [ "${primary_target}" != "aarch64-apple-darwin" ]; } ||
-    { [ -n "${x86_mac}" ] && [ "${primary_target}" != "x86_64-apple-darwin" ]; }; then
+  # Whole-OS guard: if the matrix produced nothing for an OS, refuse that OS
+  # outright rather than letting it fall back to the other OS's tarball.
+  if [ -z "${x86_linux}${arm_linux}" ]; then
+    echo "  depends_on :macos"
+    echo ""
+  elif [ -z "${arm_mac}" ]; then
+    echo "  depends_on :linux"
+    echo ""
+  fi
+
+  if [ -n "${arm_mac}" ]; then
     echo "  on_macos do"
-    if [ -n "${arm_mac}" ] && [ "${primary_target}" != "aarch64-apple-darwin" ]; then
+    # No macOS x86_64 artifact exists. Without this, Intel Macs fall back to the
+    # top-level url and install an arm64 binary that cannot exec.
+    echo "    depends_on arch: :arm64"
+    if [ "${primary_target}" != "aarch64-apple-darwin" ]; then
       echo "    on_arm do"
       echo "      url \"${base}/phux-${tag}-aarch64-apple-darwin.tar.gz\""
       echo "      sha256 \"${arm_mac}\""
-      echo "    end"
-    fi
-    if [ -n "${x86_mac}" ] && [ "${primary_target}" != "x86_64-apple-darwin" ]; then
-      echo "    on_intel do"
-      echo "      url \"${base}/phux-${tag}-x86_64-apple-darwin.tar.gz\""
-      echo "      sha256 \"${x86_mac}\""
       echo "    end"
     fi
     echo "  end"
     echo ""
   fi
 
-  if { [ -n "${x86_linux}" ] && [ "${primary_target}" != "x86_64-unknown-linux-gnu" ]; } ||
-    { [ -n "${arm_linux}" ] && [ "${primary_target}" != "aarch64-unknown-linux-gnu" ]; }; then
+  if [ -n "${x86_linux}${arm_linux}" ]; then
     echo "  on_linux do"
+    # Same fallback trap within Linux when only one arch built.
+    if [ -z "${arm_linux}" ]; then
+      echo "    depends_on arch: :x86_64"
+    elif [ -z "${x86_linux}" ]; then
+      echo "    depends_on arch: :arm64"
+    fi
     if [ -n "${x86_linux}" ] && [ "${primary_target}" != "x86_64-unknown-linux-gnu" ]; then
       echo "    on_intel do"
       echo "      url \"${base}/phux-${tag}-x86_64-unknown-linux-gnu.tar.gz\""
