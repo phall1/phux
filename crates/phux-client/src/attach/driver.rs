@@ -33,7 +33,7 @@ use libghostty_vt::terminal::Mode;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
-use phux_protocol::ids::{ClientId, GroupId, TerminalId};
+use phux_protocol::ids::{ClientId, TerminalId};
 use phux_protocol::wire::frame::{
     AttachTarget, CONFIG_RELOAD_KEY, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
 };
@@ -63,6 +63,9 @@ use crate::agent_meta::{
     parse_agent_record,
 };
 use crate::layout::Workspace;
+pub(super) use crate::layout_ops::{
+    DEFAULT_LAYOUT_GROUP_ID as DEFAULT_GROUP_ID, LAYOUT_KEY, layout_key,
+};
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter, attention_rank};
 use crate::render::chrome::status_bar::StatusBarPainter;
@@ -3323,24 +3326,6 @@ async fn main_loop<W: super::RenderSink>(
     }
 }
 
-/// phux-4li.5: L3 metadata key PREFIX under which the multi-pane layout
-/// envelope persists (ADR-0019 decision 1). The reference TUI is the
-/// sole consumer; other clients (a future GUI, an agent) never read
-/// or write it.
-///
-/// The persisted key is per-session: [`layout_key`] suffixes this with the
-/// session id so each session keeps its OWN layout, isolated in the shared
-/// group's metadata. Before phux-jy4t every session wrote this bare key, so a
-/// new session inherited (and clobbered) its sibling's tree.
-pub(super) const LAYOUT_KEY: &str = "phux.tui.layout/v1";
-
-/// The per-session layout metadata key: [`LAYOUT_KEY`] suffixed with the
-/// session id (phux-jy4t). Two clients on the same session share one key (and
-/// thus one layout + subscription); different sessions are isolated.
-pub(super) fn layout_key(session: phux_protocol::ids::SessionId) -> String {
-    format!("{LAYOUT_KEY}/{}", session.get())
-}
-
 /// phux-foz.8: fetch each peer session's persisted layout — one
 /// `GET_METADATA` on the per-session layout key per session other than
 /// `focused` — so the window picker can render one-step cross-session
@@ -3548,14 +3533,6 @@ fn refresh_fleet_if_open<W: super::RenderSink>(
 pub(super) fn is_layout_key_string(key: &str) -> bool {
     key == LAYOUT_KEY || key.starts_with(&format!("{LAYOUT_KEY}/"))
 }
-
-/// phux-4li.5: the single Group v0.1 servers expose. The grouping tier
-/// is not a wire lifecycle; every L3 key the reference TUI cares about
-/// is scoped to this constant. Matches `phux_server::state::DEFAULT_GROUP_ID`
-/// (the server picks the same numeric value; if they ever drift, the
-/// L3 reconcile path silently no-ops because the broadcast scope
-/// won't match).
-pub(super) const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
 /// phux-4li.5: build a [`phux_config::keybind::Resolver`] from a
 /// keybindings snapshot (post phux-r82.5: the plugin-merged one, so
