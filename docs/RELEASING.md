@@ -51,6 +51,7 @@ clobber the generated changelog.
 | Flow | Trigger | What it does |
 |---|---|---|
 | Pull request CI | `pull_request` | Docs-only detection, docs check, fmt, clippy, rustdoc, cargo-deny, unit tests, and fast real-PTY e2e unless the change is docs-only. |
+| Conventional-commit gate | `pull_request` | `commitlint` lints every PR commit and the PR title against `commitlint.config.mjs`; required by main's ruleset so nothing non-conventional reaches the release-please log. |
 | Main CI | push to `main` | Same gates as PR CI, always full, and refreshes the warm caches. |
 | release-please | push to `main` | Maintains the release PR; on merge, tags `vX.Y.Z`, creates the GitHub release, and calls `release.yml`. |
 | Release artifacts | called by release-please (or manual dispatch) | Builds portable tarballs + checksums, attaches them to the existing release, updates the Homebrew tap. |

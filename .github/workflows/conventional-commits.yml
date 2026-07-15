@@ -1,0 +1,63 @@
+# conventional-commits — the PR gate for the conventional-commit contract.
+#
+# Lints EVERY commit in the PR (base..head) and the PR TITLE against
+# commitlint.config.mjs (config-conventional, tuned there). Both surfaces
+# matter because main allows both squash and rebase merges:
+#   * squash merge -> the PR title becomes the commit subject on main
+#   * rebase merge -> the PR commits land on main verbatim
+# release-please parses that log to decide the next version and the
+# changelog (docs/RELEASING.md), so a malformed message silently drops the
+# change from the release notes or skips a version bump.
+#
+# The `commitlint` context is required by main's ruleset ("main automation
+# guardrails"), alongside `check` and `test`. Release PRs opened by the
+# release App get this check like any other PR: App-raised events trigger
+# workflows normally (unlike GITHUB_TOKEN ones — see release-please.yml).
+#
+# `edited` is in the trigger list so fixing a bad PR title re-runs the gate
+# without needing a push.
+
+name: conventional-commits
+
+on:
+  pull_request:
+    types: [opened, edited, reopened, synchronize]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: commitlint-${{ github.head_ref }}
+  cancel-in-progress: true
+
+jobs:
+  commitlint:
+    name: commitlint
+    runs-on: ubuntu-latest
+    steps:
+      # fetch-depth: 0 so base.sha..head.sha resolves. The default checkout
+      # of refs/pull/N/merge carries both parents, so this holds for fork
+      # PRs too.
+      - uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      # No package.json at the repo root, and none wanted: --no-save
+      # installs into an untracked node_modules that exists only for this
+      # job. Majors are pinned; extends resolution finds
+      # @commitlint/config-conventional right next to the CLI.
+      - name: Install commitlint
+        run: npm install --no-save --no-audit --no-fund @commitlint/cli@19 @commitlint/config-conventional@19
+
+      - name: Lint PR commits
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npx commitlint --from "$BASE_SHA" --to "$HEAD_SHA" --verbose
+
+      # The title is passed through the environment, not interpolated into
+      # the script, so backticks/quotes in a title cannot inject shell.
+      - name: Lint PR title (the squash-merge subject)
+        env:
+          PR_TITLE: ${{ github.event.pull_request.title }}
+        run: printf '%s\n' "$PR_TITLE" | npx commitlint --verbose
