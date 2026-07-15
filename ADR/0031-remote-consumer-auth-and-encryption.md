@@ -60,7 +60,14 @@ a pairing step.** Concretely:
 - **Authentication: a pairing token.** A `phux pair` control verb mints a
   high-entropy token (32 bytes from the OS CSPRNG), shown once as a QR / short
   code **together with the server's certificate fingerprint** so the pin is
-  authenticated out-of-band, not blind-TOFU'd. The consumer presents the token
+  authenticated out-of-band, not blind-TOFU'd. The scannable form (phux-a9s)
+  is a one-tap deep-link,
+  `phux://connect?url=<ws(s)-url>[&name=<n>][&fp=<sha256>]&token=<hex>`,
+  printed as text when the server address is known (`--host`, or a detected
+  overlay address plus the `PHUX_WS_ADDR` port) and rendered as a Unicode
+  half-block terminal QR by `phux pair --qr`. A remote consumer parsing the
+  link must accept this exact shape (`url` mandatory, `name`/`fp` optional).
+  The consumer presents the token
   in the **WebSocket upgrade request** (`Authorization: Bearer <token>`), where
   TLS already protects it; the server compares it in constant time and **rejects
   the handshake** (HTTP 401) before any phux frame is read. Verified at every

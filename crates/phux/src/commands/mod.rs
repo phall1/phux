@@ -943,6 +943,27 @@ pub(crate) enum Command {
         /// Defaults to `PHUX_WS_TLS_CERT`.
         #[arg(long, value_name = "PATH")]
         cert: Option<std::path::PathBuf>,
+
+        /// Also render the pairing payload as a scannable QR code. The QR
+        /// encodes the same `phux://connect` one-tap link printed as text,
+        /// so a phone can pair by scanning instead of typing. Needs a server
+        /// address: pass `--host`, or let it fall back to a detected overlay
+        /// address plus the `PHUX_WS_ADDR` port.
+        #[arg(long)]
+        qr: bool,
+
+        /// Server address (`host:port`, or a full `ws://`/`wss://` URL) to
+        /// embed in the connect link so it is fully self-contained. Omitted:
+        /// derived from the detected overlay address and the `PHUX_WS_ADDR`
+        /// port when possible; otherwise no link is printed (the device
+        /// enters the address itself).
+        #[arg(long, value_name = "HOST:PORT")]
+        host: Option<String>,
+
+        /// Human-readable server name to embed in the connect link, shown by
+        /// the device in its server list. Omitted: the device picks a default.
+        #[arg(long, value_name = "NAME")]
+        name: Option<String>,
     },
 }
 

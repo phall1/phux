@@ -64,7 +64,23 @@ Token written to <state-dir>/remote-tokens
 ```
 
 Record the token and the fingerprint; every `phux attach` below uses both. The
-fingerprint is SHA-256, 64 hex digits, optionally colon-separated. Then start
+fingerprint is SHA-256, 64 hex digits, optionally colon-separated.
+
+For a phone or tablet, skip the transcription entirely: when the server
+address is known — pass `--host HOST:PORT` (or a full `ws://`/`wss://` URL),
+or let it fall back to a detected overlay address plus the `PHUX_WS_ADDR`
+port — `phux pair` also prints a one-tap
+`phux://connect?url=…&fp=…&token=…` deep-link carrying the URL, fingerprint,
+and token together, and `phux pair --qr` renders that same link as a
+scannable terminal QR. Treat the link and QR like the token itself: they
+carry the credential. `--name` labels the server in the device's list.
+
+```sh
+# Credentials + a scannable one-tap QR for the device:
+phux pair --qr --host 100.x.y.z:8787 --name studio-mini
+```
+
+Then start
 the listener on a non-loopback bind — TLS and token auth engage automatically:
 
 ```sh
