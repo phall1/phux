@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T18:25:53Z",
+  "generated_at": "2026-07-15T18:26:06Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -10,6 +10,15 @@
       "created_at": "2026-07-15T18:25:38Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T18:25:38Z",
+      "duration_s": 13,
+      "runner_s": 11
     },
     {
       "workflow": "ci",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T17:46:06Z",
       "duration_s": 18,
       "runner_s": 13
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/dialout-connector-adr-spike",
-      "conclusion": "success",
-      "created_at": "2026-07-15T17:46:06Z",
-      "duration_s": 916,
-      "runner_s": 1129
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 104,
+      "runs": 105,
       "success_rate": 86,
       "median_s": 16,
       "p95_s": 20,
