@@ -7,12 +7,14 @@ import {
   type RunRequest,
 } from "./runner.js";
 import {
+  parseAgentRecord,
   parseAgentStateList,
   parseCreateResult,
   parseRunResult,
   parseScreenState,
   parseSessionList,
   SchemaValidationError,
+  type AgentRecord,
   type AgentStateList,
   type CreateResult,
   type RunResult,
@@ -64,6 +66,10 @@ export interface CreateOptions extends ExecutionOptions {
 export interface RunOptions extends ExecutionOptions {
   /** phux's own sentinel deadline, in seconds (distinct from local timeoutMs). */
   readonly phuxTimeoutSeconds?: number;
+}
+
+export interface AgentTargetOptions extends ExecutionOptions {
+  readonly target: string;
 }
 
 export interface PhuxProbe {
@@ -148,6 +154,43 @@ export class PhuxCli {
       args.push("--", ...options.command);
     }
     return this.jsonCommand("new", args, options, parseCreateResult);
+  }
+
+  /** Read one pane's public projection, including declared-record provenance. */
+  async agentShow(options: AgentTargetOptions): Promise<AgentStateList> {
+    const args = ["agent", "show", "--json"];
+    this.pushSocket(args);
+    args.push(options.target);
+    return this.jsonCommand("agent show", args, options, parseAgentStateList);
+  }
+
+  /** Write and parse the CLI's confirmed whole-record response. */
+  async agentSet(
+    target: string,
+    record: AgentRecord,
+    options: ExecutionOptions = {},
+  ): Promise<AgentRecord> {
+    const args = [
+      "agent", "set", target,
+      "--name", record.name,
+      "--kind", record.kind,
+      "--state", record.state,
+      "--attention", record.attention,
+      "--session", record.session,
+    ];
+    this.pushSocket(args);
+    const result = await this.completed("agent set", args, options, false);
+    return parseAgentConfirmation("agent set", this.executable, result.stdout, args);
+  }
+
+  /** Clear a declaration and require the CLI's confirmed tombstone response. */
+  async agentClear(target: string, options: ExecutionOptions = {}): Promise<void> {
+    const args = ["agent", "clear", target];
+    this.pushSocket(args);
+    const result = await this.completed("agent clear", args, options, false);
+    if (!/^@\d+\t-$/.test(result.stdout.trim())) {
+      throw invalidResponse("agent clear", this.executable, args, "expected @N\\t- confirmation");
+    }
   }
 
   async snapshot(options: SnapshotOptions = {}): Promise<ScreenState> {
@@ -322,6 +365,20 @@ function parseJson<T>(
     }
     throw cause;
   }
+}
+
+function parseAgentConfirmation(
+  verb: string,
+  executable: string,
+  stdout: string,
+  args: string[],
+): AgentRecord {
+  const line = stdout.trim();
+  const tab = line.indexOf("\t");
+  if (tab < 2 || !/^@\d+$/.test(line.slice(0, tab))) {
+    throw invalidResponse(verb, executable, args, "expected @N\\t<record-json> confirmation");
+  }
+  return parseJson(verb, executable, line.slice(tab + 1), args, parseAgentRecord);
 }
 
 function invalidResponse(

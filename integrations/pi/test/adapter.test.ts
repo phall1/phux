@@ -89,6 +89,49 @@ test("agentList inventories canonical panes and preserves owning sessions", asyn
   assert.deepEqual(fake.requests[0]?.args, ["agent", "list", "--json", "--socket", "/tmp/p.sock"]);
 });
 
+test("agent show/set/clear use documented commands and validate confirmations", async () => {
+  const requests: RunRequest[] = [];
+  const outputs = [
+    completed(JSON.stringify({ schema_version: 1, agents: [] })),
+    completed('@3\t{"name":"pi","kind":"pi","state":"working","attention":"normal","session":"pi:s-1"}\n'),
+    completed("@3\t-\n"),
+  ];
+  const runner: ProcessRunner = async (request) => {
+    requests.push(request);
+    const result = outputs.shift();
+    if (result === undefined) throw new Error("unexpected request");
+    return result;
+  };
+  const cli = new PhuxCli({ runner, socket: "/tmp/p.sock" });
+  const record = {
+    name: "pi",
+    kind: "pi",
+    state: "working",
+    attention: "normal",
+    session: "pi:s-1",
+  } as const;
+
+  await cli.agentShow({ target: "@3" });
+  assert.deepEqual(await cli.agentSet("@3", record), record);
+  await cli.agentClear("@3");
+
+  assert.deepEqual(requests.map((request) => request.args), [
+    ["agent", "show", "--json", "--socket", "/tmp/p.sock", "@3"],
+    ["agent", "set", "@3", "--name", "pi", "--kind", "pi", "--state", "working", "--attention", "normal", "--session", "pi:s-1", "--socket", "/tmp/p.sock"],
+    ["agent", "clear", "@3", "--socket", "/tmp/p.sock"],
+  ]);
+});
+
+test("agent set and clear reject unconfirmed responses", async () => {
+  const set = new PhuxCli({ runner: fakeRunner(completed("not a confirmation")).runner });
+  await assert.rejects(
+    set.agentSet("@3", { name: "pi", kind: "pi", state: "idle", attention: "low", session: "pi:s" }),
+    expectCode("invalid_response"),
+  );
+  const clear = new PhuxCli({ runner: fakeRunner(completed("@3\tstill-there")).runner });
+  await assert.rejects(clear.agentClear("@3"), expectCode("invalid_response"));
+});
+
 test("wait preserves the final screen for exit 0 and specialized exit 124", async () => {
   const satisfied = new PhuxCli({ runner: fakeRunner(completed(screenJson, 0)).runner });
   assert.deepEqual(await satisfied.wait(), {

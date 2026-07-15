@@ -102,6 +102,15 @@ export interface AgentStateList {
   readonly agents: readonly AgentPane[];
 }
 
+/** The complete declared `phux.agent/v1` record written by `phux agent set`. */
+export interface AgentRecord {
+  readonly name: string;
+  readonly kind: string;
+  readonly state: AgentState;
+  readonly attention: AgentAttention;
+  readonly session: string;
+}
+
 export class SchemaValidationError extends Error {
   constructor(readonly path: string, expectation: string) {
     super(`${path} must be ${expectation}`);
@@ -299,6 +308,23 @@ const AGENT_KINDS = ["codex", "claude", "plugin", "declared", "unknown"] as cons
 const AGENT_STATES = ["unknown", "idle", "working", "blocked", "done"] as const;
 const AGENT_ATTENTION = ["none", "low", "normal", "high"] as const;
 const PANE_SELECTOR = /^(?:[^/\s]+\/)?@\d+$/;
+
+export function parseAgentRecord(value: unknown, path = "$ (phux.agent/v1 record)"): AgentRecord {
+  const root = record(value, path);
+  const name = string(root.name, `${path}.name`);
+  if (name.trim().length === 0) throw new SchemaValidationError(`${path}.name`, "non-empty");
+  const kind = string(root.kind, `${path}.kind`);
+  if (kind.trim().length === 0) throw new SchemaValidationError(`${path}.kind`, "non-empty");
+  const session = string(root.session, `${path}.session`);
+  if (session.trim().length === 0) throw new SchemaValidationError(`${path}.session`, "non-empty");
+  return {
+    name,
+    kind,
+    state: oneOf(root.state, `${path}.state`, AGENT_STATES),
+    attention: oneOf(root.attention, `${path}.attention`, AGENT_ATTENTION),
+    session,
+  };
+}
 
 export function parseAgentStateList(value: unknown): AgentStateList {
   const root = record(value, "$ (phux agent list --json CLI shape)");

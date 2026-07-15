@@ -36,9 +36,12 @@ export interface TargetPersistence {
   appendEntry<T>(customType: string, data: T): void;
 }
 
+export type PhuxTargetListener = (selection: PhuxTargetSelection | null) => void;
+
 export class PhuxTargetStore {
   private snapshotValue: PhuxTargetSnapshot = { selection: null, availability: "unselected" };
   private panesValue: readonly AgentPane[] = [];
+  private readonly listeners = new Set<PhuxTargetListener>();
 
   constructor(
     private readonly persistence: TargetPersistence,
@@ -53,7 +56,13 @@ export class PhuxTargetStore {
     return this.panesValue;
   }
 
+  subscribe(listener: PhuxTargetListener): () => void {
+    this.listeners.add(listener);
+    return () => this.listeners.delete(listener);
+  }
+
   restoreFromBranch(entries: readonly BranchEntry[]): void {
+    const previous = this.snapshotValue.selection;
     let restored: PhuxTargetSelection | null = null;
     for (let index = entries.length - 1; index >= 0; index--) {
       const entry = entries[index];
@@ -65,6 +74,7 @@ export class PhuxTargetStore {
     this.snapshotValue = restored === null
       ? { selection: null, availability: "unselected" }
       : { selection: restored, availability: "unavailable", reason: "target has not been checked yet" };
+    if (!sameSelection(previous, restored)) this.notifySelection(restored);
   }
 
   async refresh(signal?: AbortSignal): Promise<PhuxTargetSnapshot> {
@@ -127,9 +137,23 @@ export class PhuxTargetStore {
 
   private persist(selection: PhuxTargetSelection): PhuxTargetSelection {
     this.persistence.appendEntry(PHUX_TARGET_ENTRY, selection);
+    const changed = !sameSelection(this.snapshotValue.selection, selection);
     this.snapshotValue = { selection, availability: "available" };
+    if (changed) this.notifySelection(selection);
     return selection;
   }
+
+  private notifySelection(selection: PhuxTargetSelection | null): void {
+    for (const listener of this.listeners) listener(selection);
+  }
+}
+
+function sameSelection(
+  left: PhuxTargetSelection | null,
+  right: PhuxTargetSelection | null,
+): boolean {
+  if (left === null || right === null) return left === right;
+  return left.selector === right.selector && left.session === right.session && left.window === right.window;
 }
 
 export function formatPaneDisplay(pane: AgentPane): string {
