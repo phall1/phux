@@ -17,7 +17,11 @@ dir="${1:?usage: render-dashboard.sh <metrics-dir>}"
 now=$(date -u +%s)
 generated=$(date -u +%Y-%m-%dT%H:%M:%SZ)
 
-all=$(cat "$dir"/runs/*.ndjson 2>/dev/null | jq -cs '.' || echo '[]')
+# `|| true`, not `|| echo []`: under pipefail a missing glob fails the
+# pipeline AFTER jq already printed "[]", and a second [] would corrupt the
+# capture into two JSON documents.
+all=$(cat "$dir"/runs/*.ndjson 2>/dev/null | jq -cs '.' || true)
+[ -n "$all" ] || all='[]'
 if [ "$(jq 'length' <<<"$all")" -eq 0 ]; then
     echo "render-dashboard: no records yet in ${dir}/runs/ — nothing to render"
     exit 0
