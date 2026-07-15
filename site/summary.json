@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T19:37:30Z",
+  "generated_at": "2026-07-15T19:37:45Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T19:37:33Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -23,11 +32,29 @@
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T19:37:14Z",
+      "duration_s": 15,
+      "runner_s": 11
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
       "branch": "feat/phux-detach",
       "conclusion": "success",
       "created_at": "2026-07-15T19:36:41Z",
       "duration_s": 14,
       "runner_s": 11
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T19:36:37Z",
+      "duration_s": 54,
+      "runner_s": 49
     },
     {
       "workflow": "conventional-commits",
@@ -244,41 +271,14 @@
       "created_at": "2026-07-15T18:32:11Z",
       "duration_s": 809,
       "runner_s": 1054
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "ci/sccache-workspace-cache",
-      "conclusion": "success",
-      "created_at": "2026-07-15T18:30:03Z",
-      "duration_s": 14,
-      "runner_s": 11
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "ci/sccache-workspace-cache",
-      "conclusion": "success",
-      "created_at": "2026-07-15T18:30:03Z",
-      "duration_s": 1045,
-      "runner_s": 1316
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/socket-path-too-long",
-      "conclusion": "success",
-      "created_at": "2026-07-15T18:26:39Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 129,
-      "success_rate": 60,
-      "median_s": 809,
+      "runs": 130,
+      "success_rate": 59,
+      "median_s": 798,
       "p95_s": 1035,
       "runner_minutes": 1595
     },
@@ -300,15 +300,15 @@
     },
     {
       "workflow": "release-please",
-      "runs": 19,
+      "runs": 20,
       "success_rate": 100,
       "median_s": 41,
-      "p95_s": 52,
-      "runner_minutes": 27
+      "p95_s": 54,
+      "runner_minutes": 28
     },
     {
       "workflow": "conventional-commits",
-      "runs": 122,
+      "runs": 123,
       "success_rate": 86,
       "median_s": 15,
       "p95_s": 20,
@@ -318,7 +318,7 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 128,
+      "runs": 129,
       "median_queue_s": 2,
       "median_s": 798,
       "p95_s": 1026
@@ -332,7 +332,7 @@
     },
     {
       "job": "detect docs-only",
-      "runs": 129,
+      "runs": 130,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
