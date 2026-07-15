@@ -1,0 +1,44 @@
+{
+  "name": "@phux/pi",
+  "version": "0.1.0",
+  "description": "Pi integration for controlling shared phux terminals",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phall1/phux.git",
+    "directory": "integrations/pi"
+  },
+  "keywords": [
+    "pi-package",
+    "phux",
+    "terminal"
+  ],
+  "files": [
+    "extensions",
+    "src",
+    "README.md"
+  ],
+  "exports": {
+    ".": "./src/index.ts",
+    "./adapter": "./src/adapter.ts"
+  },
+  "pi": {
+    "extensions": [
+      "./extensions/index.ts"
+    ]
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.build.json",
+    "test": "npm run build:test && node --test dist/test/*.test.js",
+    "build:test": "tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "devDependencies": {
+    "@types/node": "^24.0.0",
+    "typescript": "^5.9.0"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
