@@ -12,6 +12,7 @@ use std::collections::HashMap;
 use libghostty_vt::terminal::{Mode, ScrollViewport};
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
+use phux_protocol::input::key::{ModSet, PhysicalKey};
 use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use phux_protocol::wire::frame::{
     Command, FrameKind, InputMode, SESSION_NAME_KEY, Scope, TerminalSignal,
@@ -20,6 +21,7 @@ use phux_protocol::wire::frame::{
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
+use super::input::make_named_key;
 use super::paint::{SidebarReservation, content_rect};
 use super::plugin_actions::{PluginActionEntry, PluginRunResult};
 use super::plugin_panes::{HostedPlacement, PluginPaneEntry};
@@ -46,6 +48,17 @@ pub(super) struct DispatchCtx<'a> {
     /// Outer-viewport `(cols, rows)`. Used by `apply_resize` to convert
     /// `amount` (cells) to a ratio delta.
     pub viewport: (u16, u16),
+    /// Host per-cell pixel size `(width, height)`, derived from the outer
+    /// terminal's winsize pixel fields exactly the way the server derives
+    /// its cell size from our `VIEWPORT_RESIZE` (`pixel / cells`, floored —
+    /// SPEC L1 §9.2.1), so the two ends quantize mouse positions with the
+    /// same geometry. Falls back to the same 8x16 the server seeds when the
+    /// host reports no pixels. Never zero on either axis.
+    ///
+    /// SPEC input.md §3.1: `INPUT_MOUSE` positions on the wire are
+    /// Terminal-local surface-space PIXELS; the dispatcher routes in cells
+    /// and scales by this at the send boundary only (phux-yyex).
+    pub cell_px: (u16, u16),
     /// Monotonic source of new request ids. We don't currently issue
     /// per-action correlated requests (the only side-channel today is
     /// the layout `SET_METADATA`, which doesn't need a reply), but we
@@ -684,6 +697,33 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         && let Some(slot) = panes.get_mut(&target)
                         && !terminal_wants_mouse_tracking(slot)
                     {
+                        // xterm "alternate scroll" (DECSET 1007, on by
+                        // default in libghostty): the alt screen has no
+                        // scrollback, so the viewport scroll below would be
+                        // a silent no-op there and the wheel would go dead
+                        // in any full-screen app that doesn't track the
+                        // mouse (pagers, vim with mouse off). Convert each
+                        // wheel notch into arrow-key presses instead — the
+                        // same translation tmux and ghostty perform. Apps
+                        // opt out with `?1007l` (phux-yyex).
+                        if terminal_in_alt_screen(slot) && terminal_alt_scroll(slot) {
+                            let arrow = make_named_key(
+                                if delta < 0 {
+                                    PhysicalKey::ArrowUp
+                                } else {
+                                    PhysicalKey::ArrowDown
+                                },
+                                ModSet::empty(),
+                            );
+                            for _ in 0..delta.unsigned_abs() {
+                                conn.send(&FrameKind::InputKey {
+                                    terminal_id: target.clone(),
+                                    event: arrow.clone(),
+                                })
+                                .await?;
+                            }
+                            continue;
+                        }
                         slot.terminal.scroll_viewport(ScrollViewport::Delta(delta));
                         if delta < 0 {
                             // Scrolled up into scrollback: remember so the
@@ -718,7 +758,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     }
                     conn.send(&FrameKind::InputMouse {
                         terminal_id: target,
-                        event: routed,
+                        event: scale_to_surface_pixels(routed, ctx.cell_px),
                     })
                     .await?;
                     continue;
@@ -872,6 +912,19 @@ fn wheel_scroll_delta(mouse: &MouseEvent) -> Option<isize> {
     }
 }
 
+/// Scale a pane-local CELL-coordinate mouse event to the Terminal-local
+/// surface-space PIXELS the wire carries (SPEC input.md §3.1: cell-quantized
+/// clients emit `cell_index x cell_size`). The dispatcher hit-tests and
+/// routes in cells; this runs at the `INPUT_MOUSE` send boundary only, so
+/// every local consumer (overlays, wheel branch, drag) keeps cell units.
+/// Axes are clamped to 1px so a degenerate geometry can never zero out the
+/// position (phux-yyex).
+fn scale_to_surface_pixels(mut mouse: MouseEvent, cell_px: (u16, u16)) -> MouseEvent {
+    mouse.x *= f64::from(cell_px.0.max(1));
+    mouse.y *= f64::from(cell_px.1.max(1));
+    mouse
+}
+
 fn terminal_wants_mouse_tracking(slot: &PaneSlot) -> bool {
     [
         Mode::X10_MOUSE,
@@ -881,6 +934,14 @@ fn terminal_wants_mouse_tracking(slot: &PaneSlot) -> bool {
     ]
     .into_iter()
     .any(|mode| slot.terminal.mode(mode).unwrap_or(false))
+}
+
+/// Whether the pane's mirror has DECSET 1007 (xterm "alternate scroll")
+/// active. libghostty defaults it ON — matching ghostty — so wheel-to-arrow
+/// translation works out of the box for alt-screen apps without mouse
+/// tracking; an app that wants raw wheel silence opts out with `?1007l`.
+fn terminal_alt_scroll(slot: &PaneSlot) -> bool {
+    slot.terminal.mode(Mode::ALT_SCROLL).unwrap_or(false)
 }
 
 /// Whether the pane's mirror is on the alternate screen buffer — the
@@ -2918,6 +2979,7 @@ mod tests {
             resolver: None,
             workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -2976,6 +3038,7 @@ mod tests {
                 resolver: None,
                 workspace,
                 viewport: (80, 24),
+                cell_px: (1, 1),
                 next_request_id: &mut next_request_id,
                 pending_splits: &mut pending_splits,
                 pending_windows: &mut pending_windows,
@@ -3356,6 +3419,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -3419,6 +3483,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -3517,6 +3582,7 @@ mod tests {
                 resolver: None,
                 workspace,
                 viewport: (80, 24),
+                cell_px: (1, 1),
                 next_request_id: &mut next_request_id,
                 pending_splits: &mut pending_splits,
                 pending_windows: &mut pending_windows,
@@ -3678,6 +3744,7 @@ mod tests {
             resolver: None,
             workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -4397,6 +4464,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -4481,6 +4549,7 @@ mod tests {
                 resolver: None,
                 workspace: &mut workspace,
                 viewport: (80, 24),
+                cell_px: (1, 1),
                 next_request_id: &mut next_request_id,
                 pending_splits: &mut pending_splits,
                 pending_windows: &mut pending_windows,
@@ -4653,6 +4722,7 @@ mod tests {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -4763,6 +4833,7 @@ mod tests {
             resolver: Some(&mut resolver),
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -4920,6 +4991,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (8, 4),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -5102,6 +5174,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -5297,6 +5370,7 @@ mod tests {
                 resolver: None,
                 workspace: &mut workspace,
                 viewport: (80, 24),
+                cell_px: (1, 1),
                 next_request_id: &mut next_request_id,
                 pending_splits: &mut pending_splits,
                 pending_windows: &mut pending_windows,
@@ -5501,6 +5575,29 @@ mod tests {
         Option<TerminalId>,
         std::collections::HashSet<TerminalId>,
     ) {
+        dispatch_mouse_two_pane_with(events, seed_optout, &[], (1, 1)).await
+    }
+
+    /// [`dispatch_mouse_two_pane`] with pane slots: each `(id, vt)` entry
+    /// allocates a [`PaneSlot`] mirror and feeds it `vt` (mode seeds like
+    /// `?1049h`), so the wheel branch's mode gates are exercised against
+    /// real libghostty state. `cell_px` is the ctx cell geometry for the
+    /// SPEC §3.1 cells→pixels send-boundary scaling.
+    #[allow(
+        clippy::future_not_send,
+        reason = "client-side libghostty Terminal is !Send; ADR-0003 binds us to current-thread"
+    )]
+    async fn dispatch_mouse_two_pane_with(
+        events: Vec<InputEvent>,
+        seed_optout: &[TerminalId],
+        seed_vt: &[(TerminalId, &[u8])],
+        cell_px: (u16, u16),
+    ) -> (
+        Vec<FrameKind>,
+        Option<DragGrab>,
+        Option<TerminalId>,
+        std::collections::HashSet<TerminalId>,
+    ) {
         let mut workspace = two_pane_workspace();
         let (a, b) = tokio::net::UnixStream::pair().expect("uds pair");
         let mut conn = Connection::from_stream(a);
@@ -5512,6 +5609,11 @@ mod tests {
             PredictionState::new(crate::predict::PredictiveConfig::disabled(), 80, 24);
         let overlay = Overlay;
         let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
+        for (id, vt) in seed_vt {
+            let mut slot = PaneSlot::new_with_size(39, 24).expect("pane slot");
+            slot.terminal.vt_write(vt);
+            panes.insert(id.clone(), slot);
+        }
         let mut next_request_id = 1;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
@@ -5532,6 +5634,7 @@ mod tests {
                 resolver: None,
                 workspace: &mut workspace,
                 viewport: (80, 24),
+                cell_px,
                 next_request_id: &mut next_request_id,
                 pending_splits: &mut pending_splits,
                 pending_windows: &mut pending_windows,
@@ -5693,6 +5796,166 @@ mod tests {
         }
     }
 
+    // -- phux-yyex: wheel routing per pane screen/mode state ---------------
+
+    /// Wheel over an alt-screen pane without mouse tracking synthesizes
+    /// arrow-key presses (xterm alternate scroll, DECSET 1007 — default ON
+    /// in libghostty): the alt screen has no scrollback, so the local
+    /// viewport scroll would be a silent no-op and the wheel would go dead.
+    #[tokio::test]
+    async fn wheel_in_alt_screen_pane_synthesizes_arrow_keys() {
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Four,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(tid(2), b"\x1b[?1049h")],
+            (1, 1),
+        )
+        .await;
+        assert_eq!(
+            received.len(),
+            3,
+            "one wheel notch = 3 arrows: {received:?}"
+        );
+        for frame in &received {
+            match frame {
+                FrameKind::InputKey { terminal_id, event } => {
+                    assert_eq!(*terminal_id, tid(2));
+                    assert_eq!(event.key, PhysicalKey::ArrowUp);
+                }
+                other => panic!("expected INPUT_KEY, got {other:?}"),
+            }
+        }
+    }
+
+    /// Wheel-down in the same alt-screen pane maps to `ArrowDown`.
+    #[tokio::test]
+    async fn wheel_down_in_alt_screen_pane_synthesizes_arrow_down() {
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Five,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(tid(2), b"\x1b[?1049h")],
+            (1, 1),
+        )
+        .await;
+        assert_eq!(received.len(), 3);
+        for frame in &received {
+            match frame {
+                FrameKind::InputKey { event, .. } => {
+                    assert_eq!(event.key, PhysicalKey::ArrowDown);
+                }
+                other => panic!("expected INPUT_KEY, got {other:?}"),
+            }
+        }
+    }
+
+    /// An app that opted out of alternate scroll (`?1007l`) gets neither
+    /// arrows nor a forwarded wheel — matching xterm, the wheel is inert on
+    /// an alt screen that asked for silence.
+    #[tokio::test]
+    async fn wheel_with_alt_scroll_off_sends_nothing() {
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Four,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(tid(2), b"\x1b[?1049h\x1b[?1007l")],
+            (1, 1),
+        )
+        .await;
+        assert!(received.is_empty(), "expected no frames, got {received:?}");
+    }
+
+    /// Wheel over a primary-screen pane without mouse tracking is consumed
+    /// by the local scrollback viewport — nothing crosses the wire.
+    #[tokio::test]
+    async fn wheel_in_primary_screen_pane_scrolls_locally() {
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Four,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(tid(2), b"")],
+            (1, 1),
+        )
+        .await;
+        assert!(received.is_empty(), "expected no frames, got {received:?}");
+    }
+
+    /// Wheel over a pane whose app tracks the mouse (Claude Code sets
+    /// `?1000h ?1002h ?1003h ?1006h`) forwards the wheel as `INPUT_MOUSE` so
+    /// the app scrolls itself.
+    #[tokio::test]
+    async fn wheel_in_mouse_tracking_pane_forwards_input_mouse() {
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Four,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(
+                tid(2),
+                b"\x1b[?1049h\x1b[?1000h\x1b[?1002h\x1b[?1003h\x1b[?1006h",
+            )],
+            (1, 1),
+        )
+        .await;
+        match received.as_slice() {
+            [FrameKind::InputMouse { terminal_id, event }] => {
+                assert_eq!(*terminal_id, tid(2));
+                assert_eq!(event.button, MouseButton::Four);
+            }
+            other => panic!("expected exactly one INPUT_MOUSE, got {other:?}"),
+        }
+    }
+
+    /// SPEC input.md §3.1: forwarded `INPUT_MOUSE` positions are surface-space
+    /// pixels (`cell_index x cell_size`), scaled at the send boundary from
+    /// the dispatcher's pane-local cell coordinates.
+    #[tokio::test]
+    async fn forwarded_input_mouse_scales_cells_to_surface_pixels() {
+        let dx = two_pane_divider_x();
+        let (received, _, _, _) = dispatch_mouse_two_pane_with(
+            vec![InputEvent::Mouse(mev(
+                MouseAction::Press,
+                MouseButton::Left,
+                70.0,
+                5.0,
+            ))],
+            &[],
+            &[(tid(2), b"\x1b[?1000h\x1b[?1006h")],
+            (8, 16),
+        )
+        .await;
+        // Pane 2's content starts one column right of the divider.
+        let expected_x = (70.0 - f64::from(dx) - 1.0) * 8.0;
+        let expected_y = 5.0 * 16.0;
+        match received.as_slice() {
+            [FrameKind::InputMouse { event, .. }] => {
+                assert!((event.x - expected_x).abs() < f64::EPSILON);
+                assert!((event.y - expected_y).abs() < f64::EPSILON);
+            }
+            other => panic!("expected exactly one INPUT_MOUSE, got {other:?}"),
+        }
+    }
+
     /// Run a `set-pane` action against `workspace` with a caller-owned
     /// opt-out set, returning the effects.
     fn run_set_pane(
@@ -5717,6 +5980,7 @@ mod tests {
             resolver: None,
             workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,
@@ -5934,6 +6198,7 @@ mod tests {
             resolver: None,
             workspace: &mut workspace,
             viewport: (80, 24),
+            cell_px: (1, 1),
             next_request_id: &mut next_request_id,
             pending_splits: &mut pending_splits,
             pending_windows: &mut pending_windows,

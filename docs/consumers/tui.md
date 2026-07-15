@@ -1444,10 +1444,17 @@ the pointer over a divider whenever the inner program has no mouse mode.
 | Press on a divider       | Grab the boundary for a resize drag   |
 | Drag a divider           | Resize the boundary (tracks pointer)  |
 | Release                  | Commit the new layout (broadcast L3)  |
-| Scroll wheel in pane     | Forwarded to the pane (inner program  |
-|                          | sees it if it enabled mouse mode); in |
-|                          | copy-mode it scrolls the focused      |
-|                          | pane's local viewport                 |
+| Scroll wheel in pane     | Layered: an inner program that        |
+|                          | enabled mouse mode gets the wheel     |
+|                          | forwarded; otherwise on the primary   |
+|                          | screen the wheel scrolls the pane's   |
+|                          | client-local scrollback viewport, and |
+|                          | on the alt screen it becomes arrow    |
+|                          | keys (xterm alternate scroll, DECSET  |
+|                          | 1007 — on by default, apps opt out    |
+|                          | with `?1007l`). In copy-mode it       |
+|                          | scrolls the focused pane's local      |
+|                          | viewport                              |
 | Right-click in pane      | Forwarded to the inner program        |
 | Click on status bar row  | A `windows`-widget tab selects that   |
 |                          | window (`select-window { index }`,    |
