@@ -33,6 +33,7 @@ pub mod agent_meta;
 pub mod ask;
 pub mod attach;
 pub mod l2;
+pub mod layout_ops;
 pub mod render;
 pub mod run;
 pub mod selector;

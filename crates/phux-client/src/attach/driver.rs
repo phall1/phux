@@ -33,9 +33,9 @@ use libghostty_vt::terminal::Mode;
 use libghostty_vt::{Terminal as GhosttyTerminal, TerminalOptions};
 use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
-use phux_protocol::ids::{ClientId, GroupId, TerminalId};
+use phux_protocol::ids::{ClientId, TerminalId};
 use phux_protocol::wire::frame::{
-    AttachTarget, CONFIG_RELOAD_KEY, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
+    AttachTarget, CONFIG_RELOAD_KEY, Command, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
 };
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
@@ -63,11 +63,38 @@ use crate::agent_meta::{
     parse_agent_record,
 };
 use crate::layout::Workspace;
+pub(super) use crate::layout_ops::{
+    DEFAULT_LAYOUT_GROUP_ID as DEFAULT_GROUP_ID, LAYOUT_KEY, layout_key,
+};
 use crate::predict::{Overlay, PredictionState, PredictiveConfig};
 use crate::render::chrome::sidebar::{AgentEntry, SidebarPainter, attention_rank};
 use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
+
+/// Driver-owned state for client-local attention navigation (phux-oih5.16).
+///
+/// The first jump saves the pane the user came from. Further cycling leaves
+/// that origin untouched; return consumes it even when the pane has gone
+/// stale. Nothing in this state is serialized or written to metadata.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct AttentionNavigation {
+    origin: Option<TerminalId>,
+}
+
+impl AttentionNavigation {
+    /// Save an origin only when a navigation excursion is not already active.
+    pub(super) fn save_origin_once(&mut self, origin: Option<&TerminalId>) {
+        if self.origin.is_none() {
+            self.origin = origin.cloned();
+        }
+    }
+
+    /// Consume the saved origin. A stale origin must not remain armed forever.
+    pub(super) const fn take_origin(&mut self) -> Option<TerminalId> {
+        self.origin.take()
+    }
+}
 
 /// One pane's mirror: the libghostty Terminal that ingests
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
@@ -1533,6 +1560,10 @@ async fn main_loop<W: super::RenderSink>(
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
     let mut workspace = Workspace::default();
     let mut focused_pane: Option<TerminalId> = None;
+    // phux-oih5.4: one-entry focus MRU, local to this attached client. It is
+    // deliberately outside Workspace so layout metadata never persists or
+    // shares focus history (ADR-0019 decision 6).
+    let mut focus_history = super::focus::FocusHistory::default();
     // ADR-0033: this client's own server-assigned ClientId, captured from
     // ATTACHED. Used to render "you hold the wheel" vs another client in the
     // supervisory badge. `None` until ATTACHED lands.
@@ -1671,6 +1702,10 @@ async fn main_loop<W: super::RenderSink>(
     // route to the overlay (no pane forwarding) and pane stdout flushes
     // are suppressed (ADR-0020 §Decision invariant 5).
     let mut overlays = OverlayState::new();
+    // phux-oih5.16: one client-local return point for attention navigation.
+    // Cycling never overwrites it; return consumes it. It is deliberately
+    // absent from Workspace/L3 metadata and resets on re-attach.
+    let mut attention_navigation = AttentionNavigation::default();
     // ADR-0048: the in-flight divider drag. `None` between drags; a press
     // on a divider records the grabbed split, motion re-tunes it, release
     // clears it. Lives across dispatch batches (press and release land in
@@ -2155,6 +2190,7 @@ async fn main_loop<W: super::RenderSink>(
                 let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
+                    focus_history: focus_history.clone(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
@@ -2178,6 +2214,7 @@ async fn main_loop<W: super::RenderSink>(
                     status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
+                    attention_navigation: &mut attention_navigation,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
@@ -2197,6 +2234,7 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                focus_history = ctx.focus_history;
                 // phux-4h5a: a `toggle-sidebar` in this batch flipped
                 // `sidebar_enabled`. Re-fold it into the reservation so the
                 // reflow + repaint below tile into the NEW content rect this
@@ -2451,6 +2489,7 @@ async fn main_loop<W: super::RenderSink>(
                                     .rects
                                 })
                             });
+                        let focused_before_frame = focused_pane.clone();
                         let outcome = handle_server_frame(
                             out,
                             f,
@@ -2471,8 +2510,25 @@ async fn main_loop<W: super::RenderSink>(
                             overlays.is_active(),
                             defer_paint,
                         )?;
+                        focus_history.observe(focused_before_frame, focused_pane.as_ref());
+                        focus_history.repair(focused_pane.as_ref(), &workspace);
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
+                        }
+                        // A peer headless placement can add a layout leaf
+                        // without this attached client being subscribed to the
+                        // new Terminal. Attach each discovered leaf so its
+                        // snapshot creates a PaneSlot and renders in place.
+                        for terminal_id in &outcome.attach_panes {
+                            let request_id = next_request_id;
+                            next_request_id = next_request_id.wrapping_add(1);
+                            conn.send(&FrameKind::Command {
+                                request_id,
+                                command: Command::AttachTerminal {
+                                    terminal_id: terminal_id.clone(),
+                                },
+                            })
+                            .await?;
                         }
                         // phux-foz.7: did this frame change anything the
                         // agent-fleet dashboard projects (agent records,
@@ -2630,9 +2686,10 @@ async fn main_loop<W: super::RenderSink>(
                             // restored focus with a warning.
                             if let Some(idx) = pending_window.take() {
                                 if workspace.select(idx) {
-                                    focused_pane = workspace
+                                    let next_focus = workspace
                                         .active_window()
                                         .and_then(|ls| ls.focus.clone());
+                                    focus_history.transition(&mut focused_pane, next_focus);
                                     // phux-jpqd: the pane half of a
                                     // one-step cross-session pane pick — move
                                     // focus onto the target DFS leaf of the
@@ -2650,7 +2707,8 @@ async fn main_loop<W: super::RenderSink>(
                                             {
                                                 ls.focus = Some(leaf.clone());
                                             }
-                                            focused_pane = Some(leaf);
+                                            focus_history
+                                                .transition(&mut focused_pane, Some(leaf));
                                         } else {
                                             tracing::warn!(
                                                 window = idx,
@@ -2918,6 +2976,7 @@ async fn main_loop<W: super::RenderSink>(
                 let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
+                    focus_history: focus_history.clone(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
@@ -2941,6 +3000,7 @@ async fn main_loop<W: super::RenderSink>(
                     status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
+                    attention_navigation: &mut attention_navigation,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
@@ -2960,6 +3020,7 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                focus_history = ctx.focus_history;
                 // phux-4h5a: re-fold a `toggle-sidebar` flip into the
                 // reservation, same as the stdin arm, so the same-iteration
                 // repaint tiles into the new content rect.
@@ -3323,24 +3384,6 @@ async fn main_loop<W: super::RenderSink>(
     }
 }
 
-/// phux-4li.5: L3 metadata key PREFIX under which the multi-pane layout
-/// envelope persists (ADR-0019 decision 1). The reference TUI is the
-/// sole consumer; other clients (a future GUI, an agent) never read
-/// or write it.
-///
-/// The persisted key is per-session: [`layout_key`] suffixes this with the
-/// session id so each session keeps its OWN layout, isolated in the shared
-/// group's metadata. Before phux-jy4t every session wrote this bare key, so a
-/// new session inherited (and clobbered) its sibling's tree.
-pub(super) const LAYOUT_KEY: &str = "phux.tui.layout/v1";
-
-/// The per-session layout metadata key: [`LAYOUT_KEY`] suffixed with the
-/// session id (phux-jy4t). Two clients on the same session share one key (and
-/// thus one layout + subscription); different sessions are isolated.
-pub(super) fn layout_key(session: phux_protocol::ids::SessionId) -> String {
-    format!("{LAYOUT_KEY}/{}", session.get())
-}
-
 /// phux-foz.8: fetch each peer session's persisted layout — one
 /// `GET_METADATA` on the per-session layout key per session other than
 /// `focused` — so the window picker can render one-step cross-session
@@ -3548,14 +3591,6 @@ fn refresh_fleet_if_open<W: super::RenderSink>(
 pub(super) fn is_layout_key_string(key: &str) -> bool {
     key == LAYOUT_KEY || key.starts_with(&format!("{LAYOUT_KEY}/"))
 }
-
-/// phux-4li.5: the single Group v0.1 servers expose. The grouping tier
-/// is not a wire lifecycle; every L3 key the reference TUI cares about
-/// is scoped to this constant. Matches `phux_server::state::DEFAULT_GROUP_ID`
-/// (the server picks the same numeric value; if they ever drift, the
-/// L3 reconcile path silently no-ops because the broadcast scope
-/// won't match).
-pub(super) const DEFAULT_GROUP_ID: GroupId = GroupId::new(1);
 
 /// phux-4li.5: build a [`phux_config::keybind::Resolver`] from a
 /// keybindings snapshot (post phux-r82.5: the plugin-merged one, so
@@ -4683,6 +4718,17 @@ mod tests {
         assert_eq!(format_attention_hint(0), None);
         assert_eq!(format_attention_hint(1).as_deref(), Some("[ ASK ]"));
         assert_eq!(format_attention_hint(3).as_deref(), Some("[ ASK x3 ]"));
+    }
+
+    /// phux-oih5.16: the driver holds exactly one client-local origin. A
+    /// second attention jump cannot overwrite it, and return consumes it.
+    #[test]
+    fn attention_navigation_saves_once_and_consumes() {
+        let mut navigation = AttentionNavigation::default();
+        navigation.save_origin_once(Some(&TerminalId::local(1)));
+        navigation.save_origin_once(Some(&TerminalId::local(2)));
+        assert_eq!(navigation.take_origin(), Some(TerminalId::local(1)));
+        assert_eq!(navigation.take_origin(), None);
     }
 
     /// phux-foz.1: key/paste input forwarded to a pane clears its asked

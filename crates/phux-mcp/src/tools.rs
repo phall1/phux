@@ -10,16 +10,18 @@
 //! that becomes a `tools/call` result with `isError: true`. Tool failures
 //! never crash the JSON-RPC loop.
 
+#![allow(
+    clippy::similar_names,
+    reason = "argv and parsed args are deliberately adjacent in canonical CLI adapters"
+)]
+
 use std::time::Duration;
 
 use phux_client::attach::AttachError;
-use phux_client::attach::connection::Connection;
-use phux_client::run::RunOutcome;
 use phux_client::selector::{self, Selector};
 use phux_client::state;
 use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, FrameKind};
 use phux_protocol::wire::info::SessionSnapshot;
 use serde_json::{Value, json};
 
@@ -48,8 +50,9 @@ impl From<AttachError> for ToolError {
 /// (`docs/consumers/tui.md` §3), resolved client-side against a `GET_STATE`
 /// snapshot exactly as the CLI resolves it (ADR-0021).
 const TARGET_DESC: &str = "Target selector: session, session:window, \
-    session:window.pane, @paneid, host/@paneid, or `.`/`=` for the focused session. Omit \
-    for the focused/last session.";
+    session:window.pane, @paneid, or `.` for the focused session. `=` is \
+    unsupported because MCP has no attached-client focus history. Omit for \
+    the focused session.";
 
 /// The MCP tool catalog: name, description, and JSON-Schema input shape.
 ///
@@ -106,7 +109,7 @@ pub(crate) fn catalog() -> Value {
                 "properties": {
                     "target": { "type": "string", "description": TARGET_DESC },
                     "command": { "type": "string" },
-                    "timeout_secs": { "type": "number", "description": "Give up after this many seconds. Default 600; 0 waits indefinitely." },
+                    "timeout_secs": { "type": "number", "minimum": 1, "maximum": 3600, "description": "Give up after this many seconds. Default 600; bounded to 1..=3600." },
                     "socket": { "type": "string" }
                 },
                 "required": ["target", "command"]
@@ -128,7 +131,7 @@ pub(crate) fn catalog() -> Value {
         },
         {
             "name": "phux_new",
-            "description": "Create a named session on the running server without attaching, returning its name and seed pane id. The server must already be running (this does not auto-spawn one).",
+            "description": "Create a named session without attaching, returning its name and seed pane id through the canonical phux new --json surface.",
             "inputSchema": {
                 "type": "object",
                 "properties": {
@@ -142,14 +145,16 @@ pub(crate) fn catalog() -> Value {
         },
         {
             "name": "phux_kill",
-            "description": "Kill the Terminal(s) a selector resolves to (a whole session, a window, a pane, or `#tag`). Atomic for a group via KILL_TERMINALS.",
+            "description": "Kill the Terminal(s) a selector resolves to (a whole session, a window, a pane, or `#tag`). Requires confirm=true before executing the canonical CLI.",
             "inputSchema": {
                 "type": "object",
+                "additionalProperties": false,
                 "properties": {
                     "target": { "type": "string", "description": TARGET_DESC },
+                    "confirm": { "type": "boolean", "const": true, "description": "Required explicit destructive-operation confirmation." },
                     "socket": { "type": "string" }
                 },
-                "required": ["target"]
+                "required": ["target", "confirm"]
             }
         },
         {
@@ -166,6 +171,16 @@ pub(crate) fn catalog() -> Value {
             }
         },
         crate::ask_tool::schema(),
+        crate::cli_tools::launch_schema(),
+        crate::cli_tools::spawn_schema(),
+        crate::cli_tools::signal_schema(),
+        crate::cli_tools::tag_schema(),
+        crate::cli_tools::rename_schema(),
+        crate::cli_tools::agent_schema(),
+        crate::cli_tools::insert_schema(),
+        crate::cli_tools::move_schema(),
+        crate::cli_tools::swap_schema(),
+        crate::cli_tools::workspace_schema(),
         crate::plugin_action::schema(),
         crate::plugin_workspace::schema(),
     ])
@@ -190,34 +205,23 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_kill" => phux_kill(args).await,
         "phux_watch" => phux_watch(args).await,
         "phux_ask" => crate::ask_tool::call(args).await,
+        "phux_launch" | "phux_spawn" | "phux_signal" | "phux_tag" | "phux_rename"
+        | "phux_agent" | "phux_insert_pane" | "phux_move_pane" | "phux_swap_pane"
+        | "phux_workspace" => crate::cli_tools::call(name, args).await,
         "phux_plugin_action" => crate::plugin_action::call(args).await,
         "phux_plugin_workspace" => crate::plugin_workspace::call(args),
         other => Err(ToolError::new(format!("unknown tool: {other}"))),
     }
 }
 
-/// `phux_ls` — list sessions via `GET_STATE`.
+/// `phux_ls` — execute and parse canonical `phux ls --json`.
 async fn phux_ls(args: &Value) -> Result<Value, ToolError> {
-    let socket = socket::resolve(str_arg(args, "socket"));
-    let snapshot = state::get_state(&socket).await?;
-    let mut sessions: Vec<Value> = snapshot
-        .sessions
-        .iter()
-        .map(|s| {
-            json!({
-                "name": s.name,
-                "window_count": s.window_count,
-                "attached_client_count": s.attached_client_count,
-            })
-        })
-        .collect();
-    sessions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    let terminals: Vec<String> = snapshot
-        .panes
-        .iter()
-        .map(|pane| selector::format_terminal_id(&pane.id))
-        .collect();
-    Ok(json!({ "sessions": sessions, "terminals": terminals }))
+    strict_object(args, &["socket"], &[])?;
+    let mut argv = vec!["ls".to_owned(), "--json".to_owned()];
+    crate::cli_adapter::push_socket(&mut argv, args)?;
+    crate::cli_adapter::CliAdapter::discover()
+        .run_json(argv, crate::cli_adapter::DEFAULT_CALL_TIMEOUT)
+        .await
 }
 
 /// `phux_snapshot` — read a pane as structured data.
@@ -258,32 +262,31 @@ async fn phux_send_keys(args: &Value) -> Result<Value, ToolError> {
 
 /// `phux_run` — run a command in the pane named by the selector.
 async fn phux_run(args: &Value) -> Result<Value, ToolError> {
-    let socket = socket::resolve(str_arg(args, "socket"));
-    let selector = required_target(args)?;
-    let command = required_str(args, "command")?;
-    // None ⇒ default 600s; 0 ⇒ wait indefinitely; N ⇒ N seconds. Mirrors
-    // `phux run`'s `--timeout` semantics.
-    let timeout = match num_arg(args, "timeout_secs") {
-        None => Some(Duration::from_secs(RUN_DEFAULT_TIMEOUT_SECS)),
-        Some(0) => None,
-        Some(secs) => Some(Duration::from_secs(secs)),
+    strict_object(
+        args,
+        &["target", "command", "timeout_secs", "socket"],
+        &["target", "command"],
+    )?;
+    let target = crate::cli_adapter::bounded_string(args, "target", true)?.unwrap_or_default();
+    let command = crate::cli_adapter::bounded_string(args, "command", true)?.unwrap_or_default();
+    let timeout_secs = match args.get("timeout_secs") {
+        None => RUN_DEFAULT_TIMEOUT_SECS,
+        Some(value) => value
+            .as_u64()
+            .filter(|value| (1..=3600).contains(value))
+            .ok_or_else(|| ToolError::new("`timeout_secs` must be an integer in 1..=3600"))?,
     };
-    let snapshot = state::get_state(&socket).await?;
-    let pane = resolve_one(&socket, &selector, &snapshot).await?;
-    let nonce = run_nonce();
-    match phux_client::run::run_in(&socket, pane, command, &nonce, timeout).await? {
-        RunOutcome::Completed(result) => serde_json::to_value(&result)
-            .map_err(|err| ToolError::new(format!("failed to serialize run result: {err}"))),
-        RunOutcome::TimedOut {
-            command,
-            duration_ms,
-            ..
-        } => Ok(json!({
-            "outcome": "timed_out",
-            "command": command,
-            "duration_ms": duration_ms,
-        })),
-    }
+    let mut argv = vec![
+        "run".to_owned(),
+        "--json".to_owned(),
+        "--timeout".to_owned(),
+        timeout_secs.to_string(),
+    ];
+    crate::cli_adapter::push_socket(&mut argv, args)?;
+    argv.extend([target, command]);
+    crate::cli_adapter::CliAdapter::discover()
+        .run_json(argv, Duration::from_secs(timeout_secs.saturating_add(5)))
+        .await
 }
 
 /// `phux_wait` — poll the pane named by the selector until a condition holds.
@@ -320,67 +323,50 @@ async fn phux_wait(args: &Value) -> Result<Value, ToolError> {
 
 /// `phux_new` — create a named session without attaching.
 ///
-/// Mirrors `phux new --json`: `name` is required (the create-only path never
-/// auto-names), `command`/`cwd` are optional. The server must already be
-/// running; unlike the CLI this never auto-spawns one. Returns
-/// `{session, terminal_id}`, where `terminal_id` is the seed pane's local id.
-///
-/// Since the v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) removed the
-/// `CREATE_SESSION` verb, this writes the conventional `SESSION_CREATE_KEY`
-/// L3 metadata key and reads the seed-pane id back from
-/// `SESSION_CREATE_RESULT_KEY` (`SET_METADATA` has no reply frame).
+/// Mirrors canonical `phux new --json`: `name` is required (the create-only
+/// path never auto-names), while `command` and `cwd` are optional. The CLI owns
+/// server startup and the returned `{session, terminal_id}` JSON contract.
 async fn phux_new(args: &Value) -> Result<Value, ToolError> {
-    let socket = socket::resolve(str_arg(args, "socket"));
-    let name = required_str(args, "name")?.to_owned();
-    let cwd = str_arg(args, "cwd").map(str::to_owned);
-    // Absent or empty `command` ⇒ None (server default shell), mirroring the
-    // CLI's `if command.is_empty() { None }`.
-    let command = string_array_opt(args, "command")?.filter(|c| !c.is_empty());
-
-    create_session(&socket, &name, command, cwd).await
+    strict_object(args, &["name", "command", "cwd", "socket"], &["name"])?;
+    let name = crate::cli_adapter::bounded_string(args, "name", true)?.unwrap_or_default();
+    let mut argv = vec!["new".to_owned(), "-s".to_owned(), name, "--json".to_owned()];
+    if let Some(cwd) = crate::cli_adapter::bounded_string(args, "cwd", false)? {
+        argv.extend(["-c".to_owned(), cwd]);
+    }
+    crate::cli_adapter::push_socket(&mut argv, args)?;
+    let command = crate::cli_adapter::bounded_strings(args, "command", false)?;
+    if !command.is_empty() {
+        argv.push("--".to_owned());
+        argv.extend(command);
+    }
+    crate::cli_adapter::CliAdapter::discover()
+        .run_json(argv, crate::cli_adapter::DEFAULT_CALL_TIMEOUT)
+        .await
 }
 
 /// `phux_kill` — tear down the Terminal(s) a selector resolves to.
 ///
-/// Resolves the selector client-side to its full id set (a whole session, a
-/// window, a pane, or `@id`) and sends one atomic `KILL_TERMINALS { ids }`,
-/// the same op `phux kill` uses. A clean server disconnect after the kill
-/// (the server self-exits once its last session is reaped) is success, not a
-/// failure.
+/// Executes canonical `phux kill`, preserving its tag-aware resolution,
+/// whole-session atomic teardown, per-pane fallback, and clean-disconnect
+/// handling instead of maintaining a second MCP implementation.
 async fn phux_kill(args: &Value) -> Result<Value, ToolError> {
-    let socket = socket::resolve(str_arg(args, "socket"));
-    let selector = required_target(args)?;
-    let snapshot = state::get_state(&socket).await?;
-    let ids = state::resolve_targets(&socket, &selector, &snapshot).await;
-    if ids.is_empty() {
-        return Err(ToolError::new("no such target"));
+    strict_object(
+        args,
+        &["target", "confirm", "socket"],
+        &["target", "confirm"],
+    )?;
+    if args.get("confirm") != Some(&Value::Bool(true)) {
+        return Err(ToolError::new(
+            "phux_kill is destructive; pass `confirm: true`",
+        ));
     }
-    let count = ids.len();
-
-    let mut conn = Connection::connect(&socket).await?;
-    conn.send(&FrameKind::Command {
-        request_id: 1,
-        command: WireCommand::KillTerminals { ids },
-    })
-    .await?;
-    loop {
-        match conn.recv().await {
-            Ok(FrameKind::CommandResult {
-                request_id: 1,
-                result,
-            }) => {
-                return match result {
-                    CommandResult::Ok => Ok(json!({ "killed": count })),
-                    CommandResult::Error { message, .. } => Err(ToolError::new(message)),
-                    other => Err(ToolError::new(format!("unexpected kill result: {other:?}"))),
-                };
-            }
-            Ok(_) => {}
-            // Server closed after reaping its last session: the kill landed.
-            Err(AttachError::Disconnected) => return Ok(json!({ "killed": count })),
-            Err(err) => return Err(err.into()),
-        }
-    }
+    let target = crate::cli_adapter::bounded_string(args, "target", true)?.unwrap_or_default();
+    let mut argv = vec!["kill".to_owned(), target.clone()];
+    crate::cli_adapter::push_socket(&mut argv, args)?;
+    crate::cli_adapter::CliAdapter::discover()
+        .run(argv, crate::cli_adapter::DEFAULT_CALL_TIMEOUT)
+        .await?;
+    Ok(json!({ "schema_version": 1, "killed": true, "target": target }))
 }
 
 /// `phux_watch` — collect server-pushed agent events, bounded.
@@ -466,70 +452,30 @@ fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
 /// Matches `phux run`'s default so the surfaces agree.
 const RUN_DEFAULT_TIMEOUT_SECS: u64 = 600;
 
-/// Open a connection and issue a `CREATE_SESSION` command, returning its
-/// [`CommandResult`]. Self-contained over the low-level [`Connection`] — the
-/// same wire-call pattern as [`phux_client::state::get_state`], reaching the daemon without any
-/// `phux-client` agent API.
-/// Create a named session via the conventional `SESSION_CREATE_KEY` L3
-/// write, then read the seed-pane id back from `SESSION_CREATE_RESULT_KEY`.
-/// Returns `{session, terminal_id}` on success. A duplicate name (checked
-/// against a pre-write `GET_STATE`) or a server-side seed failure (absent
-/// result key) is a [`ToolError`].
-async fn create_session(
-    socket: &std::path::Path,
-    name: &str,
-    command: Option<Vec<String>>,
-    cwd: Option<String>,
-) -> Result<Value, ToolError> {
-    use phux_protocol::wire::frame::{SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope};
-
-    let mut conn = Connection::connect(socket).await?;
-
-    // Reject a duplicate name before writing (the server refuses it too, but
-    // silently — SET_METADATA has no reply frame).
-    let snap = state::get_state_on(&mut conn).await?;
-    if snap.sessions.iter().any(|s| s.name == name) {
-        return Err(ToolError::new(format!("session {name:?} already exists")));
+/// Enforce the runtime half of a strict JSON object schema.
+///
+/// JSON Schema is advisory at the MCP boundary, so handlers also reject
+/// non-object arguments, unknown keys, and absent required keys before any
+/// subprocess or wire side effect.
+pub(crate) fn strict_object(
+    args: &Value,
+    allowed: &[&str],
+    required: &[&str],
+) -> Result<(), ToolError> {
+    let object = args
+        .as_object()
+        .ok_or_else(|| ToolError::new("tool arguments must be an object"))?;
+    if let Some(key) = object.keys().find(|key| !allowed.contains(&key.as_str())) {
+        return Err(ToolError::new(format!("unknown argument `{key}`")));
     }
-
-    let create_value = json!({ "name": name, "command": command, "cwd": cwd });
-    let create_bytes = serde_json::to_vec(&create_value)
-        .map_err(|err| ToolError::new(format!("failed to serialize create request: {err}")))?;
-    conn.send(&FrameKind::SetMetadata {
-        request_id: 1,
-        scope: Scope::Global,
-        key: SESSION_CREATE_KEY.to_owned(),
-        value: create_bytes,
-    })
-    .await?;
-
-    conn.send(&FrameKind::GetMetadata {
-        request_id: 2,
-        scope: Scope::Global,
-        key: SESSION_CREATE_RESULT_KEY.to_owned(),
-    })
-    .await?;
-    let value = loop {
-        if let FrameKind::MetadataValue {
-            request_id: 2,
-            value,
-        } = conn.recv().await?
-        {
-            break value;
-        }
-    };
-    let bytes =
-        value.ok_or_else(|| ToolError::new(format!("server did not register session {name:?}")))?;
-    let terminal_id = serde_json::from_slice::<Value>(&bytes)
-        .ok()
-        .filter(|v| v.get("name").and_then(Value::as_str) == Some(name))
-        .and_then(|v| v.get("terminal_id").and_then(Value::as_u64))
-        .ok_or_else(|| ToolError::new(format!("server did not register session {name:?}")))?;
-    Ok(json!({ "session": name, "terminal_id": terminal_id }))
+    if let Some(key) = required.iter().find(|key| !object.contains_key(**key)) {
+        return Err(ToolError::new(format!("missing required argument `{key}`")));
+    }
+    Ok(())
 }
 
 /// Parse the optional `target` argument into a [`Selector`], defaulting to
-/// the focused/last session when absent. Mirrors the CLI's `parse_selector`
+/// the focused session when absent. Mirrors the CLI's `parse_selector`
 /// front door (phux-n95).
 ///
 /// # Errors
@@ -537,7 +483,7 @@ async fn create_session(
 /// Returns [`ToolError`] when an explicit `target` is present but malformed
 /// (e.g. `@nope`, `work:1.x`).
 fn parse_target(args: &Value) -> Result<Selector, ToolError> {
-    str_arg(args, "target").map_or(Ok(Selector::Last), |raw| {
+    str_arg(args, "target").map_or(Ok(Selector::Current), |raw| {
         selector::parse(raw).map_err(|err| ToolError::new(format!("invalid target '{raw}': {err}")))
     })
 }
@@ -574,21 +520,6 @@ async fn resolve_one(
 /// A JSON rendering of a `TerminalId` using the canonical direct selector.
 fn pane_value(id: &TerminalId) -> Value {
     json!(selector::format_terminal_id(id))
-}
-
-/// A per-call sentinel nonce for `phux_run`, matching `phux run`'s
-/// `run_nonce`: pid (concurrent processes) + epoch-nanos (residual sentinels
-/// from earlier processes) + a process-global monotonic counter so two calls
-/// in one clock tick can't collide. The counter matters most here: an MCP
-/// host can fire `phux_run` calls back-to-back within a single `SystemTime`
-/// tick, which pid+nanos alone would not distinguish.
-fn run_nonce() -> String {
-    static SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
-    let seq = SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    let nanos = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_or(0, |d| d.as_nanos());
-    format!("{}x{nanos}x{seq}", std::process::id())
 }
 
 /// Read an optional string argument from a tool's params object.
@@ -637,27 +568,6 @@ fn string_array(args: &Value, key: &str) -> Result<Vec<String>, ToolError> {
         .collect()
 }
 
-/// Read an optional array-of-strings argument. Absent ⇒ `None`; present must
-/// be an array whose every element is a string (a non-string element errors).
-/// An empty array yields `Some(vec![])` — callers that treat empty as absent
-/// filter it themselves.
-fn string_array_opt(args: &Value, key: &str) -> Result<Option<Vec<String>>, ToolError> {
-    let Some(value) = args.get(key) else {
-        return Ok(None);
-    };
-    let arr = value
-        .as_array()
-        .ok_or_else(|| ToolError::new(format!("`{key}` must be an array of strings")))?;
-    arr.iter()
-        .map(|v| {
-            v.as_str()
-                .map(str::to_owned)
-                .ok_or_else(|| ToolError::new(format!("`{key}` must contain only strings")))
-        })
-        .collect::<Result<Vec<String>, _>>()
-        .map(Some)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -685,6 +595,16 @@ mod tests {
                 "phux_kill",
                 "phux_watch",
                 "phux_ask",
+                "phux_launch",
+                "phux_spawn",
+                "phux_signal",
+                "phux_tag",
+                "phux_rename",
+                "phux_agent",
+                "phux_insert_pane",
+                "phux_move_pane",
+                "phux_swap_pane",
+                "phux_workspace",
                 "phux_plugin_action",
                 "phux_plugin_workspace",
             ]
@@ -715,24 +635,6 @@ mod tests {
         assert_eq!(props["socket"]["type"], json!("string"));
         assert_eq!(props["command"]["type"], json!("array"));
         assert_eq!(props["command"]["items"]["type"], json!("string"));
-    }
-
-    /// `string_array_opt` maps absent ⇒ None, empty ⇒ Some([]), strings ⇒
-    /// Some(vec), and errors on a non-array or a non-string element.
-    #[test]
-    fn string_array_opt_handles_absent_empty_and_strings() {
-        assert_eq!(string_array_opt(&json!({}), "command").unwrap(), None);
-        assert_eq!(
-            string_array_opt(&json!({ "command": [] }), "command").unwrap(),
-            Some(vec![]),
-        );
-        assert_eq!(
-            string_array_opt(&json!({ "command": ["ssh", "host"] }), "command").unwrap(),
-            Some(vec!["ssh".to_owned(), "host".to_owned()]),
-        );
-        // Non-array and non-string element both error.
-        assert!(string_array_opt(&json!({ "command": "ssh host" }), "command").is_err());
-        assert!(string_array_opt(&json!({ "command": ["ssh", 7] }), "command").is_err());
     }
 
     /// The grown snapshot surface: `scrollback` + `cells` params, plus the
@@ -775,12 +677,44 @@ mod tests {
             json!(["target", "command"]),
         );
 
-        // phux-yhyi: kill requires a target; watch's target is optional.
+        // Destructive kill requires both an explicit target and confirmation;
+        // watch's target is optional.
         assert_eq!(
             tool("phux_kill")["inputSchema"]["required"],
-            json!(["target"]),
+            json!(["target", "confirm"]),
+        );
+        assert_eq!(
+            tool("phux_kill")["inputSchema"]["properties"]["confirm"]["const"],
+            true,
         );
         assert!(tool("phux_watch")["inputSchema"].get("required").is_none());
+    }
+
+    #[tokio::test]
+    async fn added_tool_dispatch_routes_to_strict_validation() {
+        let kill_error = dispatch("phux_kill", &json!({ "target": "@1" }))
+            .await
+            .unwrap_err();
+        assert_eq!(
+            kill_error.0, "missing required argument `confirm`",
+            "kill must reject before discovering or starting the CLI",
+        );
+        assert!(dispatch("phux_launch", &json!({})).await.is_err());
+        assert!(
+            dispatch("phux_signal", &json!({ "target": "@1", "signal": "kill" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            dispatch("phux_insert_pane", &json!({ "target": "@1" }))
+                .await
+                .is_err()
+        );
+        assert!(
+            dispatch("phux_workspace", &json!({ "action": "delete" }))
+                .await
+                .is_err()
+        );
     }
 
     /// `agent_event_json` projects each event kind to the same stable shape
@@ -872,10 +806,10 @@ mod tests {
     }
 
     /// `parse_target` is the optional-selector front door (snapshot/wait):
-    /// absent ⇒ `Last`, every grammar form parses, malformed ⇒ error.
+    /// absent ⇒ `Current`, supported grammar parses, malformed/`=` ⇒ error.
     #[test]
     fn parse_target_defaults_and_accepts_grammar() {
-        assert_eq!(parse_target(&json!({})).unwrap(), Selector::Last);
+        assert_eq!(parse_target(&json!({})).unwrap(), Selector::Current);
         assert_eq!(
             parse_target(&json!({ "target": "." })).unwrap(),
             Selector::Current,
@@ -888,15 +822,10 @@ mod tests {
             parse_target(&json!({ "target": "@100" })).unwrap(),
             Selector::TerminalId(100),
         );
-        assert_eq!(
-            parse_target(&json!({ "target": "devbox/@7" })).unwrap(),
-            Selector::SatelliteTerminalId {
-                host: "devbox".to_owned(),
-                id: 7,
-            },
-        );
-        // Malformed → error (no server round trip).
+        // Malformed and headless `=` both error before any server round trip.
         assert!(parse_target(&json!({ "target": "@nope" })).is_err());
+        let err = parse_target(&json!({ "target": "=" })).unwrap_err();
+        assert!(err.0.contains("attached-TUI focus history"), "{err:?}");
     }
 
     /// `required_target` (the `send_keys`/`run` front door) rejects a
@@ -926,47 +855,27 @@ mod tests {
                 .unwrap(),
             TerminalId::local(100),
         );
-        // Window by index and by tag → the window's first pane.
-        assert_eq!(
-            resolve_one(socket, &selector::parse("work:1").unwrap(), &snap)
-                .await
-                .unwrap(),
-            TerminalId::local(101),
-        );
-        assert_eq!(
-            resolve_one(socket, &selector::parse("work:editor").unwrap(), &snap)
-                .await
-                .unwrap(),
-            TerminalId::local(101),
-        );
-        // Exact pane and opaque Terminal ids.
-        assert_eq!(
-            resolve_one(socket, &selector::parse("work:1.1").unwrap(), &snap)
-                .await
-                .unwrap(),
-            TerminalId::local(102),
-        );
-        assert_eq!(
-            resolve_one(socket, &selector::parse("@200").unwrap(), &snap)
-                .await
-                .unwrap(),
-            TerminalId::local(200),
-        );
-        assert_eq!(
-            resolve_one(socket, &selector::parse("devbox/@7").unwrap(), &snap)
-                .await
-                .unwrap(),
-            TerminalId::satellite("devbox", 7),
-        );
-        // `.`/`=` → the focused session's focused pane.
+        // Window, exact pane, local id, and satellite id selectors.
+        for (raw, expected) in [
+            ("work:1", TerminalId::local(101)),
+            ("work:editor", TerminalId::local(101)),
+            ("work:1.1", TerminalId::local(102)),
+            ("@200", TerminalId::local(200)),
+            ("devbox/@7", TerminalId::satellite("devbox", 7)),
+        ] {
+            assert_eq!(
+                resolve_one(socket, &selector::parse(raw).unwrap(), &snap)
+                    .await
+                    .unwrap(),
+                expected,
+            );
+        }
+        // `.` targets the focused session's focused pane; headless `=` is
+        // rejected during parsing because MCP has no attached-client MRU.
         assert_eq!(
             resolve_one(socket, &Selector::Current, &snap)
                 .await
                 .unwrap(),
-            TerminalId::local(100),
-        );
-        assert_eq!(
-            resolve_one(socket, &Selector::Last, &snap).await.unwrap(),
             TerminalId::local(100),
         );
         // Misses error.

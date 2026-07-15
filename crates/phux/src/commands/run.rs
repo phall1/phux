@@ -22,7 +22,7 @@ const RUN_TIMEOUT_EXIT_CODE: u8 = 125;
 /// command's own code, so `phux run … && next` composes like a shell.
 ///
 /// `TARGET` is the full selector grammar (`docs/consumers/tui.md` §3):
-/// `session`, `session:window`, `session:window.pane`, `@id`, `.`, `=`. It
+/// `session`, `session:window`, `session:window.pane`, `@id`, `.`. It
 /// is resolved client-side to a single pane (the selected one — the focused
 /// pane when the selector spans several), then the command runs in exactly
 /// that pane (phux-n95).

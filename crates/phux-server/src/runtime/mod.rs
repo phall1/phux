@@ -1216,6 +1216,11 @@ mod tests {
         let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
         let handle = TerminalHandle {
             input: input_tx,
+            encoded_input: mpsc::channel(8).0,
+            input_snapshot: tokio::sync::watch::channel(
+                crate::input::InputEncoderSnapshot::default(),
+            )
+            .1,
             snapshot: snapshot_tx,
             set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,
@@ -1353,6 +1358,11 @@ mod tests {
                         mpsc::channel(8);
                     let handle = TerminalHandle {
                         input: input_tx,
+                        encoded_input: mpsc::channel(8).0,
+                        input_snapshot: tokio::sync::watch::channel(
+                            crate::input::InputEncoderSnapshot::default(),
+                        )
+                        .1,
                         snapshot: snapshot_tx,
                         set_default_colors: mpsc::channel(8).0,
                         screen: screen_tx,
@@ -1509,6 +1519,11 @@ mod tests {
                 let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
                 let handle = TerminalHandle {
                     input: input_tx,
+                    encoded_input: mpsc::channel(8).0,
+                    input_snapshot: tokio::sync::watch::channel(
+                        crate::input::InputEncoderSnapshot::default(),
+                    )
+                    .1,
                     snapshot: snapshot_tx,
                     set_default_colors: mpsc::channel(8).0,
                     screen: screen_tx,
@@ -1717,6 +1732,11 @@ mod tests {
                 broadcast::channel::<crate::terminal_actor::PaneOutput>(8);
             let handle = TerminalHandle {
                 input: input_tx,
+                encoded_input: mpsc::channel(8).0,
+                input_snapshot: tokio::sync::watch::channel(
+                    crate::input::InputEncoderSnapshot::default(),
+                )
+                .1,
                 snapshot: mpsc::channel(8).0,
                 set_default_colors: mpsc::channel(8).0,
                 screen: mpsc::channel(8).0,

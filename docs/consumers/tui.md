@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-11
+last-reviewed: 2026-07-15
 ---
 
 # The phux reference TUI
@@ -117,11 +117,10 @@ phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
                               # satellite-tagged frames over the links (§4.2)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
-phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
-                              # spawn a terminal without attaching; --satellite
-                              # routes the spawn to a federation satellite via
-                              # a --hub server and prints the routed id
-phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
+phux spawn [--satellite NAME | --target TARGET [--split DIR] [--ratio R]] [-c CWD] [--json] [--] [COMMAND...]
+                              # explicit placement is local-only; absent target
+                              # preserves legacy unplaced behavior
+phux launch INTEGRATION [--print] [--target TARGET [--split DIR] [--ratio R]] [-c CWD] [--] [ARGS...]
                               # spawn a pane running an agent integration's
                               # [launch] command (ADR-0042); resolves the named
                               # template from an enabled plugin and routes the
@@ -131,6 +130,9 @@ phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
                               # server-free dry run of the resolved argv
 phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
+phux insert-pane TARGET NEW    # insert an already-created pane (no spawn)
+phux move-pane SOURCE TARGET   # relocate a pane beside another
+phux swap-pane FIRST SECOND    # exchange two pane leaves
 phux rename SESSION NEW-NAME  # rename a session
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)
 phux snapshot --rendered      # dump the client's composited multi-pane view
@@ -151,8 +153,9 @@ phux --version                # print version
 phux help [COMMAND]
 ```
 
-The agent-facing verbs — `ls`, `snapshot`, `send-keys`, `run`, `wait`,
-`watch`, `ask` (and `new`'s create-only `--json` mode) — have their JSON
+The agent-facing verbs — `new`, placed `launch`/`spawn`, `ls`, `snapshot`,
+`send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial verbs above — have
+their JSON
 contracts and exit-code semantics documented in [`agents.md`](./agents.md);
 this file does not restate them.
 
@@ -173,15 +176,26 @@ they decompose onto the substrate, with no change to what the user types:
 The command words, flags, and output are exactly as before; only the
 wire path beneath them changed.
 
-### 1.3 No CLI verbs for split/detach — they are interactive actions
+### 1.3 Headless spatial edits operate on existing panes
 
-Split-pane (`C-a |`) and detach (`C-a d`) **are implemented** as
-interactive TUI keybinding actions (§5.4). There are deliberately no
-headless `phux split` / `phux detach` CLI verbs: splitting a pane and
-detaching from a session are interactive view actions performed against
-a live attached TUI, not headless operations a script invokes. This is a
-settled design decision, not pending work — a headless `phux split`/`phux
-detach` would have no attached viewport to act on.
+`insert-pane`, `move-pane`, and `swap-pane` edit the session's persisted L3
+layout envelope; they do not attach and do not change another client's local
+focus. Every positional selector must resolve to exactly one local pane, and
+all panes named by one operation must belong to the same session. Satellite
+and cross-session topology edits are rejected.
+
+`insert-pane TARGET NEW_PANE [--horizontal|--vertical] [--ratio R]` is named
+for what it honestly does: `NEW_PANE` must already exist (for example from
+`phux spawn`) and must not already be in the layout. It does **not** implicitly
+spawn. The omitted direction is horizontal (a horizontal divider, so panes are
+stacked); `--vertical` means a vertical divider and side-by-side panes. `R`
+defaults to `0.5`; ratios must be finite and strictly between zero and one.
+`move-pane SOURCE TARGET` accepts the same user-facing direction and ratio
+flags. `swap-pane FIRST SECOND` preserves
+the existing split geometry. All three accept `--json` and `--socket`.
+
+Detach (`C-a d`) remains an interactive TUI-only action because it acts on the
+calling client's attachment.
 
 > **Status (design intent, not shipped):** `windows`, `panes`, and
 > `messages` are listed in earlier drafts as future read verbs; none
@@ -189,9 +203,11 @@ detach` would have no attached viewport to act on.
 > `config edit` is design intent.
 
 **The target convention.** The verbs that address an existing pane —
-`kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
+`kill`, `snapshot`, `send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial
+verbs — take selectors as
 **positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
-focused/last session). `attach` likewise takes its `[SESSION]` name
+focused session, or on `watch` for server-wide events). `attach` likewise takes
+its `[SESSION]` name
 positionally. `new` is the exception: because its trailing `[COMMAND...]`
 is a positional var-arg, the *new* session's name is the `-s`/`--session`
 flag instead, keeping the command words unambiguous. So: positional target
@@ -206,9 +222,10 @@ words. Each command's `--help` calls this out.
 **Output hygiene (for scripts and agents).** One-shot verbs print no
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
-into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `spawn`, `config show`, `config plugins`, `config agents`,
-`config run`, `plugin`, and `satellite`. Their
+into the JSON. The agent-relevant JSON surfaces are `new`, `launch`, `spawn`,
+`ls`, `snapshot`, `run`, `wait`, JSONL `watch`, `ask`, `agent`, the three
+spatial verbs, `tag`, `config show/plugins/agents/run`, `plugin`, `workspace`,
+and `satellite`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -244,9 +261,9 @@ CLI arguments, keybinding actions, and hook arguments.
 | `name:N`              | session `name`, window index `N`                 |
 | `name:N.M`            | session `name`, window `N`, pane index `M`       |
 | `name:tag`            | session `name`, window whose name is `tag`       |
-| `@N`                  | opaque local Terminal ID — stable for the server's lifetime |
-| `host/@N`             | opaque satellite Terminal ID routed by hub token `host` |
-| `=`                   | last (most recently focused)                     |
+| `@N`                  | opaque ID (pane/window/session) — stable for the |
+|                       | server's lifetime                                |
+| `=`                   | attached TUI only: previous pane (`C-a =`)       |
 | `#tag`                | every Terminal carrying L3 tag `tag`             |
 
 The `#tag` form (ADR-0027) resolves to the **set** of Terminals tagged
@@ -260,20 +277,26 @@ phux kill #build                   # kill every Terminal tagged 'build'
 phux tag rm @7 ci                  # untag
 ```
 
-One grammar, every command. `kill`, `snapshot`, `wait`, `watch`, `send-keys`,
-`run`, `ask`, and the supervisory verbs accept the same `TARGET` (phux-n95)
-and resolve it client-side against a `GET_STATE` snapshot (ADR-0021) — the
-server never parses a selector. `host/@N` resolves only against an aggregate
-pane inventory entry with that exact host and id; it does not synthesize a
-hub-local session/window join for the satellite. A selector that names several
-panes (a whole session or window)
+Headless CLI and MCP calls have no attached client's focus history, so an
+explicit `=` target is rejected with an unsupported-selector error rather than
+silently aliasing `.`. In the attached TUI, `C-a =` dispatches `last-pane`
+against a one-entry, process-local MRU; repeating it toggles between two panes,
+including panes in different windows. The MRU is neither persisted nor sent on
+the wire, matching ADR-0019's client-local focus rule and accepted ADR-0049.
+Shared topology writers never acquire focus authority.
+
+All headless commands otherwise share one grammar. `kill`, `snapshot`, `wait`,
+`watch`, `send-keys`, `run`, `ask`, launch/spawn placement, and the three
+spatial verbs accept the same `TARGET` (phux-n95) and resolve it client-side
+against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
+selector. A selector that names several panes (a whole session or window)
 resolves to a single **selected pane**: the focused pane if it is among
 the matches, else the first in snapshot order. So `phux send-keys work …`
 targets the pane you are looking at in session `work`, while
 `phux send-keys work:1.0 …` targets exactly window 1, pane 0. `send-keys`
 and `run` route input to that resolved pane by id — no attach, no resize
 (phux-3j3). Omit the target on `snapshot`/`wait` to default to the
-focused/last session.
+focused session.
 
 The CLI infers what kind of selector is expected from the command. When
 ambiguity matters, prefer the most specific form. Example:
@@ -283,7 +306,8 @@ phux kill work:edit.2         # second pane in window "edit" of session "work"
 phux send-keys @42 "ls" Enter # send to the local pane with stable id 42
 phux snapshot devbox/@7       # read satellite pane 7 through the hub
 phux run work:1.0 "cargo test"# run in window 1, pane 0 of session "work"
-phux kill =                   # kill last-focused (within whatever the command targets)
+phux kill .                   # kill the focused session
+# `phux kill =` errors: headless clients have no focus MRU
 ```
 
 ---
@@ -970,6 +994,7 @@ line of config. The shipped prefix-table bindings:
 | `C-a h/j/k/l` | `focus-direction` left/down/up/right                   |
 | `C-a o`     | `next-pane`                                              |
 | `C-a ;`     | `previous-pane`                                          |
+| `C-a =`     | `last-pane` (jump back; repeat to toggle)                 |
 | `C-a z`     | `toggle-zoom`                                            |
 | `C-a b`     | `toggle-sidebar`                                         |
 | `C-a [`     | `copy-mode`                                              |
@@ -979,6 +1004,8 @@ line of config. The shipped prefix-table bindings:
 | `C-a w`     | `window-picker` (grouped: sessions, windows nested)      |
 | `C-a s`     | `session-picker` (`C-a a` is a kept alias)               |
 | `C-a A`     | `agent-fleet` (fleet dashboard — §5.6)                   |
+| `C-a q`     | `next-attention` (cycle asking panes, window + DFS order) |
+| `C-a Q`     | `return-from-attention` (consume the saved local origin)  |
 | `C-a C`     | `new-session`                                            |
 | `C-a ,`     | `rename-window` (interactive prompt)                     |
 | `C-a $`     | `rename-session` (interactive prompt)                    |
@@ -1008,6 +1035,9 @@ test, so this table cannot silently drift):
 | `resize-pane`     | `direction`, `amount`                       |
 | `next-pane`       |                                             |
 | `previous-pane`   |                                             |
+| `last-pane`       | jump to this attached client's previous focus |
+| `next-attention`  | cycle asking panes in deterministic window + DFS order |
+| `return-from-attention` | return once to the client-local saved origin |
 | `toggle-zoom`     |                                             |
 | `toggle-sidebar`  |                                             |
 | `copy-mode`       |                                             |
@@ -1648,6 +1678,15 @@ surface that names windows, colored by the `attention` theme slot
   (`[ ASK xN ]` when several panes are asking), sitting left of the
   ADR-0033 supervisory badge when one is up.
 
+**Jump and return.** `C-a q` (`next-attention`) jumps to the next asking
+pane in deterministic window order, then depth-first leaf order, wrapping at
+the end. The first jump saves the pane you came from; further cycling does
+not overwrite it. `C-a Q` (`return-from-attention`) returns there once and
+consumes the saved origin. If no pane is asking, no origin was saved, or the
+origin closed, the action bells without moving focus. Both actions are
+client-local: they send no frame and write no layout metadata or shared focus.
+`C-a A` remains the full agent-fleet dashboard (§5.6).
+
 **Clearing rule.** Attention clears when the client forwards key or
 paste input to the asking pane — i.e. you focused it and typed
 (presumably answering). Merely focusing or clicking the pane does
@@ -1656,6 +1695,14 @@ paste input to the asking pane — i.e. you focused it and typed
 on the next `Asked` after input cleared it. The flag is client-local
 and per-attach — it does not persist across detach/reattach (a
 re-emitted `Asked` from the ADR-0036 detector re-raises it).
+
+**Implementation provenance.** The attention channel tracked as
+`phux-oih5.15` is already present: the wire `AgentEvent::Asked`, explicit ask
+hook, server detector/state, and TUI asked fold shipped in commits `bdb64f6`,
+`2e59992`, `23c7bca`, and `28f0b34`. No replacement wire is introduced here.
+The shared/directed-focus proposals tracked as `phux-oih5.10` and
+`phux-oih5.17` are superseded by accepted ADR-0049: topology may be shared,
+but focus authority and advisory attention navigation remain client-local.
 
 ---
 

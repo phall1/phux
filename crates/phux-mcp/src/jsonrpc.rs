@@ -16,6 +16,8 @@ pub(crate) const INVALID_REQUEST: i64 = -32600;
 pub(crate) const METHOD_NOT_FOUND: i64 = -32601;
 /// Standard JSON-RPC error code: a server-internal failure.
 pub(crate) const INTERNAL_ERROR: i64 = -32603;
+/// MCP/Language Server Protocol error code for a cancelled request.
+pub(crate) const REQUEST_CANCELLED: i64 = -32800;
 
 /// An incoming JSON-RPC message (request or notification).
 ///

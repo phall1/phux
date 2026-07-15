@@ -67,6 +67,9 @@ mod help_inventory;
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
+          insert-pane Insert an already-created pane into a layout\n  \
+          move-pane  Move an existing pane within a session layout\n  \
+          swap-pane  Swap two existing pane leaves\n  \
           rename     Rename a session\n  \
           send-keys  Send keys to a pane\n  \
           run        Run a command in a pane and capture its exit code\n  \
@@ -86,7 +89,7 @@ mod help_inventory;
           pair       Mint a pairing token for a remote consumer\n  \
           stdio-bridge  Bridge stdio to the local server socket (SSH-stdio)\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
-        `name:window.pane`, `@id`, `host/@id`, `.` (focused), or `=` (last-focused). The same\n\
+        `name:window.pane`, `@id`, or `.` (focused). `=` is reserved for the attached TUI's client-local focus MRU. The same\n\
         grammar works across kill/snapshot/send-keys/run/wait/ask.",
     after_long_help = "ENVIRONMENT\n  \
         PHUX_SOCKET        UDS path for the CLI verbs and the server. A `--socket`\n  \
@@ -258,21 +261,64 @@ fn main() -> ExitCode {
         }) => commands::new::run_new(name, session, cwd, socket, json, command),
         Some(Command::Spawn {
             satellite,
+            target,
+            split,
+            ratio,
             cwd,
             json,
             socket,
             command,
-        }) => commands::spawn::run_spawn(satellite, cwd, json, socket, command),
+        }) => {
+            commands::spawn::run_spawn(satellite, target, split, ratio, cwd, json, socket, command)
+        }
         Some(Command::Launch {
             integration,
             list,
             print,
             json,
+            target,
+            split,
+            ratio,
             cwd,
             socket,
             extra,
-        }) => commands::launch::run_launch(integration, list, print, json, cwd, socket, &extra),
+        }) => commands::launch::run_launch(
+            integration,
+            list,
+            print,
+            json,
+            target,
+            split,
+            ratio,
+            cwd,
+            socket,
+            &extra,
+        ),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
+        Some(Command::InsertPane {
+            target,
+            new_pane,
+            horizontal: _,
+            vertical,
+            ratio,
+            json,
+            socket,
+        }) => commands::spatial::run_insert_pane(&target, &new_pane, vertical, ratio, json, socket),
+        Some(Command::MovePane {
+            source,
+            target,
+            horizontal: _,
+            vertical,
+            ratio,
+            json,
+            socket,
+        }) => commands::spatial::run_move_pane(&source, &target, vertical, ratio, json, socket),
+        Some(Command::SwapPane {
+            first,
+            second,
+            json,
+            socket,
+        }) => commands::spatial::run_swap_pane(&first, &second, json, socket),
         Some(Command::Take { target, socket }) => commands::supervise::run_take(&target, socket),
         Some(Command::Give { target, socket }) => commands::supervise::run_give(&target, socket),
         Some(Command::Signal {
@@ -426,6 +472,31 @@ mod tests {
     /// phux-foz.5: `phux config reload` parses, with and without an
     /// explicit `--socket`.
     #[test]
+    fn spawn_and_launch_placement_flags_validate() {
+        let cli = Cli::try_parse_from([
+            "phux", "spawn", "--target", ".", "--split", "vertical", "--ratio", "0.3",
+        ])
+        .expect("explicit spawn placement parses");
+        let Some(Command::Spawn { target, ratio, .. }) = cli.command else {
+            panic!("expected Spawn");
+        };
+        assert_eq!(target.as_deref(), Some("."));
+        assert!((ratio - 0.3).abs() < f32::EPSILON);
+
+        assert!(Cli::try_parse_from(["phux", "spawn", "--ratio", "0.3"]).is_err());
+        assert!(Cli::try_parse_from(["phux", "spawn", "--target", ".", "--ratio", "1.0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["phux", "spawn", "--target", ".", "--satellite", "edge"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "phux", "launch", "codex", "--target", ".", "--split", "vertical"
+            ])
+            .is_ok()
+        );
+    }
+
+    #[test]
     fn config_reload_parses_with_optional_socket() {
         use crate::commands::config_action::ConfigAction;
 
@@ -450,6 +521,54 @@ mod tests {
         assert_eq!(
             socket.as_deref(),
             Some(std::path::Path::new("/tmp/phux.sock"))
+        );
+    }
+
+    #[test]
+    fn spatial_verbs_parse_existing_pane_arguments_and_geometry() {
+        let cli = Cli::try_parse_from([
+            "phux",
+            "insert-pane",
+            "@1",
+            "@2",
+            "--vertical",
+            "--ratio",
+            "0.3",
+            "--json",
+        ])
+        .expect("insert-pane must parse");
+        let Some(Command::InsertPane {
+            target,
+            new_pane,
+            vertical,
+            ratio,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected InsertPane");
+        };
+        assert_eq!(target, "@1");
+        assert_eq!(new_pane, "@2");
+        assert!(vertical);
+        assert!((ratio - 0.3).abs() < f32::EPSILON);
+        assert!(json);
+
+        assert!(
+            Cli::try_parse_from([
+                "phux",
+                "move-pane",
+                "@1",
+                "@2",
+                "--horizontal",
+                "--vertical",
+            ])
+            .is_err(),
+            "directions are mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["phux", "swap-pane", "@1"]).is_err(),
+            "swap-pane requires exactly two selector arguments"
         );
     }
 }

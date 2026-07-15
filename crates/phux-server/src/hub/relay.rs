@@ -768,6 +768,7 @@ impl RelaySession {
                     // The satellite spawns locally: the addressing field
                     // never crosses the link (hub-and-spoke, no chaining).
                     satellite: None,
+                    owner_terminal: None,
                 })
             }
             RelayRequest::Subscribe {

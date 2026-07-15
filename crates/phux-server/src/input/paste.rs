@@ -94,8 +94,15 @@ impl PerTerminalPasteEncoder {
         event: &PasteEvent,
         terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<PasteOutcome<'_>, Error> {
-        let bracketed = terminal.mode(Mode::BRACKETED_PASTE)?;
+        self.encode_with_mode(event, terminal.mode(Mode::BRACKETED_PASTE)?)
+    }
 
+    /// Encode from a snapshotted DEC 2004 bracketed-paste mode.
+    pub fn encode_with_mode(
+        &mut self,
+        event: &PasteEvent,
+        bracketed: bool,
+    ) -> Result<PasteOutcome<'_>, Error> {
         // Trust handling. Trusted payloads bypass safety classification;
         // untrusted ones go through `is_safe` against the policy.
         if event.trust == PasteTrust::Untrusted {

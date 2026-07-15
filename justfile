@@ -64,7 +64,8 @@ test:
 
 # Fast e2e lane — gates every PR (the `e2e` step in ci.yml). Covers the
 # headless agent-surface contract (`run_wait_e2e`), the ADR-0040 agent
-# identity record loop (`agent_record_e2e`), plus the wall-clock perf
+# identity record loop (`agent_record_e2e`), real attached-client spatial
+# edits (`spatial_e2e`), plus the wall-clock perf
 # gates (`perf_latency`, `perf_colored_output`). These spin a real server +
 # PTY, so they are `#[ignore]`d out of the default `just test` pool and run
 # serially with `--retries=2`: serial removes the CPU contention that makes
@@ -102,11 +103,11 @@ test:
 # dhat as the global allocator and would make the perf gates below measure
 # dhat rather than phux.)
 
-# Fast e2e lane (run_wait_e2e + agent_record_e2e + perf gates) — gates every PR.
+# Fast e2e lane (run_wait_e2e + agent_record_e2e + spatial_e2e + perf gates) — gates every PR.
 e2e:
     cargo nextest run --workspace --run-ignored all \
       --test-threads=1 --retries=2 \
-      -E 'binary_id(phux::run_wait_e2e) + binary_id(phux::agent_record_e2e)'
+      -E 'binary_id(phux::run_wait_e2e) + binary_id(phux::agent_record_e2e) + binary_id(phux::spatial_e2e)'
     cargo nextest run --workspace --run-ignored ignored-only \
       --test-threads=1 --retries=2 \
       -E 'binary_id(phux-server::perf_latency) + binary_id(phux-server::perf_colored_output)'
@@ -167,6 +168,19 @@ trace-attach session="default" level="phux=debug":
 examples-smoke:
     bash scripts/examples-smoke.sh
 
+# Hermetic argv/control-flow gate for the placed-fleet worked example. Uses a
+# fake phux binary, so it needs neither a server nor installed agent CLIs.
+agents-fleet-smoke:
+    bash examples/agents/tests/placed-fleet-smoke.sh
+
+# Real isolated server dogfood for placement/layout/watch/ask with shell panes;
+# no external agent binary is needed. Set PHUX_DOGFOOD_REAL_AGENTS=1 to also
+# spawn installed claude/codex binaries on the private server.
+agents-fleet-live:
+    cargo build -p phux
+    PHUX="{{justfile_directory()}}/target/debug/phux" \
+      bash examples/agents/tests/placed-fleet-live.sh
+
 # Run the checked-in plugin package through the same discover/validate/run
 # sequence documented in examples/plugins/agent-tools/README.md.
 plugin-demo:
@@ -195,7 +209,9 @@ parity-gate *SCENARIOS:
 # (sourced libs shellcheck can't follow, single-quoted heredoc-ish
 # program strings) that are correct as written. On-demand, not in `ci`.
 shellcheck:
-    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh examples/plugins/*/scripts/*.sh
+    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh \
+      examples/agents/orchestrate-placed-fleet examples/agents/tests/*.sh \
+      examples/plugins/*/scripts/*.sh
 
 # Stable-cargo test for environments without nextest.
 test-cargo:
