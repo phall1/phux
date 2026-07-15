@@ -96,6 +96,16 @@ criterion = { version = "0.8", default-features = false, features = ["cargo_benc
 dhat = "0.3"
 tokio = { version = "1", features = ["macros", "rt", "net", "io-util", "sync", "signal", "time", "process"] }
 portable-pty = "0.9"
+# QR-code generation for `phux pair --qr` (phux-a9s / ADR-0031, which calls
+# for showing the pairing token "as a QR / short code" with the cert
+# fingerprint alongside). Encoding a QR is not a few-lines job — it needs
+# Reed-Solomon error correction, bit placement, and data masking — so a
+# library is the right tool. `qrcode` is pure-safe Rust (no `unsafe`, no C
+# deps) and ships a built-in Unicode half-block string renderer
+# (`render::unicode::Dense1x2`), exactly what a terminal QR needs. Default
+# features (the `image` / `svg` renderers) are disabled — we only use the
+# text renderer — so it compiles no image stack.
+qrcode = { version = "0.14", default-features = false }
 # Chrome-layer TUI toolkit for phux-client (status bar, dividers, overlays).
 # The boundary (ADR-0020) is now compiler-enforced by the crate split: only
 # `phux-client` declares `ratatui`; the pane-interior substrate lives in

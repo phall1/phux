@@ -411,7 +411,13 @@ fn main() -> ExitCode {
         Some(Command::Satellite { action }) => commands::satellite::run_satellite(&action),
         Some(Command::Tag { socket, action }) => commands::tag::run_tag(&action, socket),
         Some(Command::StdioBridge { socket }) => commands::stdio_bridge::run_stdio_bridge(socket),
-        Some(Command::Pair { tokens, cert }) => commands::pair::run_pair(tokens, cert),
+        Some(Command::Pair {
+            tokens,
+            cert,
+            qr,
+            host,
+            name,
+        }) => commands::pair::run_pair(tokens, cert, qr, host, name),
         None => commands::attach::run_naked(),
     }
 }
