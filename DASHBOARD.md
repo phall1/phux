@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:56:37Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:56:48Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 10 | 100% | 35s | 44s | 21 |
-| conventional-commits | 43 | 91% | 16s | 19s | 8 |
+| conventional-commits | 45 | 91% | 16s | 19s | 8 |
 
 ## ci jobs, last 30 days
 
@@ -119,6 +119,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-15 09:56 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 12s |
+| 2026-07-15 09:56 | conventional-commits | pull_request | fix/headless-watch-idle | success | 17s | 12s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 18s | 15s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | swarm/shared-state-tags | success | 12s | 10s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | fix/client-local-focus | success | 13s | 10s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:32 | ci | pull_request | fix/client-local-focus | success | 13m13s | 17m30s |
 | 2026-07-15 09:22 | conventional-commits | pull_request | feat/opencode-integration | success | 13s | 9s |
 | 2026-07-15 09:22 | ci | pull_request | feat/opencode-integration | failure | 10m13s | 14m41s |
-| 2026-07-15 09:21 | conventional-commits | pull_request | fix/relay-retained-snapshot | success | 16s | 13s |
-| 2026-07-15 09:21 | ci | pull_request | fix/relay-retained-snapshot | success | 16m04s | 19m58s |
 
 ---
 
