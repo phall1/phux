@@ -34,10 +34,20 @@ try {
 
   const archive = join(temp, entry.filename);
   run("tar", ["-xzf", archive, "-C", temp], packageDir);
-  const metadata = JSON.parse(await readFile(join(temp, "package", "package.json"), "utf8"));
+  const packedRoot = join(temp, "package");
+  const metadata = JSON.parse(await readFile(join(packedRoot, "package.json"), "utf8"));
   assert.equal(metadata.private, true, "the in-tree package must not be publishable accidentally");
   assert.deepEqual(metadata.pi?.extensions, ["./extensions/index.ts"]);
   assert.equal(metadata.exports?.["."]?.import, "./dist/src/index.js");
+
+  const adapterTypes = await readFile(join(packedRoot, "dist", "src", "adapter.d.ts"), "utf8");
+  for (const method of ["insertPane", "movePane", "swapPane"]) {
+    assert.match(adapterTypes, new RegExp(`\\b${method}\\(`), `packed adapter types are missing ${method}`);
+  }
+  const toolTypes = await readFile(join(packedRoot, "dist", "src", "tools.d.ts"), "utf8");
+  for (const schema of ["PhuxInsertPaneParams", "PhuxMovePaneParams", "PhuxSwapPaneParams"]) {
+    assert.match(toolTypes, new RegExp(`\\b${schema}\\b`), `packed tool types are missing ${schema}`);
+  }
 
   process.stdout.write(`pack check passed: ${entry.filename} (${String(entry.files.length)} files)\n`);
 } finally {

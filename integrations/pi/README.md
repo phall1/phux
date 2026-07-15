@@ -2,8 +2,9 @@
 
 Pi package for selecting, orchestrating, and supervising shared phux terminals
 through the external canonical CLI. It provides bounded pane inventory,
-spawn/launch, confirmed kill/destructive-signal controls, tags, asks, finite
-event collection, composited snapshots, and branch-local aliases/groups while keeping
+spawn/launch with local placement, insert/move/swap topology edits, confirmed
+kill/destructive-signal controls, tags, asks, finite event collection, composited
+snapshots, and branch-local aliases/groups while keeping
 the original selected-target behavior. It does not expose pairing credentials
 or emulate missing CLI operations such as paste. Input-authority tools are
 blocked upstream: the CLI's connection-scoped lease is released as soon as a

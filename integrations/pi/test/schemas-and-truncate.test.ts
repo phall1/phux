@@ -2,10 +2,13 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  parseInsertPaneResult,
   parseLaunchResult,
+  parseMovePaneResult,
   parseRenderedFrame,
   parseScreenState,
   parseSessionList,
+  parseSwapPaneResult,
   parseWatchEvent,
   SchemaValidationError,
 } from "../src/schemas.js";
@@ -53,6 +56,29 @@ test("new machine parsers reject incompatible versions and malformed event paylo
   assert.throws(() => parseRenderedFrame({
     schema_version: 1, cols: 2, rows: 1, cursor: null, cells: [],
   }), /exactly 2 entries/);
+});
+
+test("spatial parsers require canonical operations, fields, directions, and ratios", () => {
+  assert.equal(parseInsertPaneResult({
+    schema_version: 1, operation: "insert-pane", session_id: 1,
+    target_terminal_id: 3, new_terminal_id: 4, direction: "vertical", ratio: 0.4,
+  }).new_terminal_id, 4);
+  assert.equal(parseMovePaneResult({
+    schema_version: 1, operation: "move-pane", session_id: 1,
+    source_terminal_id: 4, target_terminal_id: 3, direction: "horizontal", ratio: 0.6,
+  }).source_terminal_id, 4);
+  assert.equal(parseSwapPaneResult({
+    schema_version: 1, operation: "swap-pane", session_id: 1,
+    first_terminal_id: 3, second_terminal_id: 4,
+  }).second_terminal_id, 4);
+  assert.throws(() => parseInsertPaneResult({
+    schema_version: 1, operation: "move-pane", session_id: 1,
+    target_terminal_id: 3, new_terminal_id: 4, direction: "vertical", ratio: 0.4,
+  }), SchemaValidationError);
+  assert.throws(() => parseMovePaneResult({
+    schema_version: 1, operation: "move-pane", session_id: 1,
+    source_terminal_id: 4, target_terminal_id: 3, direction: "diagonal", ratio: 1,
+  }), SchemaValidationError);
 });
 
 test("truncation helpers bound output and retain newest lines", () => {

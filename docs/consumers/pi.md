@@ -8,7 +8,7 @@ last-reviewed: 2026-07-15
 
 **TL;DR.** `@phux/pi` lets Pi select and operate a pane in an external local
 phux server while preserving the target in Pi's session history. It provides
-eighteen bounded terminal tools, three human commands, branch-local named
+nineteen bounded terminal tools, three human commands, branch-local named
 targets, and best-effort Pi lifecycle metadata. It does not embed a terminal,
 provide remote authentication, or own the phux server.
 
@@ -59,7 +59,7 @@ absolute `executable`, but the installed Pi extension expects `phux` on `PATH`.
 
 ## Surface
 
-The extension registers exactly these sixteen model tools:
+The extension registers exactly these nineteen model tools:
 
 | Tool | Operation |
 |---|---|
@@ -70,8 +70,11 @@ The extension registers exactly these sixteen model tools:
 | `phux_run` | Run one shell command line and return its exit result. |
 | `phux_wait` | Wait for visible text or idleness and return the bounded final screen. |
 | `phux_panes` | Inventory pane ownership, agent state, attention, title, cwd, and evidence. |
-| `phux_spawn` | Spawn a pane without attaching and optionally save an alias. |
-| `phux_launch` | Launch a configured integration from the CLI's versioned machine result. |
+| `phux_spawn` | Spawn a pane without attaching, optionally place it beside one exact local pane, and optionally save an alias. |
+| `phux_launch` | Launch a configured integration from the CLI's versioned machine result, with optional local placement. |
+| `phux_insert_pane` | Insert one already-created exact local pane beside another. |
+| `phux_move_pane` | Move one exact local pane beside another in the same session. |
+| `phux_swap_pane` | Swap two exact local pane leaves without changing geometry. |
 | `phux_kill` | With an explicit target and `confirm:true`, destroy a selector, alias, or the validated members of a named group. Selectors and groups may destroy multiple panes. |
 | `phux_signal` | Interrupt, freeze, or resume a pane's process group; terminate and kill require an explicit target and `confirm:true` because selectors may affect multiple processes or panes. |
 | `phux_tag` | List, add, or remove terminal tags. |
@@ -118,8 +121,10 @@ entry. Use `alias:build` anywhere a tool accepts one pane; `phux_kill` and
 `phux_tag` also accept `group:workers` and expand it to at most 64 canonical
 pane selectors. Definitions store pane ownership, not only `@id`. Immediately
 before every named-target action, the extension refreshes inventory and rejects
-missing or reused ids; inventory failure fails closed. Explicit raw CLI
-selectors are caller-owned and bypass this named-target check. Branch
+missing or reused ids; inventory failure fails closed. Spatial operations also
+require each role to resolve to exactly one distinct local pane and reject named
+groups and satellite pane selectors. Explicit raw CLI selectors are caller-owned
+for ownership and are still subject to the canonical CLI's exact-one validation. Branch
 navigation reconstructs the latest selection and named-target document on that
 branch.
 
@@ -137,11 +142,20 @@ explicit target to a tool only when intentionally overriding the selection.
    `phux new work` creates and attaches interactively.
 2. Start Pi with the package installed and run `/phux`.
 3. Choose the pane under `work`. The Pi status line shows the saved target.
-4. Ask Pi to inspect the pane or run a discrete command. Pi can use
+4. Ask Pi to create or launch a worker beside that target. For example,
+   `phux_launch({ integration: "codex", target: "@3", split: "vertical",
+   ratio: 0.4, alias: "worker" })` creates a side-by-side pane. `split` or
+   `ratio` requires `target`; ratios must be finite and strictly between 0 and
+   1. `vertical` means side-by-side and `horizontal` means stacked.
+5. Shape already-created panes with `phux_insert_pane`, `phux_move_pane`, or
+   `phux_swap_pane`. These mutate persisted topology only: they do not spawn,
+   focus, take, give, or paste. Insert and move accept optional `direction` and
+   `ratio`; horizontal is the CLI default. Insert never spawns its `new_pane`.
+6. Ask Pi to inspect the pane or run a discrete command. Pi can use
    `phux_snapshot`, `phux_run`, and `phux_wait` without attaching or resizing
    the human view.
-5. Run `/phux-status` before a handoff if the pane may have exited or moved.
-6. Run `/phux-attach`. Pi prints an argv such as
+7. Run `/phux-status` before a handoff if the pane may have exited or moved.
+8. Run `/phux-attach`. Pi prints an argv such as
    `["phux","attach","work"]` and identifies the pane to navigate to after
    attach. Copy the argv into a separate real terminal. The extension does not
    execute it and does not open a nested terminal inside Pi.
@@ -180,6 +194,12 @@ lock; it does not prevent the interleaved-input case above.
   read.
 - `phux_launch` validates schema version 1, integration id, plugin id, terminal
   id, and resolved argv. It never returns the resolved argv to the model.
+- Spawn/launch placement is local-only. `target`, `split`
+  (`horizontal|vertical`), and `ratio` map directly to canonical CLI flags;
+  satellite pane targets and `satellite` plus placement are rejected.
+- Spatial tools parse the canonical schema-version-1 CLI JSON. Both role
+  selectors are freshly ownership-validated when named aliases are used, and
+  every subprocess preserves Pi cancellation, local timeouts, and output caps.
 - The package is a Node/Pi integration around an external native process. It
   has no WASM build and does not render or nest a terminal inside Pi.
 - Remote phux attach, pairing, and token transport are not supported. The

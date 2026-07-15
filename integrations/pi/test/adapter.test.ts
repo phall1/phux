@@ -210,6 +210,71 @@ test("orchestration commands use exact canonical argv and typed responses", asyn
   ]);
 });
 
+test("placement argv is canonical and satellite placement is rejected before execution", async () => {
+  const requests: RunRequest[] = [];
+  const cli = new PhuxCli({
+    executable: "/opt/phux",
+    socket: "/tmp/shared.sock",
+    runner: async (request) => {
+      requests.push(request);
+      if (request.args[0] === "spawn") return completed(JSON.stringify({ terminal_id: 8, satellite: null }));
+      return completed(JSON.stringify({
+        schema_version: 1, terminal_id: 9, integration: "codex", plugin: "agents", argv: ["private"],
+      }));
+    },
+  });
+
+  await cli.spawn({ target: "@3", split: "vertical", ratio: 0.4, cwd: "/repo" });
+  await cli.launch("codex", { target: "work:0.0", split: "horizontal", ratio: 0.6 });
+
+  assert.deepEqual(requests.map((request) => request.args), [
+    ["spawn", "--json", "--target", "@3", "--split", "vertical", "--ratio", "0.4", "--cwd", "/repo", "--socket", "/tmp/shared.sock"],
+    ["launch", "--json", "--target", "work:0.0", "--split", "horizontal", "--ratio", "0.6", "--socket", "/tmp/shared.sock", "codex"],
+  ]);
+  await assert.rejects(cli.spawn({ split: "vertical" }), /target is required/);
+  await assert.rejects(cli.spawn({ satellite: "edge", target: "@3" }), /cannot be combined/);
+  await assert.rejects(cli.launch("codex", { target: "edge\/@7" }), /local-only/);
+  assert.equal(requests.length, 2);
+});
+
+test("spatial methods emit exact canonical argv and parse versioned results", async () => {
+  const requests: RunRequest[] = [];
+  const cli = new PhuxCli({
+    socket: "/tmp/shared.sock",
+    runner: async (request) => {
+      requests.push(request);
+      switch (request.args[0]) {
+        case "insert-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "insert-pane", session_id: 5,
+          target_terminal_id: 3, new_terminal_id: 4, direction: "vertical", ratio: 0.4,
+        }));
+        case "move-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "move-pane", session_id: 5,
+          source_terminal_id: 4, target_terminal_id: 3, direction: "horizontal", ratio: 0.6,
+        }));
+        case "swap-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "swap-pane", session_id: 5,
+          first_terminal_id: 3, second_terminal_id: 4,
+        }));
+        default: throw new Error("unexpected request");
+      }
+    },
+  });
+
+  assert.equal((await cli.insertPane("@3", "@4", { direction: "vertical", ratio: 0.4 })).operation, "insert-pane");
+  assert.equal((await cli.movePane("@4", "@3", { direction: "horizontal", ratio: 0.6 })).operation, "move-pane");
+  assert.equal((await cli.swapPane("@3", "@4")).operation, "swap-pane");
+
+  assert.deepEqual(requests.map((request) => request.args), [
+    ["insert-pane", "--json", "--vertical", "--ratio", "0.4", "--socket", "/tmp/shared.sock", "@3", "@4"],
+    ["move-pane", "--json", "--horizontal", "--ratio", "0.6", "--socket", "/tmp/shared.sock", "@4", "@3"],
+    ["swap-pane", "--json", "--socket", "/tmp/shared.sock", "@3", "@4"],
+  ]);
+  await assert.rejects(cli.swapPane("@3", "@3"), /distinct/);
+  await assert.rejects(cli.insertPane("edge\/@3", "@4"), /local/);
+  assert.equal(requests.length, 3);
+});
+
 test("watch turns the streaming CLI into a bounded typed event collection", async () => {
   const fake = fakeRunner({
     termination: "timed_out", exitCode: null, stderr: "",
