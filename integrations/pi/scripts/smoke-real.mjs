@@ -24,6 +24,14 @@ const env = {
 };
 let server;
 let serverStderr = "";
+let cleanupPromise;
+let terminating = false;
+const signalHandlers = new Map();
+for (const signal of ["SIGINT", "SIGTERM"]) {
+  const handler = () => { void handleTerminationSignal(signal); };
+  signalHandlers.set(signal, handler);
+  process.once(signal, handler);
+}
 
 try {
   const version = run(phux, ["--version"], env).stdout.trim();
@@ -67,16 +75,56 @@ try {
   process.stdout.write(`created ${session} ${target}; run exit=${String(command.exit_code)}; snapshot=${String(snapshot.cols)}x${String(snapshot.rows)}\n`);
   process.stdout.write(`human attach argv: ${JSON.stringify(attachArgv)}\n`);
 } finally {
-  if (server !== undefined) {
-    spawnSync(phux, ["kill", "--socket", socket, session], { env, encoding: "utf8", timeout: 5_000 });
-    server.kill("SIGTERM");
-    await Promise.race([onceExit(server), delay(3_000)]);
-    if (!hasExited(server)) {
-      server.kill("SIGKILL");
-      await onceExit(server);
+  await cleanup();
+  if (!terminating) removeSignalHandlers();
+}
+
+async function cleanup() {
+  cleanupPromise ??= cleanupOnce();
+  return cleanupPromise;
+}
+
+async function cleanupOnce() {
+  const child = server;
+  try {
+    if (child !== undefined && !hasExited(child)) {
+      spawnSync(phux, ["kill", "--socket", socket, session], {
+        env,
+        encoding: "utf8",
+        timeout: 5_000,
+      });
+      child.kill("SIGTERM");
+      await Promise.race([onceExit(child), delay(3_000)]);
+      if (!hasExited(child)) {
+        child.kill("SIGKILL");
+        await Promise.race([onceExit(child), delay(3_000)]);
+      }
+      if (!hasExited(child)) throw new Error("private phux server did not terminate");
     }
+  } finally {
+    await rm(temp, { recursive: true, force: true });
   }
-  await rm(temp, { recursive: true, force: true });
+}
+
+async function handleTerminationSignal(signal) {
+  if (terminating) return;
+  terminating = true;
+  try {
+    await cleanup();
+  } catch (error) {
+    process.stderr.write(`real smoke cleanup failed after ${signal}: ${error instanceof Error ? error.message : String(error)}\n`);
+    removeSignalHandlers();
+    process.exit(1);
+  }
+  removeSignalHandlers();
+  process.kill(process.pid, signal);
+}
+
+function removeSignalHandlers() {
+  for (const [signal, handler] of signalHandlers) {
+    process.removeListener(signal, handler);
+  }
+  signalHandlers.clear();
 }
 
 async function waitForServer(executable, socketPath, childEnv, child) {
