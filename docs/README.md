@@ -22,6 +22,7 @@ You do not need to understand the protocol before using phux.
 |---|---|
 | Run a persistent terminal and reattach to it | [Quickstart](./QUICKSTART.md) |
 | Let an agent inspect and drive that same terminal | [Agent CLI guide](./consumers/agents.md) |
+| Connect Pi to shared phux terminals | [Pi integration](./consumers/pi.md) |
 | Install through Homebrew, a release, or source | [Install guide](./INSTALL.md) |
 | Decide whether phux fits your workflow today | [When to use phux](./when-to-use.md) |
 | Change the prefix, keys, status bar, or hooks | [Configuration](./CONFIG.md) |
@@ -41,6 +42,7 @@ These pages are for people trying to get work done:
 - [Configuration](./CONFIG.md) owns keybindings, status, and hooks.
 - [The reference TUI](./consumers/tui.md) is the interactive terminal guide.
 - [Agents and the CLI](./consumers/agents.md) is the headless CLI and JSON guide.
+- [The Pi integration](./consumers/pi.md) adds Pi tools, target selection, and lifecycle metadata.
 - [The MCP adapter](./consumers/mcp.md) connects the same controls to MCP clients.
 
 ### Understand or extend phux

@@ -715,7 +715,10 @@ timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
 
 ## 6. Relationship to the other agent surfaces
 
-The CLI verbs here are the stable contract. The [MCP adapter](./mcp.md) exposes
+The CLI verbs here are the stable contract. The [Pi integration](./pi.md)
+selects a subset through Pi-native tools and adds branch-local target and
+lifecycle behavior; it links here instead of redefining CLI syntax. The
+[MCP adapter](./mcp.md) exposes
 them name-for-name (`phux_ls` ↔ `ls`, and `phux_snapshot` / `phux_send_keys` /
 `phux_run` / `phux_wait` ↔ the matching subcommands) over the same
 `phux-client` functions — same client-side resolution, same tiebreaks.
