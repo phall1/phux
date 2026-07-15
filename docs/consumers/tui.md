@@ -1771,7 +1771,10 @@ Server-side execution semantics (the shipped subset):
 - **Event context rides environment variables.** Every hook child gets
   `PHUX_EVENT` plus one `PHUX_*` variable per context key:
   `PHUX_TERMINAL_ID`, `PHUX_SESSION`, `PHUX_EXIT_CODE` (absent for
-  signal-killed children), `PHUX_CLIENT_ID`. Plugin event hooks
+  signal-killed children), `PHUX_CLIENT_ID`. Every hook child also gets
+  `PHUX_SOCKET` — the UDS path the firing server listens on — so a bare
+  `phux` invocation inside a hook script targets that server even when
+  it runs off the default socket path. Plugin event hooks
   additionally get `PHUX_PLUGIN_ID`, `PHUX_PLUGIN_EVENT_ID`, and
   `PHUX_PLUGIN_ROOT`, and run with the plugin root as their working
   directory.
