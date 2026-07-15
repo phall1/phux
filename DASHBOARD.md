@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T18:35:39Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T18:37:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 112 | 59% | 13m15s | 17m10s | 1343 |
+| ci | 113 | 59% | 13m17s | 17m10s | 1361 |
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 18 | 100% | 40s | 52s | 26 |
@@ -19,32 +19,32 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 111 | 2s | 13m04s | 16m55s |
-| check | 110 | 2s | 2m36s | 4m26s |
-| detect docs-only | 112 | 2s | 5s | 7s |
+| test | 112 | 2s | 13m04s | 16m55s |
+| check | 111 | 2s | 2m36s | 4m26s |
+| detect docs-only | 113 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m04s | 12 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m21s | 13 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 13 |
-| test | Run Swatinem/rust-cache@v2 | 19s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 14 |
-| check | docs-check | 9s | 12 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| test | tests (unit + e2e) | 15m00s | 13 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m11s | 14 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 14 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 14 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 15 |
+| check | docs-check | 9s | 13 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 15 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m08s | 53 |
-| ci / check | doc | 14s | 53 |
-| ci / check | deny | 3s | 53 |
-| ci / check | fmt | 1s | 55 |
-| ci / test | unit | 12m20s | 45 |
-| ci / test | e2e | 9s | 44 |
+| ci / check | clippy | 2m02s | 54 |
+| ci / check | doc | 14s | 54 |
+| ci / check | deny | 3s | 54 |
+| ci / check | fmt | 1s | 56 |
+| ci / test | unit | 12m20s | 46 |
+| ci / test | e2e | 9s | 45 |
 | observatory / timings | build-dev | 10m47s | 3 |
 | observatory / timings | build-release | 4m55s | 4 |
 | stress / stress | stress | 20m31s | 1 |
@@ -53,8 +53,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 33% | 58 |
-| ci / test | 45% | 56 |
+| ci / check | 34% | 59 |
+| ci / test | 44% | 57 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -131,6 +131,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:22 | ci | pull_request | fix/attach-last-flake | success | 13m15s | 16m52s |
 | 2026-07-15 18:21 | conventional-commits | pull_request | fix/seed-pane-cwd | success | 18s | 14s |
 | 2026-07-15 18:20 | conventional-commits | pull_request | fix/phux-socket-inject | success | 17s | 13s |
+| 2026-07-15 18:20 | ci | pull_request | fix/phux-socket-inject | success | 16m13s | 18m38s |
 | 2026-07-15 18:15 | ci | pull_request | feat/phux-detach | success | 17m15s | 19m26s |
 | 2026-07-15 18:15 | conventional-commits | pull_request | feat/phux-pair-qr | success | 20s | 16s |
 | 2026-07-15 18:15 | ci | pull_request | feat/phux-pair-qr | success | 16m13s | 20m14s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:05 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-15 18:05 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 25s | 11s |
 | 2026-07-15 18:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 18s | 14s |
-| 2026-07-15 18:04 | release-please | push | main | success | 43s | 37s |
 
 ---
 
