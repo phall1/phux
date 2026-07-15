@@ -892,9 +892,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
         // phux-4li.5: reconcile-on-attach reply path. The driver sends
         // `GET_METADATA { request_id }` immediately after ATTACHED;
         // the server replies with `MetadataValue { request_id, value }`.
-        // Match by id, decode the v1 CBOR envelope, and replace
-        // the workspace in place. `value: None` means "no persisted
-        // layout" — keep the single-pane bootstrap untouched.
+        // Match by id, decode the layout envelope, and adopt its topology
+        // while preserving this client's valid active window and per-window
+        // focus. `value: None` means "no persisted layout" — keep the
+        // single-pane bootstrap untouched.
         FrameKind::MetadataValue { request_id, value } => {
             // ADR-0040: a pending per-Terminal `phux.agent/v1` GET reply.
             // `value: None` (key absent) clears any stale record.
@@ -920,9 +921,10 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             };
             match Workspace::decode_cbor(&bytes) {
                 Ok(new_ws) => {
-                    *workspace = reconcile_loaded_workspace(new_ws, focused_pane.as_ref(), panes);
+                    *workspace =
+                        reconcile_loaded_workspace(new_ws, workspace, focused_pane.as_ref(), panes);
                     // Re-anchor the driver's focused-pane mirror onto the
-                    // active window's reconciled focus.
+                    // active window's client-local reconciled focus.
                     *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                     Ok(FrameOutcome {
                         layout_replaced: true,
@@ -936,7 +938,8 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             }
         }
         // phux-4li.5: broadcast reconcile. Another attached client
-        // mutated `phux.tui.layout/v1`; decode + replace + repaint.
+        // mutated `phux.tui.layout/v1`; decode + adopt topology + repaint.
+        // ADR-0049: the sender's serialized focus is never authoritative.
         // Tombstones (`value: None`) are treated as "layout reset" —
         // fall back to the single-pane bootstrap so the next render
         // doesn't try to draw against a stale tree.
@@ -972,8 +975,12 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             if let Some(bytes) = value {
                 match Workspace::decode_cbor(&bytes) {
                     Ok(new_ws) => {
-                        *workspace =
-                            reconcile_loaded_workspace(new_ws, focused_pane.as_ref(), panes);
+                        *workspace = reconcile_loaded_workspace(
+                            new_ws,
+                            workspace,
+                            focused_pane.as_ref(),
+                            panes,
+                        );
                         *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                         Ok(FrameOutcome {
                             layout_replaced: true,
@@ -1393,96 +1400,89 @@ fn is_layout_key(scope: &Scope, key: &str) -> bool {
         && super::driver::is_layout_key_string(key)
 }
 
-/// Sanity-check a freshly decoded layout against the panes the driver
-/// has slots for, and fall back to a safe focus if the persisted focus
-/// no longer exists (e.g. the leaf was killed in a previous session).
+/// Adopt a decoded workspace's topology without adopting its sender's focus.
 ///
-/// We accept the persisted tree as-is — panes that don't yet have a
-/// `PaneSlot` will get one lazily when their first `TERMINAL_OUTPUT`
-/// arrives, so an arbitrary tree shape is fine. Focus is the one
-/// invariant we can't recover from: if the persisted focused leaf
-/// isn't a member of the tree the renderer would have no focused
-/// pane to draw input chrome on.
-/// Reconcile a freshly decoded [`Workspace`], discarding it for a clean single
-/// pane only when it belongs to a *different* session, and otherwise fixing each
-/// window's focus to point at a leaf of its own tree.
+/// Focus and the active-window index are client-local (ADR-0019 decision 6,
+/// reaffirmed by ADR-0049). For each incoming window, preserve the local focus
+/// at the same index when that terminal remains a leaf; otherwise choose the
+/// first depth-first leaf. Preserve the local active index when the new window
+/// count permits it, otherwise clamp deterministically.
 ///
-/// The foreign-session discard (phux-jy4t) is evaluated at **workspace scope**,
-/// not per window. Layout metadata is group-scoped and shared across every
-/// session (one `DEFAULT_GROUP_ID`), so a freshly created session reads a
-/// sibling session's entire persisted workspace. The signal that the loaded
-/// workspace is foreign is that this session's real ATTACHED pane
-/// (`bootstrap_focus`) is a leaf of **none** of its windows — every window
-/// references terminals this session will never own. In that case discard the
-/// whole thing.
-///
-/// Doing the discard per window instead aliased every *non-active* window onto
-/// the focused pane: a non-active window legitimately never contains the focused
-/// pane, so the per-window guard rewrote it to `LayoutState::single(focus)` —
-/// leaving two windows referencing one `TerminalId`, so opening (say) vim in one
-/// window showed it in the other. Workspace scope is the fix.
+/// The foreign-session guard remains workspace-scoped. An incoming non-empty
+/// tree is foreign only when none of its leaves belongs to the current local
+/// workspace or pane-slot set. Checking all known panes, rather than only the
+/// currently focused pane, lets a sibling legitimately remove that focused leaf
+/// without making the surviving topology look foreign.
 fn reconcile_loaded_workspace(
-    mut workspace: Workspace,
+    mut incoming: Workspace,
+    local: &Workspace,
     bootstrap_focus: Option<&TerminalId>,
     panes: &HashMap<TerminalId, PaneSlot>,
 ) -> Workspace {
-    if let Some(focus) = bootstrap_focus {
-        let mut any_leaves = false;
-        let mut owns_focus = false;
-        for w in &workspace.windows {
-            let leaves = w
-                .state
+    let incoming_leaves: Vec<TerminalId> = incoming
+        .windows
+        .iter()
+        .flat_map(|w| {
+            w.state
                 .tree
                 .as_ref()
                 .map(crate::layout::leaves)
-                .unwrap_or_default();
-            any_leaves |= !leaves.is_empty();
-            owns_focus |= leaves.contains(focus);
-        }
-        // Some window has real leaves, but none of them is our pane ⇒ the whole
-        // workspace is a foreign session's. Start from a clean single pane.
-        if any_leaves && !owns_focus {
-            return Workspace::single(focus.clone());
-        }
+                .unwrap_or_default()
+        })
+        .collect();
+    let local_leaves: Vec<TerminalId> = local
+        .windows
+        .iter()
+        .flat_map(|w| {
+            w.state
+                .tree
+                .as_ref()
+                .map(crate::layout::leaves)
+                .unwrap_or_default()
+        })
+        .collect();
+    let has_session_evidence = !local_leaves.is_empty() || !panes.is_empty();
+    let belongs_to_session = incoming_leaves
+        .iter()
+        .any(|leaf| local_leaves.contains(leaf) || panes.contains_key(leaf));
+    if !incoming_leaves.is_empty()
+        && has_session_evidence
+        && !belongs_to_session
+        && let Some(focus) = bootstrap_focus
+    {
+        return Workspace::single(focus.clone());
     }
-    for w in &mut workspace.windows {
-        let reconciled = reconcile_loaded_layout(w.state.clone(), bootstrap_focus, panes);
-        w.state = reconciled;
+
+    for (index, window) in incoming.windows.iter_mut().enumerate() {
+        let local_focus = local
+            .windows
+            .get(index)
+            .and_then(|local_window| local_window.state.focus.as_ref());
+        reconcile_loaded_layout(&mut window.state, local_focus);
     }
-    workspace
+    incoming.active = if incoming.windows.is_empty() {
+        0
+    } else {
+        local.active.min(incoming.windows.len() - 1)
+    };
+    incoming
 }
 
-/// Fix a single window's focus so it points at a leaf of *its own* tree.
+/// Preserve a valid local focus while adopting `state`'s tree topology.
 ///
-/// No longer discards a tree that omits `bootstrap_focus` — that workspace-scope
-/// decision moved to [`reconcile_loaded_workspace`]. Here `bootstrap_focus` is
-/// only a *preference* for repairing an invalid focus; a non-active window whose
-/// tree doesn't contain it simply falls back to its first leaf, never to the
-/// global focus (which would alias it onto the active window's pane).
-fn reconcile_loaded_layout(
-    mut state: LayoutState,
-    bootstrap_focus: Option<&TerminalId>,
-    _panes: &HashMap<TerminalId, PaneSlot>,
-) -> LayoutState {
+/// The focus decoded from metadata is deliberately ignored. If this client has
+/// no focus for the window, or its focused leaf disappeared, the first leaf in
+/// depth-first order is the deterministic ADR-0019 fallback.
+fn reconcile_loaded_layout(state: &mut LayoutState, local_focus: Option<&TerminalId>) {
     let tree_leaves = state
         .tree
         .as_ref()
         .map(crate::layout::leaves)
         .unwrap_or_default();
-    let focus_ok = state
-        .focus
-        .as_ref()
-        .is_some_and(|f| tree_leaves.contains(f));
-    if !focus_ok {
-        // Prefer the bootstrap focus if it's actually in the tree;
-        // otherwise pick the first leaf (ADR-0019 decision 6 default);
-        // otherwise clear focus entirely.
-        state.focus = bootstrap_focus
-            .filter(|f| tree_leaves.contains(f))
-            .cloned()
-            .or_else(|| tree_leaves.into_iter().next());
-    }
-    state
+    state.focus = local_focus
+        .filter(|focus| tree_leaves.contains(focus))
+        .cloned()
+        .or_else(|| tree_leaves.into_iter().next());
 }
 
 #[cfg(test)]
@@ -1570,7 +1570,9 @@ mod tests {
     #[test]
     fn reconcile_discards_a_foreign_session_layout() {
         let foreign = ws1(split2(1, 2, 1)); // leaves {1, 2}, from another session
-        let out = super::reconcile_loaded_workspace(foreign, Some(&tid(9)), &HashMap::new());
+        let local = Workspace::single(tid(9));
+        let out =
+            super::reconcile_loaded_workspace(foreign, &local, Some(&tid(9)), &HashMap::new());
         assert_eq!(out.windows.len(), 1);
         assert_eq!(
             window_leaves(&out, 0),
@@ -1585,7 +1587,8 @@ mod tests {
         // Legitimate re-attach: the session's focused pane IS a leaf, so the
         // multi-pane tree is preserved (not discarded).
         let own = ws1(split2(1, 2, 1));
-        let out = super::reconcile_loaded_workspace(own, Some(&tid(1)), &HashMap::new());
+        let local = Workspace::single(tid(1));
+        let out = super::reconcile_loaded_workspace(own, &local, Some(&tid(1)), &HashMap::new());
         let leaves = window_leaves(&out, 0);
         assert!(
             leaves.contains(&tid(1)) && leaves.contains(&tid(2)),
@@ -1597,7 +1600,8 @@ mod tests {
     fn reconcile_without_bootstrap_focus_keeps_the_tree() {
         // No ATTACHED focus to validate against ⇒ don't discard.
         let tree = ws1(split2(1, 2, 1));
-        let out = super::reconcile_loaded_workspace(tree, None, &HashMap::new());
+        let out =
+            super::reconcile_loaded_workspace(tree, &Workspace::default(), None, &HashMap::new());
         assert_eq!(
             window_leaves(&out, 0).len(),
             2,
@@ -1627,7 +1631,8 @@ mod tests {
             active: 0,
         };
         // Focus is on window 0's pane (tid 1); window 1 (tid 2) is non-active.
-        let out = super::reconcile_loaded_workspace(ws, Some(&tid(1)), &HashMap::new());
+        let local = ws.clone();
+        let out = super::reconcile_loaded_workspace(ws, &local, Some(&tid(1)), &HashMap::new());
         assert_eq!(out.windows.len(), 2, "both windows survive");
         assert_eq!(window_leaves(&out, 0), vec![tid(1)]);
         assert_eq!(
@@ -1644,6 +1649,195 @@ mod tests {
             panes.insert((*id).clone(), PaneSlot::new().expect("pane slot"));
         }
         panes
+    }
+
+    /// Drive a layout metadata frame through the full dispatcher.
+    fn drive_layout_frame(
+        frame: FrameKind,
+        pending_layout_request: Option<u32>,
+        workspace: &mut Workspace,
+        focused: &mut Option<TerminalId>,
+        panes: &mut HashMap<TerminalId, PaneSlot>,
+    ) -> FrameOutcome {
+        let mut out: Vec<u8> = Vec::new();
+        let mut session_name = String::new();
+        let mut zoomed: Option<TerminalId> = None;
+        let mut predict = PredictionState::new(PredictiveConfig::disabled(), 80, 24);
+        let overlay = Overlay;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        handle_server_frame(
+            &mut out,
+            frame,
+            panes,
+            workspace,
+            focused,
+            &mut zoomed,
+            &mut session_name,
+            None,
+            None,
+            (80, 24),
+            &mut predict,
+            &overlay,
+            pending_layout_request,
+            &mut pending_splits,
+            &mut pending_windows,
+            &mut AgentMetaIndex::default(),
+            false,
+            false,
+        )
+        .expect("handle layout frame")
+    }
+
+    /// ADR-0049: a sibling's layout broadcast contributes topology only. Its
+    /// serialized active window and per-window focuses cannot yank this client.
+    #[test]
+    fn metadata_changed_preserves_valid_local_window_and_pane_focus() {
+        use phux_protocol::wire::frame::Scope;
+
+        let mut local = Workspace {
+            windows: vec![
+                crate::layout::WindowState {
+                    name: "local-one".to_owned(),
+                    state: split2(1, 2, 2),
+                },
+                crate::layout::WindowState {
+                    name: "local-two".to_owned(),
+                    state: split2(3, 4, 4),
+                },
+            ],
+            active: 1,
+        };
+        let mut sibling = local.clone();
+        sibling.active = 0;
+        sibling.windows[0].name = "shared-one".to_owned();
+        sibling.windows[1].name = "shared-two".to_owned();
+        sibling.windows[0].state.focus = Some(tid(1));
+        sibling.windows[1].state.focus = Some(tid(3));
+        if let Some(LayoutNode::Split { ratio, .. }) = sibling.windows[1].state.tree.as_mut() {
+            *ratio = 0.7;
+        }
+        let bytes = sibling.encode_cbor().expect("encode sibling workspace");
+        let mut focused = Some(tid(4));
+        let mut panes = panes_for(&[&tid(1), &tid(2), &tid(3), &tid(4)]);
+
+        let outcome = drive_layout_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Group(super::DEFAULT_GROUP_ID),
+                key: crate::attach::driver::layout_key(SessionId::new(1)),
+                value: Some(bytes),
+            },
+            None,
+            &mut local,
+            &mut focused,
+            &mut panes,
+        );
+
+        assert!(outcome.layout_replaced);
+        assert_eq!(local.active, 1, "sender cannot change the local window");
+        assert_eq!(local.windows[0].state.focus, Some(tid(2)));
+        assert_eq!(local.windows[1].state.focus, Some(tid(4)));
+        assert_eq!(focused, Some(tid(4)), "driver mirror stays client-local");
+        assert_eq!(local.windows[0].name, "shared-one", "names are topology");
+        assert!(matches!(
+            local.windows[1].state.tree,
+            Some(LayoutNode::Split { ratio, .. }) if (ratio - 0.7).abs() < f32::EPSILON
+        ));
+    }
+
+    /// The initial persisted-layout reply uses the same topology-only merge as
+    /// broadcasts: the attach bootstrap focus wins when it remains a leaf.
+    #[test]
+    fn metadata_value_preserves_valid_bootstrap_focus() {
+        let mut local = Workspace::single(tid(2));
+        let persisted = ws1(split2(1, 2, 1));
+        let bytes = persisted.encode_cbor().expect("encode persisted workspace");
+        let mut focused = Some(tid(2));
+        let mut panes = panes_for(&[&tid(1), &tid(2)]);
+
+        let outcome = drive_layout_frame(
+            FrameKind::MetadataValue {
+                request_id: 41,
+                value: Some(bytes),
+            },
+            Some(41),
+            &mut local,
+            &mut focused,
+            &mut panes,
+        );
+
+        assert!(outcome.layout_replaced);
+        assert_eq!(window_leaves(&local, 0), vec![tid(1), tid(2)]);
+        assert_eq!(local.windows[0].state.focus, Some(tid(2)));
+        assert_eq!(focused, Some(tid(2)));
+    }
+
+    /// When a topology update removes local focus/window state, reconciliation
+    /// repairs it deterministically rather than adopting the sender's focus.
+    #[test]
+    fn reconcile_repairs_missing_local_focus_and_invalid_active_index() {
+        let mut local = Workspace::single(tid(1));
+        local.add_window("2".to_owned(), tid(2));
+        local.add_window("3".to_owned(), tid(9));
+        let incoming = Workspace {
+            windows: vec![
+                crate::layout::WindowState {
+                    name: "1".to_owned(),
+                    state: split2(1, 4, 4),
+                },
+                crate::layout::WindowState {
+                    name: "2".to_owned(),
+                    state: split2(2, 3, 3),
+                },
+            ],
+            active: 0,
+        };
+        let panes = panes_for(&[&tid(1), &tid(2), &tid(3), &tid(4), &tid(9)]);
+
+        let out = super::reconcile_loaded_workspace(incoming, &local, Some(&tid(9)), &panes);
+
+        assert_eq!(out.active, 1, "removed local index clamps to last window");
+        assert_eq!(out.windows[0].state.focus, Some(tid(1)));
+        assert_eq!(out.windows[1].state.focus, Some(tid(2)));
+    }
+
+    /// Layout tombstones retain the existing reset behavior and anchor the
+    /// replacement single-pane workspace on this client's focused pane.
+    #[test]
+    fn layout_tombstone_resets_to_local_focused_pane() {
+        use phux_protocol::wire::frame::Scope;
+
+        let mut local = Workspace {
+            windows: vec![
+                crate::layout::WindowState {
+                    name: "1".to_owned(),
+                    state: LayoutState::single(tid(1)),
+                },
+                crate::layout::WindowState {
+                    name: "2".to_owned(),
+                    state: LayoutState::single(tid(2)),
+                },
+            ],
+            active: 1,
+        };
+        let mut focused = Some(tid(2));
+        let mut panes = panes_for(&[&tid(1), &tid(2)]);
+
+        let outcome = drive_layout_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Group(super::DEFAULT_GROUP_ID),
+                key: crate::attach::driver::layout_key(SessionId::new(1)),
+                value: None,
+            },
+            None,
+            &mut local,
+            &mut focused,
+            &mut panes,
+        );
+
+        assert!(outcome.layout_replaced);
+        assert_eq!(local, Workspace::single(tid(2)));
+        assert_eq!(focused, Some(tid(2)));
     }
 
     /// A single-window workspace whose window is two leaves split
