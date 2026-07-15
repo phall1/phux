@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T04:27:04Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T04:37:54Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -11,6 +11,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|---:|---:|---:|
 | ci | 33 | 67% | 13m29s | 16m29s | 451 |
 | stress | 3 | 67% | 21m11s | 21m11s | 43 |
+| observatory | 1 | 100% | 11m44s | 11m44s | 23 |
 | conventional-commits | 17 | 94% | 16s | 19s | 3 |
 | release-please | 6 | 100% | 20s | 37s | 2 |
 
@@ -44,6 +45,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / check | fmt | 1s | 4 |
 | ci / test | unit | 11m56s | 2 |
 | ci / test | e2e | 8s | 2 |
+| observatory / timings | build-dev | 10m39s | 1 |
+| observatory / timings | build-release | 4m55s | 1 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -51,6 +54,47 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|
 | ci / check | 60% | 5 |
 | ci / test | 100% | 3 |
+
+## Cold build (observatory)
+
+### dev: 10m40s — 519 units at `c3529bbc2`
+
+| slowest units | wall |
+|---|---:|
+| `libghostty-vt-sys build script (run)` | 118.96s |
+| `phux-server lib (test)` | 87.51s |
+| `phux bin "phux"` | 66.67s |
+| `phux-client lib (test)` | 59.05s |
+| `phux-server` | 53.12s |
+| `rustls` | 45.79s |
+| `phux-server test "hub_relay_federation" (test)` | 33.32s |
+| `phux-server test "spawn_terminal" (test)` | 32.92s |
+
+### release: 4m55s — 358 units at `c3529bbc2`
+
+| slowest units | wall |
+|---|---:|
+| `libghostty-vt-sys build script (run)` | 154.26s |
+| `phux bin "phux"` | 97.2s |
+| `regex-automata` | 20.13s |
+| `phux-server` | 19.89s |
+| `phux-mcp bin "phux-mcp"` | 19.31s |
+| `phux-config` | 17.72s |
+| `rustls` | 17.27s |
+| `clap_builder` | 15.17s |
+
+## Release binary size
+
+| binary | size | previous |
+|---|---:|---:|
+| `phux` | 12.6 MiB | 0.0 MiB |
+| `phux-mcp` | 2.0 MiB | 0.0 MiB |
+
+## Dependency graph
+
+- locked packages: **431** — 11 workspace members, 47 direct deps
+- duplicate versions: **32**
+- proc-macro crates: 33; build-script crates: 67
 
 ## Slowest tests (latest instrumented run, `b10c26f44`)
 
@@ -71,6 +115,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 04:26 | observatory | workflow_dispatch | main | success | 11m44s | 23m06s |
 | 2026-07-15 04:25 | release-please | push | main | success | 20s | 17s |
 | 2026-07-15 04:11 | conventional-commits | pull_request | feat/ci-observability | success | 13s | 10s |
 | 2026-07-15 04:11 | ci | pull_request | feat/ci-observability | success | 13m41s | 16m16s |
@@ -100,7 +145,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 03:30 | conventional-commits | pull_request | feat/ci-observability | success | 19s | 16s |
 | 2026-07-15 03:30 | ci | pull_request | feat/ci-observability | cancelled | 8m29s | 10m55s |
 | 2026-07-15 03:29 | conventional-commits | pull_request | ci/draft-release-prs | success | 16s | 12s |
-| 2026-07-15 03:29 | ci | pull_request | ci/draft-release-prs | success | 12m54s | 15m26s |
 
 ---
 
