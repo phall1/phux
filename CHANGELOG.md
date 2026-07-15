@@ -9,6 +9,25 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.2.0](https://github.com/phall1/phux/compare/v0.1.0...v0.2.0) (2026-07-15)
+
+
+### Features
+
+* **server:** detect agent state from the screen and publish phux.agent/v1 ([4c5fa6d](https://github.com/phall1/phux/commit/4c5fa6da4de3eb7dc1cc08deb4fb67e8f4bdbbd9))
+
+
+### Bug Fixes
+
+* **ci:** render '-' not '0.0 MiB' for a first binary-size record ([#222](https://github.com/phall1/phux/issues/222)) ([da86997](https://github.com/phall1/phux/commit/da869972ef6884f9d91790fa0ccf3dc361ec3975))
+* **client:** keep the status bar out of the sidebar's columns ([f8a356d](https://github.com/phall1/phux/commit/f8a356d59f2e14f379063df7ef774d8b8db68ec9))
+* **client:** prevent multi-agent screen flicker ([#214](https://github.com/phall1/phux/issues/214)) ([cb69d00](https://github.com/phall1/phux/commit/cb69d00ca4678da781de4f7567838a4326e6994c))
+* **client:** scroll the palette and pickers instead of clipping them ([4706229](https://github.com/phall1/phux/commit/4706229e23dd5653be326f3aed25eede982571bb))
+* **server,client:** close ten findings from adversarial review of the detector ([b841868](https://github.com/phall1/phux/commit/b841868f9b8cd000028c583833ab6cedeb359c18))
+* **server,client:** make mouse input reach pane apps and layer wheel scrolling ([#219](https://github.com/phall1/phux/issues/219)) ([9268792](https://github.com/phall1/phux/commit/92687921a1086072267a1582a01c93926eb8e880))
+* **server:** restore exit watchers after upgrade ([3aa3f78](https://github.com/phall1/phux/commit/3aa3f78538b76d0a205c7f9eb4742e0ae5f7a86d))
+* **tui:** align session and sidebar navigation ([612ec53](https://github.com/phall1/phux/commit/612ec539b766db36e6c8a4d6c026674bd447b5cd))
+
 ## 0.1.0 (2026-07-11)
 
 Earlier tags (`v0.0.1` through `v0.0.3`) predate this generated changelog; see
