@@ -1,0 +1,199 @@
+{
+  "schema": 1,
+  "generated_at": "2026-07-15T03:34:58Z",
+  "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/mouse-encoder-size-and-scroll",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:22:09Z",
+      "duration_s": 19,
+      "runner_s": 17
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:13:05Z",
+      "duration_s": 17,
+      "runner_s": 12
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "ci/node24-actions",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:12:37Z",
+      "duration_s": 17,
+      "runner_s": 13
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:11:56Z",
+      "duration_s": 21,
+      "runner_s": 18
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "ci/node24-actions",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:09:28Z",
+      "duration_s": 209,
+      "runner_s": 400
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:03:28Z",
+      "duration_s": 598,
+      "runner_s": 854
+    },
+    {
+      "workflow": "stress",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T03:03:06Z",
+      "duration_s": 1,
+      "runner_s": -8
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:03:06Z",
+      "duration_s": 28,
+      "runner_s": 32
+    }
+  ],
+  "workflows_30d": [
+    {
+      "workflow": "ci",
+      "runs": 3,
+      "success_rate": 0,
+      "median_s": 209,
+      "p95_s": 209,
+      "runner_minutes": 21
+    },
+    {
+      "workflow": "conventional-commits",
+      "runs": 3,
+      "success_rate": 100,
+      "median_s": 17,
+      "p95_s": 17,
+      "runner_minutes": 1
+    },
+    {
+      "workflow": "release-please",
+      "runs": 1,
+      "success_rate": 100,
+      "median_s": 21,
+      "p95_s": 21,
+      "runner_minutes": 0
+    },
+    {
+      "workflow": "stress",
+      "runs": 1,
+      "success_rate": 0,
+      "median_s": 1,
+      "p95_s": 1,
+      "runner_minutes": -0
+    }
+  ],
+  "ci_jobs_30d": [
+    {
+      "job": "check",
+      "runs": 3,
+      "median_queue_s": 2,
+      "median_s": 197,
+      "p95_s": 197
+    },
+    {
+      "job": "test",
+      "runs": 3,
+      "median_queue_s": 2,
+      "median_s": 197,
+      "p95_s": 197
+    },
+    {
+      "job": "detect docs-only",
+      "runs": 3,
+      "median_queue_s": 3,
+      "median_s": 6,
+      "p95_s": 6
+    }
+  ],
+  "slow_steps": [
+    {
+      "job": "check",
+      "step": "rust checks (fmt + clippy + doc + deny)",
+      "median_s": 210,
+      "n": 1
+    },
+    {
+      "job": "test",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 18,
+      "n": 2
+    },
+    {
+      "job": "check",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 17,
+      "n": 2
+    },
+    {
+      "job": "check",
+      "step": "docs-check",
+      "median_s": 9,
+      "n": 1
+    },
+    {
+      "job": "test",
+      "step": "Run DeterminateSystems/nix-installer-action@v22",
+      "median_s": 8,
+      "n": 2
+    },
+    {
+      "job": "check",
+      "step": "Run DeterminateSystems/nix-installer-action@v22",
+      "median_s": 7,
+      "n": 2
+    },
+    {
+      "job": "check",
+      "step": "Run cachix/cachix-action@v15",
+      "median_s": 5,
+      "n": 1
+    },
+    {
+      "job": "test",
+      "step": "Run cachix/cachix-action@v15",
+      "median_s": 5,
+      "n": 1
+    }
+  ],
+  "cache": [],
+  "phase_medians": [],
+  "slow_tests": [],
+  "build_timings": [],
+  "binary_size": {
+    "latest": null,
+    "previous_bins": [],
+    "history": []
+  },
+  "deps": {
+    "latest": null,
+    "previous": null,
+    "history": []
+  }
+}
