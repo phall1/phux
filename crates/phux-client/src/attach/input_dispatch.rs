@@ -4363,6 +4363,7 @@ mod tests {
         let mut mouse_optout = std::collections::HashSet::new();
         let agent_meta = HashMap::new();
         let mut vcs = crate::attach::driver::VcsIndex::default();
+        let focus_history = FocusHistory::default();
         let focused = workspace.active_window().and_then(|w| w.focus.clone());
         let mut ctx = DispatchCtx {
             resolver: None,
@@ -4390,6 +4391,7 @@ mod tests {
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
             attention_navigation: navigation,
+            focus_history,
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
