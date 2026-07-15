@@ -668,9 +668,11 @@ enum Registration {
     /// subscriber to `AwaitingFirst` because it upgraded to a
     /// snapshot-bearing attach (phux-v45.15). The attach's own snapshot
     /// re-opens the gate — but a satellite error means that snapshot never
-    /// comes, so the error must restore the gate to `Open`, or the
-    /// pre-existing (event-only, or already-attached and snapshot-landed)
-    /// stream is stranded behind a gate that never opens.
+    /// comes, so the error must restore the gate to `Open` **if it is still
+    /// `AwaitingFirst`**, or the pre-existing (event-only, or already-attached
+    /// and snapshot-landed) stream is stranded behind a gate that never
+    /// opens. A snapshot retained while the command was in flight supersedes
+    /// this rollback and must remain gated until it is delivered.
     Regated,
     /// An idempotent re-subscribe that left the existing gate untouched (the
     /// pre-existing registration belongs to an earlier successful subscribe
@@ -1169,12 +1171,15 @@ impl RelaySession {
             // The command upgraded an already-`Open` stream to an attach and
             // re-gated it to `AwaitingFirst`; the attach's snapshot never
             // comes, so restore the gate to `Open` or the pre-existing stream
-            // is stranded (phux-v45.15).
+            // is stranded (phux-v45.15). Do so only if this command's gate is
+            // still present: a snapshot retained while the reply was in
+            // flight must stay ahead of later deltas (phux-v45.16).
             Registration::Regated => {
                 if let Some(sub) = self
                     .subscribers
                     .get_mut(&terminal)
                     .and_then(|subs| subs.iter_mut().find(|s| s.client == client))
+                    && matches!(sub.gate, SnapshotGate::AwaitingFirst)
                 {
                     sub.gate = SnapshotGate::Open;
                     debug!(
@@ -2649,6 +2654,96 @@ mod tests {
             bytes: bytes::Bytes::from_static(b"leak"),
         }));
         assert!(out_rx.try_recv().is_err(), "rolled-back subscriber leaked");
+    }
+
+    #[test]
+    fn errored_upgrade_preserves_a_concurrently_retained_snapshot() {
+        // phux-v45.16's exact triple-coincidence regression:
+        //
+        // 1. B's event subscription upgrades to an attach, re-gating its
+        //    flowing stream to AwaitingFirst.
+        // 2. C attaches to the same terminal; its return-leg snapshot fans
+        //    out while B's mailbox is full, so B retains that snapshot.
+        // 3. B's upgrade gets a transient error reply. Its Regated rollback
+        //    must not replace the newer Retained gate with Open, or the next
+        //    delta reaches B without the snapshot (L1 §9.1).
+        let mut session = RelaySession::new(host());
+        let (tx_b, mut rx_b) = mpsc::channel(2);
+        let (tx_c, mut rx_c) = mpsc::channel(8);
+
+        // B's event-only stream is established and demonstrably Open.
+        subscribe(&mut session, 9, ClientId(2), tx_b.clone());
+        session.handle_inbound(&encode(&FrameKind::Event {
+            terminal: Some(TerminalId::local(9)),
+            event: AgentEvent::CommandStarted,
+        }));
+        assert!(rx_b.try_recv().is_ok(), "B's event stream must be open");
+
+        // B upgrades. Keep its request id so the delayed error can arrive
+        // after C's attach snapshot.
+        let (reply_b, mut reply_rx_b) = oneshot::channel();
+        let wire = session.handle_request(RelayRequest::Command {
+            command: Command::AttachTerminal {
+                terminal_id: TerminalId::local(9),
+            },
+            reply: reply_b,
+            subscribe: Some(ProxySubscription {
+                terminal: 9,
+                client: ClientId(2),
+                out_tx: tx_b.clone(),
+                seq: 2,
+                awaits_snapshot: true,
+            }),
+        });
+        let FrameKind::Command { request_id, .. } = decode(&wire) else {
+            panic!("expected B's attach COMMAND");
+        };
+
+        // C attaches, then B's mailbox fills before C's snapshot returns.
+        // The snapshot lands for C but is retained for B.
+        attach(&mut session, 9, ClientId(3), tx_c);
+        tx_b.try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("B filler one");
+        tx_b.try_send(Outbound::Frame(FrameKind::Detach))
+            .expect("B filler two");
+        session.handle_inbound(&encode(&snapshot_frame(9)));
+        assert!(matches!(
+            rx_c.try_recv().expect("C receives its snapshot"),
+            Outbound::Frame(FrameKind::TerminalSnapshot { .. })
+        ));
+
+        // The delayed transient error rolls back B's upgrade. It may only
+        // undo AwaitingFirst; B's concurrently Retained snapshot must win.
+        session.handle_inbound(&encode(&FrameKind::Error {
+            request_id: Some(request_id),
+            code: ErrorCode::InternalError,
+            message: "transient".to_owned(),
+        }));
+        assert!(matches!(
+            reply_rx_b.try_recv().expect("B's upgrade resolves"),
+            CommandResult::Error { .. }
+        ));
+
+        // Once B has room, its next delta must flush the retained snapshot
+        // first and then follow it. The old unconditional rollback delivered
+        // only this delta, proving this assertion is non-vacuous.
+        assert!(matches!(
+            rx_b.try_recv().expect("B filler one drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+        assert!(matches!(
+            rx_b.try_recv().expect("B filler two drains"),
+            Outbound::Frame(FrameKind::Detach)
+        ));
+        session.handle_inbound(&encode(&output_frame(9, 1, b"after-error")));
+        assert!(matches!(
+            rx_b.try_recv().expect("B's retained snapshot flushes"),
+            Outbound::Frame(FrameKind::TerminalSnapshot { .. })
+        ));
+        assert!(matches!(
+            rx_b.try_recv().expect("B's delta follows the snapshot"),
+            Outbound::Frame(FrameKind::TerminalOutput { seq: 1, .. })
+        ));
     }
 
     #[test]
