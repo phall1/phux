@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T09:34:21Z",
+  "generated_at": "2026-07-15T09:36:53Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -127,6 +127,15 @@
       "created_at": "2026-07-15T09:16:04Z",
       "duration_s": 1009,
       "runner_s": 1252
+    },
+    {
+      "workflow": "stress",
+      "event": "schedule",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:14:25Z",
+      "duration_s": 1335,
+      "runner_s": 1331
     },
     {
       "workflow": "conventional-commits",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T04:54:33Z",
       "duration_s": 35,
       "runner_s": 30
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T04:54:33Z",
-      "duration_s": 817,
-      "runner_s": 964
     }
   ],
   "workflows_30d": [
@@ -283,20 +283,20 @@
       "runner_minutes": 637
     },
     {
+      "workflow": "stress",
+      "runs": 6,
+      "success_rate": 50,
+      "median_s": 6,
+      "p95_s": 1293,
+      "runner_minutes": 65
+    },
+    {
       "workflow": "observatory",
       "runs": 2,
       "success_rate": 100,
       "median_s": 704,
       "p95_s": 704,
       "runner_minutes": 47
-    },
-    {
-      "workflow": "stress",
-      "runs": 5,
-      "success_rate": 40,
-      "median_s": 6,
-      "p95_s": 1271,
-      "runner_minutes": 43
     },
     {
       "workflow": "release-please",
@@ -394,6 +394,12 @@
       "job": "test",
       "samples": 13,
       "hit_rate": 46
+    },
+    {
+      "workflow": "stress",
+      "job": "stress",
+      "samples": 1,
+      "hit_rate": 0
     }
   ],
   "phase_medians": [
@@ -452,6 +458,13 @@
       "phase": "build-release",
       "median_s": 295,
       "n": 2
+    },
+    {
+      "workflow": "stress",
+      "job": "stress",
+      "phase": "stress",
+      "median_s": 1231,
+      "n": 1
     }
   ],
   "slow_tests": {

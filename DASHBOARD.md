@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:34:21Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:36:53Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,8 +10,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 47 | 66% | 13m36s | 16m52s | 637 |
+| stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
-| stress | 5 | 40% | 6s | 21m11s | 43 |
 | release-please | 9 | 100% | 35s | 44s | 20 |
 | conventional-commits | 30 | 93% | 16s | 19s | 6 |
 
@@ -47,6 +47,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | e2e | 8s | 11 |
 | observatory / timings | build-dev | 10m39s | 2 |
 | observatory / timings | build-release | 4m55s | 2 |
+| stress / stress | stress | 20m31s | 1 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -54,6 +55,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|
 | ci / check | 40% | 15 |
 | ci / test | 46% | 13 |
+| stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
 
@@ -129,6 +131,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:16 | ci | push | main | success | 16m51s | 21m01s |
 | 2026-07-15 09:16 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 19s | 16s |
 | 2026-07-15 09:16 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 16m49s | 20m52s |
+| 2026-07-15 09:14 | stress | schedule | main | success | 22m15s | 22m11s |
 | 2026-07-15 09:02 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 15s | 11s |
 | 2026-07-15 09:02 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 13m15s | 17m16s |
 | 2026-07-15 08:59 | conventional-commits | pull_request | feat/pi-extension | success | 21s | 16s |
@@ -144,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 04:54 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-15 04:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 14s |
 | 2026-07-15 04:54 | release-please | push | main | success | 35s | 30s |
-| 2026-07-15 04:54 | ci | push | main | success | 13m37s | 16m04s |
 
 ---
 
