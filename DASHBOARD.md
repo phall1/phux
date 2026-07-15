@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:03:53Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:04:06Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 11 | 100% | 36s | 44s | 22 |
-| conventional-commits | 49 | 92% | 16s | 20s | 10 |
+| conventional-commits | 50 | 92% | 16s | 20s | 10 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 10:03 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 17s | 13s |
 | 2026-07-15 10:03 | conventional-commits | pull_request | feat/overlay-reachability-first- | success | 20s | 16s |
 | 2026-07-15 10:00 | conventional-commits | pull_request | feat/opencode-integration | success | 24s | 22s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:41 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-07-15 09:41 | release-please | push | main | success | 36s | 31s |
 | 2026-07-15 09:41 | ci | push | main | success | 13m37s | 17m48s |
-| 2026-07-15 09:39 | conventional-commits | pull_request | fix/input-lane-ordering | success | 13s | 10s |
 
 ---
 
