@@ -128,18 +128,6 @@ pub trait RenderOverlay {
         None
     }
 
-    /// Advance this overlay's selection mode, returning the new mode.
-    ///
-    /// `None` for every overlay but copy-mode (the default): only copy-mode
-    /// carries a [`SelectionMode`]. Copy-mode overrides it to cycle
-    /// `Char -> Line -> Rect -> Char` and report the result. The dispatcher's
-    /// copy-mode-active mode toggle calls it through
-    /// [`OverlayState::cycle_copy_mode`]; the mode is client-local overlay
-    /// state (ADR-0045), never a wire concern.
-    fn cycle_selection_mode(&mut self) -> Option<SelectionMode> {
-        None
-    }
-
     /// `true` for a display-only overlay that must never capture input
     /// (phux-foz.2: the which-key popup). The dispatcher checks this
     /// BEFORE overlay routing: instead of feeding keys to the overlay it
@@ -254,18 +242,6 @@ impl OverlayState {
     #[must_use]
     pub fn depth(&self) -> usize {
         self.stack.len()
-    }
-
-    /// If the top overlay is copy-mode, advance its selection mode and return
-    /// the new [`SelectionMode`]; `None` if the top overlay is not copy-mode
-    /// (or the stack is empty).
-    ///
-    /// This is the accessor the dispatcher's copy-mode-active mode toggle uses
-    /// to reach [`CopyModeOverlay::cycle_mode`] without naming the concrete
-    /// overlay type through the boxed trait object. Client-local (ADR-0045):
-    /// the mode never crosses the wire.
-    pub fn cycle_copy_mode(&mut self) -> Option<SelectionMode> {
-        self.stack.last_mut().and_then(|o| o.cycle_selection_mode())
     }
 
     /// `true` when the top overlay is input-passthrough (phux-foz.2:

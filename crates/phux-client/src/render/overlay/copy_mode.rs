@@ -104,8 +104,8 @@ impl CopyModeOverlay {
 
     /// The current selection mode.
     ///
-    /// The lockstep read side of the mode state machine: a global mode-cycle
-    /// keybind flips the mode via [`Self::cycle_mode`], the renderer and the
+    /// The lockstep read side of the mode state machine: the in-overlay `Tab`
+    /// key flips the mode via [`Self::cycle_mode`], the renderer and the
     /// copy path read it back through here. Mode is client-local UI state, so
     /// nothing about it touches the wire (ADR-0030).
     #[must_use]
@@ -115,13 +115,11 @@ impl CopyModeOverlay {
 
     /// Advance the selection mode `Char -> Line -> Rect -> Char`.
     ///
-    /// The lockstep write side of the mode state machine. It is driven two
-    /// ways: directly by the in-overlay `Tab` key (the overlay captures every
-    /// keystroke while it is up, so the cycle key must live here — see
-    /// [`RenderOverlay::handle_key`]), and via the
-    /// [`super::OverlayState::cycle_copy_mode`] accessor for callers that reach the
-    /// active overlay through the boxed trait object. No wire traffic — the
-    /// mode is a consumer-side projection detail (ADR-0030).
+    /// The lockstep write side of the mode state machine, driven by the
+    /// in-overlay `Tab` key: the overlay captures every keystroke while it is
+    /// up, so the cycle key must live here — see
+    /// [`RenderOverlay::handle_key`]. No wire traffic — the mode is a
+    /// consumer-side projection detail (ADR-0030).
     pub const fn cycle_mode(&mut self) {
         self.mode = match self.mode {
             SelectionMode::Char => SelectionMode::Line,
@@ -263,16 +261,6 @@ impl RenderOverlay for CopyModeOverlay {
             range.end_col,
             self.mode,
         ))
-    }
-
-    /// Advance the selection mode `Char -> Line -> Rect -> Char`.
-    ///
-    /// Client-local UI state (ADR-0045): the mode is a projection knob on the
-    /// consumer's own engine, never a wire concern. The dispatcher's
-    /// copy-mode-active toggle calls this via [`super::OverlayState::cycle_copy_mode`].
-    fn cycle_selection_mode(&mut self) -> Option<SelectionMode> {
-        self.cycle_mode();
-        Some(self.mode)
     }
 
     fn handle_key(&mut self, key: &KeyEvent) -> OverlayCommand {
