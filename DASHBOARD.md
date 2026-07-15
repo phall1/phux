@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T20:41:18Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T20:43:14Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,7 +12,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 143 | 60% | 13m31s | 17m15s | 1772 |
 | observatory | 5 | 80% | 11m56s | 12m25s | 118 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
-| release-please | 22 | 100% | 42s | 52s | 29 |
+| release-please | 23 | 100% | 42s | 52s | 29 |
 | conventional-commits | 133 | 86% | 15s | 20s | 25 |
 
 ## ci jobs, last 30 days
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 20:42 | release-please | push | main | success | 21s | 18s |
 | 2026-07-15 20:24 | conventional-commits | pull_request | ci/runner-disk-headroom | success | 19s | 14s |
 | 2026-07-15 20:24 | ci | pull_request | ci/runner-disk-headroom | success | 16m52s | 20m45s |
 | 2026-07-15 20:22 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 19:36 | ci | pull_request | feat/phux-detach | success | 16m33s | 20m26s |
 | 2026-07-15 19:36 | release-please | push | main | success | 54s | 49s |
 | 2026-07-15 19:36 | observatory | push | main | success | 12m38s | 24m20s |
-| 2026-07-15 19:36 | ci | push | main | success | 16m46s | 21m01s |
 
 ---
 
