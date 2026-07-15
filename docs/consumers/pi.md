@@ -212,5 +212,7 @@ lock; it does not prevent the interleaved-input case above.
 - `/phux-attach` deliberately emits only local attach argv plus session/pane
   navigation. It neither reads nor prints remote credentials.
 
-Package-local development and validation commands live in
-[`../../integrations/pi/README.md`](../../integrations/pi/README.md).
+A checked-in [live-fleet recording](../pi-live-fleet-proof.md) shows Pi using
+this surface to place, drive, verify, and spatially rearrange real Claude Code
+and OpenAI Codex panes. Package-local development and validation commands live
+in [`../../integrations/pi/README.md`](../../integrations/pi/README.md).
