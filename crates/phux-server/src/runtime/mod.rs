@@ -619,8 +619,11 @@ impl ServerRuntime {
             state.with_mut(|s| s.set_policy_bundle(bundle));
         }
         // Event-hook catalog (phux-r82.1): moved into the LocalSet block
-        // below, where the dispatcher task can `spawn_local`.
+        // below, where the dispatcher task can `spawn_local`. The listening
+        // socket path rides along so hook children get `PHUX_SOCKET` too
+        // (phux-d4rf), matching the pane-spawn injection above (phux-cufw).
         let hook_catalog = self.cfg.hook_catalog.clone();
+        let hook_socket_path = socket_path.clone();
         // Dedicated input lane (phux-51n6.2, ADR-0044): a separate OS thread
         // that runs the input routing stage off the main runtime, so a
         // keystroke's lease/subscription gating and mailbox delivery preempt a
@@ -660,7 +663,8 @@ impl ServerRuntime {
                 // Skipped entirely when nothing is configured: firing an
                 // event with no dispatcher registered is a no-op.
                 if !hook_catalog.is_empty() {
-                    let dispatcher = crate::hooks::spawn_hook_dispatcher(hook_catalog);
+                    let dispatcher =
+                        crate::hooks::spawn_hook_dispatcher(hook_catalog, Some(hook_socket_path));
                     state.with_mut(|s| s.set_hook_dispatcher(dispatcher));
                 }
 
