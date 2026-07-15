@@ -118,11 +118,9 @@ the loop, which runs until stdin EOF.
 Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
 `phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`) takes a `target` selector string in the **same
 grammar as the CLI's `TARGET`**, whose table and examples live in
-[`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
-(last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
-(pane), `@N` (opaque local id), and `host/@N` (opaque satellite id).
-The host-qualified form matches an exact entry in the aggregate Terminal
-inventory; it does not create a federated session/window join.
+[`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `name`
+(session), `name:N` / `name:tag` (window), `name:N.M`
+(pane), and `@N` (opaque id).
 
 Resolution is **client-side**, exactly as the CLI resolves it
 ([ADR-0021](../../ADR/0021-control-plane-commands.md)): the adapter
@@ -130,12 +128,13 @@ fetches a state snapshot, expands the selector to candidate
 `TerminalId`s, then narrows to a single pane — the focused pane if it is
 among the candidates, else the first in snapshot order. This is the same
 `pick_target_pane` tiebreak the CLI uses. The server never parses a
-selector.
+selector. `=` is explicitly unsupported here because an MCP request has no
+attached-client focus history; callers must use `.` or an explicit target.
 
 `target` optionality differs per tool:
 
 - `phux_snapshot` and `phux_wait` make `target` **optional**; when absent
-  it defaults to the focused/last session (`Selector::Last`).
+  it defaults to the focused session (`Selector::Current`).
 - `phux_send_keys` and `phux_run` **require** `target`.
 
 Every tool also takes an optional `socket` string naming the
@@ -179,7 +178,7 @@ attach or resize.
 
 | Param | Type | Required | Meaning |
 |---|---|---|---|
-| `target` | string | no | Selector (see §2). Defaults to focused/last. |
+| `target` | string | no | Selector (see §2). Defaults to focused. |
 | `scrollback` | number | no | Tri-state — see below. |
 | `cells` | boolean | no | When true, include per-cell OSC-133 marks and styles. Default `false`. |
 | `socket` | string | no | Override the UDS path (see §2). |
@@ -240,7 +239,7 @@ Polls the resolved pane until a condition holds.
 
 | Param | Type | Required | Meaning |
 |---|---|---|---|
-| `target` | string | no | Selector (see §2). Defaults to focused/last. |
+| `target` | string | no | Selector (see §2). Defaults to focused. |
 | `until` | string | no | Succeed once a visible line contains this substring. |
 | `idle_ms` | number | no | Succeed once the screen holds still this long. |
 | `timeout_secs` | number | no | Give up after this many seconds. Default: wait forever. |

@@ -95,7 +95,7 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   non-zero. `--json` emits `SessionListJson` (§4.1).
 - **`phux snapshot [--json] [--scrollback[=N]] [--cells] [--socket P]
   [TARGET]`** — side-effect-free pane read via `GET_SCREEN`. `TARGET` is
-  optional (defaults to the focused/last session). `--json` emits `ScreenState`
+  optional (defaults to the focused session). `--json` emits `ScreenState`
   (§4.2); without it, a boxed text view.
 - **`phux send-keys [--socket P] TARGET KEYS...`** — route named keys or
   literal strings to one resolved pane by id (`ROUTE_INPUT`). `TARGET` is
@@ -254,14 +254,15 @@ snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
 never parses a selector.
 
 The full grammar table and CLI examples live in [`tui.md`](./tui.md) §3. In one
-line, the forms are: `.` (current), `=` (last), `name` (session), `name:N` /
-`name:tag` (window), `name:N.M` (pane), and `@N` (opaque id).
+line, the forms are: `.` (current), `name` (session), `name:N` / `name:tag`
+(window), `name:N.M` (pane), and `@N` (opaque id). `=` is explicitly
+unsupported for headless commands because they have no attached-client MRU.
 
 A selector that names several panes (a whole session or window) narrows to a
 single pane: the focused pane when it is among the matches, else the first in
 snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
 Optionality differs per verb: `snapshot` and `wait` default `TARGET` to the
-last-focused session; `send-keys`, `run`, and `ask` require it.
+focused session; `send-keys`, `run`, and `ask` require it.
 
 ## 4. JSON contracts (the per-verb machine shapes)
 

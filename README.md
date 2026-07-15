@@ -237,7 +237,11 @@ Selectors are shared across the CLI:
 | `work` | session named `work` |
 | `work:1.0` | session `work`, window 1, pane 0 |
 | `@42` | opaque server-local terminal id |
-| `=` | last-focused target |
+
+Headless CLI/MCP calls reject `=` because they have no attached-client focus
+history. In the attached TUI, `C-a =` jumps to the previous pane. This local
+MRU behavior depends on the focus model recorded by ADR-0049 on the sibling
+focus branch; this branch does not duplicate that ADR.
 
 Register `phux-mcp` with the agent's host to expose the same core verbs over
 JSON-RPC stdio, plus `phux_ask` and plugin workspace profile discovery. Start

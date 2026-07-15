@@ -21,6 +21,7 @@ use phux_protocol::wire::frame::{
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
 use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
+use super::focus::FocusHistory;
 use super::input::make_named_key;
 use super::paint::{SidebarReservation, content_rect};
 use super::plugin_actions::{PluginActionEntry, PluginRunResult};
@@ -41,6 +42,8 @@ pub(super) struct DispatchCtx<'a> {
     /// to parse; the dispatcher then forwards every key to the focused
     /// pane unchanged.
     pub resolver: Option<&'a mut phux_config::keybind::Resolver>,
+    /// Client-local focus transition/MRU bookkeeping.
+    pub focus_history: FocusHistory,
     /// Client-side multi-window mirror. Pane actions operate on the
     /// active window ([`Workspace::active_window_mut`]); the whole
     /// workspace is what gets serialized to L3 on a `SET_METADATA`.
@@ -664,7 +667,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         if let Some(ls) = ctx.workspace.active_window_mut() {
                             ls.focus = Some(target.clone());
                         }
-                        *focused_pane = Some(target.clone());
+                        apply_focus_transition(
+                            &mut ctx.focus_history,
+                            focused_pane,
+                            target.clone(),
+                        );
                         // Re-anchor predict to the clicked pane: drop the
                         // old pane's queue AND reset the cursor + viewport
                         // to the new pane, so a keystroke before the next
@@ -1184,6 +1191,15 @@ fn quantize_cell(p: f64) -> u16 {
     }
 }
 
+/// Apply a client-local focus change through the single MRU transition path.
+fn apply_focus_transition(
+    history: &mut FocusHistory,
+    focused_pane: &mut Option<TerminalId>,
+    target: TerminalId,
+) {
+    history.transition(focused_pane, Some(target));
+}
+
 /// Apply the side-effects of a resolved action: layout-mutation repaint
 /// signal, focus move, prediction reset, `SET_METADATA` broadcast, bell,
 /// detach, parked spawn (split / new-window), and kill-frame sequences.
@@ -1235,7 +1251,7 @@ async fn apply_action_effects<W: super::RenderSink>(
         *ctx.sidebar_enabled = !*ctx.sidebar_enabled;
     }
     if let Some(target) = effects.set_focus {
-        *focused_pane = Some(target);
+        apply_focus_transition(&mut ctx.focus_history, focused_pane, target);
         // Focus moved (keybinding pane navigation) — re-anchor predict to
         // the new pane: reset its cursor + viewport and drop the old pane's
         // queue, so a keystroke before the next reconcile echoes at the
@@ -1576,6 +1592,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "detach",
     "next-pane",
     "previous-pane",
+    "last-pane",
     "toggle-zoom",
     "toggle-sidebar",
     "command-palette",
@@ -2282,6 +2299,34 @@ fn run_action(
                 effects.set_focus = new_focus;
             }
         }
+        "last-pane" => {
+            // One-entry MRU jump-back. The target may be in another window;
+            // locate it by stable TerminalId, switch the client-local active
+            // window, and restore that window's local focus. Applying the
+            // resulting focus change records the pane we jumped from as the
+            // next MRU, so repeated invocations toggle between two panes.
+            let Some(target) = ctx.focus_history.target(focused, ctx.workspace) else {
+                effects.bell = true;
+                return effects;
+            };
+            let owner = ctx.workspace.windows.iter().position(|window| {
+                window
+                    .state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|tree| crate::layout::leaves(tree).contains(&target))
+            });
+            let Some(window) = owner else {
+                tracing::debug!(terminal = ?target, "last-pane MRU target is no longer live");
+                effects.bell = true;
+                return effects;
+            };
+            ctx.workspace.active = window;
+            ctx.workspace.windows[window].state.focus = Some(target.clone());
+            effects.layout_mutated = true;
+            effects.clear_predict = true;
+            effects.set_focus = Some(target);
+        }
         "toggle-zoom" => {
             // phux-x2hm: zoom needs more than one pane (a single-pane window
             // bells, like tmux). When already zoomed the REAL tree still has
@@ -2960,6 +3005,14 @@ mod tests {
         action: &phux_config::keybind::ResolvedAction,
         workspace: &mut Workspace,
     ) -> ActionEffects {
+        run_with_last(action, workspace, None)
+    }
+
+    fn run_with_last(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+        last_focused: Option<TerminalId>,
+    ) -> ActionEffects {
         let mut next_request_id = 100;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
@@ -2977,6 +3030,8 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: last_focused
+                .map_or_else(FocusHistory::default, FocusHistory::with_previous),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3036,6 +3091,7 @@ mod tests {
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -3192,6 +3248,53 @@ mod tests {
         assert!(effects.clear_predict);
         assert!(!effects.set_metadata, "window switch is per-client");
         assert_eq!(effects.set_focus, Some(tid(2)));
+    }
+
+    #[test]
+    fn last_pane_dispatch_jumps_across_windows_and_toggles() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        workspace.select(0);
+
+        let action = bare_action("last-pane");
+        let effects = run_with_last(&action, &mut workspace, Some(tid(2)));
+        assert_eq!(workspace.active, 1);
+        assert_eq!(
+            workspace.active_window().and_then(|w| w.focus.clone()),
+            Some(tid(2))
+        );
+        assert_eq!(effects.set_focus, Some(tid(2)));
+        assert!(effects.clear_predict);
+        assert!(!effects.set_metadata, "focus MRU is client-local");
+        let mut focused = Some(tid(1));
+        let mut history = FocusHistory::with_previous(tid(2));
+        apply_focus_transition(
+            &mut history,
+            &mut focused,
+            effects.set_focus.expect("dispatch target"),
+        );
+        assert_eq!(history.previous(), Some(&tid(1)));
+
+        // Feed the recorded pane back through dispatch + the same apply path:
+        // repeated last-pane genuinely toggles and repairs the MRU to pane 2.
+        let effects = run_with_last(&action, &mut workspace, Some(tid(1)));
+        assert_eq!(workspace.active, 0);
+        apply_focus_transition(
+            &mut history,
+            &mut focused,
+            effects.set_focus.expect("toggle target"),
+        );
+        assert_eq!(focused, Some(tid(1)));
+        assert_eq!(history.previous(), Some(&tid(2)));
+    }
+
+    #[test]
+    fn last_pane_without_history_bells_without_mutation() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("last-pane"), &mut workspace);
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
+        assert!(effects.set_focus.is_none());
     }
 
     #[test]
@@ -3417,6 +3520,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3481,6 +3585,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3580,6 +3685,7 @@ mod tests {
             let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -3742,6 +3848,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4462,6 +4569,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4547,6 +4655,7 @@ mod tests {
             let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -4720,6 +4829,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4831,6 +4941,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4989,6 +5100,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (8, 4),
             cell_px: (1, 1),
@@ -5172,6 +5284,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -5368,6 +5481,7 @@ mod tests {
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -5632,6 +5746,7 @@ mod tests {
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px,
@@ -5978,6 +6093,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -6196,6 +6312,7 @@ mod tests {
             // past the predict layer — no keybinding interception to muddy
             // the gate assertion.
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),

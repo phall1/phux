@@ -86,7 +86,7 @@ mod help_inventory;
           pair       Mint a pairing token for a remote consumer\n  \
           stdio-bridge  Bridge stdio to the local server socket (SSH-stdio)\n\n\
         TARGET is the selector grammar: a session name, `name:window`,\n\
-        `name:window.pane`, `@id`, `host/@id`, `.` (focused), or `=` (last-focused). The same\n\
+        `name:window.pane`, `@id`, or `.` (focused). `=` is reserved for the attached TUI's client-local focus MRU. The same\n\
         grammar works across kill/snapshot/send-keys/run/wait/ask.",
     after_long_help = "ENVIRONMENT\n  \
         PHUX_SOCKET        UDS path for the CLI verbs and the server. A `--socket`\n  \

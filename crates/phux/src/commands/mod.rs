@@ -510,7 +510,7 @@ pub(crate) enum Command {
     #[command(name = "send-keys", about = "Send keys to a pane")]
     SendKeys {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, host/@id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// Keys to send: named keys and/or literal strings, in order.
@@ -609,7 +609,7 @@ pub(crate) enum Command {
     #[command(about = "Report an agent ask event for a pane")]
     Ask {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, host/@id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// Stable question id for answer correlation.
@@ -664,7 +664,7 @@ pub(crate) enum Command {
     #[command(about = "Run a command in a pane and capture its exit code")]
     Run {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, host/@id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// The command line: all trailing args, joined with spaces.
@@ -1083,11 +1083,11 @@ pub(crate) fn report_no_server(err: &AttachError, socket_path: &Path, verb: &str
 }
 
 /// Parse an optional target string into a [`crate::selector::Selector`],
-/// defaulting to the focused/last session when absent. On a parse error,
+/// defaulting to the focused session when absent. On a parse error,
 /// prints a diagnostic and returns the failure exit code for the caller to
 /// bubble.
 pub(crate) fn parse_selector(session: Option<&str>) -> Result<crate::selector::Selector, ExitCode> {
-    session.map_or(Ok(crate::selector::Selector::Last), |target| {
+    session.map_or(Ok(crate::selector::Selector::Current), |target| {
         crate::selector::parse(target).map_err(|err| {
             eprintln!("phux: invalid target '{target}': {err}");
             ExitCode::FAILURE
@@ -1167,14 +1167,15 @@ mod tests {
 
     /// The full `TARGET` grammar now feeds run/send-keys/snapshot/wait/kill
     /// alike (phux-n95). `parse_selector` is the shared CLI front door:
-    /// `None` defaults to the focused/last session, and every documented
+    /// `None` defaults to the focused session, and every documented
     /// form parses to its [`Selector`] variant.
     #[test]
     fn parse_selector_accepts_every_grammar_form() {
-        // Absent target defaults to the last/focused session.
-        assert_eq!(parse_selector(None).unwrap(), Selector::Last);
+        // Absent target defaults to the focused session. Headless callers
+        // have no client-local MRU, so `=` is an explicit error.
+        assert_eq!(parse_selector(None).unwrap(), Selector::Current);
         assert_eq!(parse_selector(Some(".")).unwrap(), Selector::Current);
-        assert_eq!(parse_selector(Some("=")).unwrap(), Selector::Last);
+        assert!(parse_selector(Some("=")).is_err());
         assert_eq!(
             parse_selector(Some("work")).unwrap(),
             Selector::Session("work".to_owned()),

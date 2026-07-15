@@ -10,7 +10,7 @@ use crate::commands::{cli_runtime, command_on, report_no_server};
 use crate::selector;
 
 /// `phux kill TARGET` — resolve the selector client-side, then ask the
-/// server to tear it down. A whole-session target (`.`, `=`, or a bare
+/// server to tear it down. A whole-session target (`.` or a bare
 /// `name`) resolves to its full Terminal-id list and rides a single
 /// `KILL_TERMINALS { ids }` round-trip — the atomic multi-terminal op the
 /// v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) put in place of the
