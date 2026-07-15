@@ -15,8 +15,18 @@ const phux = process.env.PHUX ?? "phux";
 const temporaryRoot = await mkdtemp(join(tmpdir(), "phux-opencode-real-smoke-"));
 const socket = join(temporaryRoot, "runtime", "phux.sock");
 const session = "opencode-package-smoke";
+const remoteServerVariables = [
+  "PHUX_WS_ADDR",
+  "PHUX_QUIC_ADDR",
+  "PHUX_WT_ADDR",
+  "PHUX_WS_TLS_CERT",
+  "PHUX_WS_TLS_KEY",
+  "PHUX_WS_TOKENS",
+];
+const localEnvironment = { ...process.env };
+for (const variable of remoteServerVariables) delete localEnvironment[variable];
 const environment = {
-  ...process.env,
+  ...localEnvironment,
   PHUX_SOCKET: socket,
   XDG_CACHE_HOME: join(temporaryRoot, "cache"),
   XDG_CONFIG_HOME: join(temporaryRoot, "config"),
@@ -24,6 +34,9 @@ const environment = {
   XDG_RUNTIME_DIR: join(temporaryRoot, "runtime"),
   XDG_STATE_HOME: join(temporaryRoot, "state"),
 };
+for (const variable of remoteServerVariables) {
+  assert.equal(Object.hasOwn(environment, variable), false, `${variable} must not reach the private server`);
+}
 const abort = new AbortController();
 const signalHandlers = new Map();
 let server;
