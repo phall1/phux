@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T18:45:58Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T18:47:43Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 118 | 61% | 13m29s | 17m15s | 1460 |
+| ci | 119 | 61% | 13m29s | 17m15s | 1482 |
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 18 | 100% | 40s | 52s | 26 |
@@ -19,32 +19,32 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 117 | 2s | 13m19s | 17m02s |
-| check | 116 | 2s | 2m36s | 4m26s |
-| detect docs-only | 118 | 2s | 5s | 7s |
+| test | 118 | 2s | 13m19s | 17m06s |
+| check | 117 | 2s | 2m36s | 4m27s |
+| detect docs-only | 119 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 15m20s | 15 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m10s | 16 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 16 |
-| test | Run Swatinem/rust-cache@v2 | 19s | 16 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 16 |
-| check | docs-check | 9s | 15 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 16 |
+| test | tests (unit + e2e) | 15m20s | 16 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m11s | 17 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 17 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 17 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 17 |
+| check | docs-check | 9s | 16 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 17 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m08s | 59 |
-| ci / check | doc | 14s | 59 |
-| ci / check | deny | 3s | 59 |
-| ci / check | fmt | 1s | 61 |
-| ci / test | unit | 13m02s | 51 |
-| ci / test | e2e | 9s | 50 |
+| ci / check | clippy | 2m08s | 60 |
+| ci / check | doc | 14s | 60 |
+| ci / check | deny | 3s | 60 |
+| ci / check | fmt | 1s | 62 |
+| ci / test | unit | 13m02s | 52 |
+| ci / test | e2e | 9s | 51 |
 | observatory / timings | build-dev | 10m47s | 3 |
 | observatory / timings | build-release | 4m55s | 4 |
 | stress / stress | stress | 20m31s | 1 |
@@ -53,8 +53,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 34% | 64 |
-| ci / test | 42% | 62 |
+| ci / check | 34% | 65 |
+| ci / test | 41% | 63 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:32 | conventional-commits | pull_request | chore/copy-mode-cleanups | success | 23s | 18s |
 | 2026-07-15 18:32 | ci | pull_request | chore/copy-mode-cleanups | success | 13m29s | 17m34s |
 | 2026-07-15 18:30 | conventional-commits | pull_request | ci/sccache-workspace-cache | success | 14s | 11s |
+| 2026-07-15 18:30 | ci | pull_request | ci/sccache-workspace-cache | success | 17m25s | 21m56s |
 | 2026-07-15 18:26 | conventional-commits | pull_request | fix/socket-path-too-long | success | 16s | 12s |
 | 2026-07-15 18:26 | ci | pull_request | fix/socket-path-too-long | success | 17m25s | 21m44s |
 | 2026-07-15 18:25 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:15 | conventional-commits | pull_request | feat/phux-detach | cancelled | 3s | 2s |
 | 2026-07-15 18:07 | conventional-commits | pull_request | fix/pi-spatial-parity | success | 15s | 13s |
 | 2026-07-15 18:07 | ci | pull_request | fix/pi-spatial-parity | success | 17m10s | 19m19s |
-| 2026-07-15 18:07 | conventional-commits | pull_request | fix/pi-spatial-parity | success | 13s | 11s |
 
 ---
 

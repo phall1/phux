@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T18:45:58Z",
+  "generated_at": "2026-07-15T18:47:43Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -37,6 +37,15 @@
       "created_at": "2026-07-15T18:30:03Z",
       "duration_s": 14,
       "runner_s": 11
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "ci/sccache-workspace-cache",
+      "conclusion": "success",
+      "created_at": "2026-07-15T18:30:03Z",
+      "duration_s": 1045,
+      "runner_s": 1316
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T18:07:18Z",
       "duration_s": 1030,
       "runner_s": 1159
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/pi-spatial-parity",
-      "conclusion": "success",
-      "created_at": "2026-07-15T18:07:04Z",
-      "duration_s": 13,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 118,
+      "runs": 119,
       "success_rate": 61,
       "median_s": 809,
       "p95_s": 1035,
-      "runner_minutes": 1460
+      "runner_minutes": 1482
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 117,
+      "runs": 118,
       "median_queue_s": 2,
       "median_s": 799,
-      "p95_s": 1022
+      "p95_s": 1026
     },
     {
       "job": "check",
-      "runs": 116,
+      "runs": 117,
       "median_queue_s": 2,
       "median_s": 156,
-      "p95_s": 266
+      "p95_s": 267
     },
     {
       "job": "detect docs-only",
-      "runs": 118,
+      "runs": 119,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -343,57 +343,57 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 920,
-      "n": 15
+      "n": 16
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 190,
-      "n": 16
+      "median_s": 191,
+      "n": 17
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 19,
-      "n": 16
+      "n": 17
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 19,
-      "n": 16
+      "n": 17
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 16
+      "n": 17
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 15
+      "n": 16
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 16
+      "n": 17
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 64,
+      "samples": 65,
       "hit_rate": 34
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 62,
-      "hit_rate": 42
+      "samples": 63,
+      "hit_rate": 41
     },
     {
       "workflow": "stress",
@@ -408,42 +408,42 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 128,
-      "n": 59
+      "n": 60
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 59
+      "n": 60
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 59
+      "n": 60
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 61
+      "n": 62
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 782,
-      "n": 51
+      "n": 52
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 9,
-      "n": 50
+      "n": 51
     },
     {
       "workflow": "observatory",
