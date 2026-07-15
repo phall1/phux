@@ -125,6 +125,10 @@ If your change conflicts with these, open a [Discussion] before a PR.
   unlimited.
 - **Never `--no-verify`.** Pre-commit hooks are load-bearing. If a
   hook fails, fix the root cause.
+- **Draft PRs skip the compile lanes.** `check`/`test` do not run until
+  the PR is marked "Ready for review" (that event triggers them), so use
+  drafts freely for work-in-progress without burning CI. The `commitlint`
+  gate still runs on drafts — message feedback is cheap and better early.
 
 ## Multi-agent fan-out
 

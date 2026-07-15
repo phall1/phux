@@ -39,7 +39,7 @@ clobber the generated changelog.
 
 | You want to | Do this |
 |---|---|
-| Ship a release | Merge the open **release-please** PR on the default branch |
+| Ship a release | Mark the open **release-please** PR "Ready for review" (it is born draft; undrafting runs CI), then merge it |
 | Prove the release is locally coherent first | `just release-preflight vX.Y.Z` |
 | Skip crates.io packaging during a fast/offline binary-only check | `just release-preflight-fast vX.Y.Z` |
 | Re-build or re-attach assets for an existing tag | Dispatch **Actions -> release** with `tag=vX.Y.Z` |
@@ -50,7 +50,7 @@ clobber the generated changelog.
 
 | Flow | Trigger | What it does |
 |---|---|---|
-| Pull request CI | `pull_request` | Docs-only detection, docs check, fmt, clippy, rustdoc, cargo-deny, unit tests, and fast real-PTY e2e unless the change is docs-only. |
+| Pull request CI | `pull_request` | Docs-only detection, docs check, fmt, clippy, rustdoc, cargo-deny, unit tests, and fast real-PTY e2e unless the change is docs-only. Draft PRs skip all of it until marked ready — release PRs idle as drafts for free. |
 | Conventional-commit gate | `pull_request` | `commitlint` lints every PR commit and the PR title against `commitlint.config.mjs`; required by main's ruleset so nothing non-conventional reaches the release-please log. |
 | Main CI | push to `main` | Same gates as PR CI, always full, and refreshes the warm caches. |
 | release-please | push to `main` | Maintains the release PR; on merge, tags `vX.Y.Z`, creates the GitHub release, and calls `release.yml`. |
