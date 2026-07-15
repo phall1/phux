@@ -209,9 +209,11 @@ phux wait --until "PHUX-READY" --timeout 10 .
 phux snapshot --json --scrollback 50 .
 ```
 
-For MCP clients, point the client at the bundled `phux-mcp` binary. It exposes
-the same `ls`, `snapshot`, `send-keys`, `run`, `wait`, `ask`, `new`, `kill`,
-`watch`, plugin-action, and plugin-workspace surfaces over JSON-RPC stdio.
+Installing the bundled `phux-mcp` binary does not register it with an MCP
+host. Follow [Registering with a host](./docs/consumers/mcp.md#registering-with-a-host)
+for the Claude Code command, generic stdio configuration, and non-default
+socket setup. The phux server must already be running before the host calls a
+tool.
 
 ## Headless and agent control
 
@@ -237,9 +239,10 @@ Selectors are shared across the CLI:
 | `@42` | opaque server-local terminal id |
 | `=` | last-focused target |
 
-Point an MCP agent at `phux-mcp` and it gets the same core verbs over JSON-RPC
-stdio, plus `phux_ask` and plugin workspace profile discovery. Start with
-[Agents](./docs/consumers/agents.md) and [MCP](./docs/consumers/mcp.md).
+Register `phux-mcp` with the agent's host to expose the same core verbs over
+JSON-RPC stdio, plus `phux_ask` and plugin workspace profile discovery. Start
+with [Agents](./docs/consumers/agents.md) and
+[MCP host registration](./docs/consumers/mcp.md#registering-with-a-host).
 
 ## Agent workbench
 
