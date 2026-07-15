@@ -1,0 +1,41 @@
+{
+  "name": "@phux/opencode",
+  "version": "0.1.0",
+  "description": "Public OpenCode tools for shared phux terminals",
+  "type": "module",
+  "license": "MIT OR Apache-2.0",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/phall1/phux.git",
+    "directory": "integrations/opencode"
+  },
+  "files": [
+    "dist",
+    "README.md"
+  ],
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "scripts": {
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsup src/index.ts --format esm --platform node --dts",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run typecheck && npm run build && node --test test/*.test.mjs && npm run pack:check",
+    "smoke:opencode": "node scripts/smoke-opencode.mjs",
+    "smoke:real": "node scripts/smoke-real.mjs",
+    "pack:check": "node scripts/test-pack.mjs",
+    "prepack": "npm run build"
+  },
+  "devDependencies": {
+    "@opencode-ai/plugin": "1.18.1",
+    "@types/node": "24.0.0",
+    "tsup": "8.5.1",
+    "typescript": "5.9.2"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
