@@ -3,11 +3,10 @@ use std::io::{self, Read};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::new::create_session_via_metadata;
-use crate::commands::{cli_runtime, report_no_server, request_command};
+use crate::commands::{cli_runtime, report_no_server};
 
 mod model;
 mod snapshot;
@@ -21,15 +20,8 @@ pub(super) fn run_save(socket: Option<PathBuf>, output: Option<&PathBuf>) -> Exi
         Ok(rt) => rt,
         Err(code) => return code,
     };
-    let result = rt.block_on(request_command(
-        &socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    ));
-    let snapshot = match result {
-        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => snapshot,
-        Ok(other) => return fail(&format!("unexpected GET_STATE result: {other:?}")),
+    let snapshot = match rt.block_on(phux_client::state::get_state(&socket_path)) {
+        Ok(snapshot) => snapshot,
         Err(err) => return report_no_server(&err, &socket_path, "workspace save"),
     };
     let archive = archive_from_snapshot(&snapshot);
@@ -109,25 +101,16 @@ fn read_archive_text(path: &Path) -> Result<String, String> {
 }
 
 async fn fetch_existing_sessions(socket_path: &Path) -> Result<Vec<String>, ExitCode> {
-    match request_command(
-        socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    {
-        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => Ok(snapshot
-            .sessions
-            .into_iter()
-            .map(|session| session.name)
-            .collect()),
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            Err(ExitCode::FAILURE)
-        }
-        Err(err) => Err(report_no_server(&err, socket_path, "workspace restore")),
-    }
+    phux_client::state::get_state(socket_path)
+        .await
+        .map(|snapshot| {
+            snapshot
+                .sessions
+                .into_iter()
+                .map(|session| session.name)
+                .collect()
+        })
+        .map_err(|err| report_no_server(&err, socket_path, "workspace restore"))
 }
 
 fn fail(message: &str) -> ExitCode {

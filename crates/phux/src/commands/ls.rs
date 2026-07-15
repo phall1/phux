@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use phux_core::session_list::{SessionJson, SessionListJson};
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
+
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{cli_runtime, report_no_server, request_command};
+use crate::commands::{cli_runtime, report_no_server};
 
 /// `phux ls` — list sessions via `GET_STATE`. Does not auto-start a
 /// server. With `json`, emits the stable [`SessionListJson`] contract
@@ -17,24 +17,14 @@ pub(crate) fn run_ls(json: bool, socket: Option<PathBuf>) -> ExitCode {
         Ok(rt) => rt,
         Err(code) => return code,
     };
-    let result = rt.block_on(request_command(
-        &socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    ));
-    match result {
-        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => {
+    match rt.block_on(phux_client::state::get_state(&socket_path)) {
+        Ok(snapshot) => {
             if json {
                 print_sessions_json(&snapshot)
             } else {
                 print_sessions(&snapshot);
                 ExitCode::SUCCESS
             }
-        }
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            ExitCode::FAILURE
         }
         Err(err) => report_no_server(&err, &socket_path, "ls"),
     }
