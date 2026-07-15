@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T04:54:40Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T04:55:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,31 +9,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 35 | 69% | 13m36s | 16m29s | 483 |
+| ci | 36 | 67% | 13m29s | 16m29s | 483 |
 | stress | 3 | 67% | 21m11s | 21m11s | 43 |
 | observatory | 1 | 100% | 11m44s | 11m44s | 23 |
-| conventional-commits | 18 | 94% | 16s | 19s | 4 |
+| conventional-commits | 19 | 89% | 16s | 19s | 4 |
 | release-please | 6 | 100% | 20s | 37s | 2 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 35 | 2s | 13m22s | 15m56s |
-| check | 35 | 2s | 2m37s | 4m09s |
-| detect docs-only | 35 | 2s | 5s | 7s |
+| test | 36 | 2s | 13m19s | 15m56s |
+| check | 36 | 2s | 2m36s | 4m09s |
+| detect docs-only | 36 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 12m41s | 18 |
+| test | tests (unit + e2e) | 12m41s | 16 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m45s | 19 |
-| test | Run Swatinem/rust-cache@v2 | 23s | 21 |
+| test | Run Swatinem/rust-cache@v2 | 23s | 19 |
 | check | Run Swatinem/rust-cache@v2 | 22s | 21 |
 | check | docs-check | 9s | 19 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 22 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 23 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 21 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -87,8 +87,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 12.6 MiB | 0.0 MiB |
-| `phux-mcp` | 2.0 MiB | 0.0 MiB |
+| `phux` | 12.6 MiB | - |
+| `phux-mcp` | 2.0 MiB | - |
 
 ## Dependency graph
 
@@ -115,6 +115,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 04:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-15 04:54 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-15 04:40 | conventional-commits | pull_request | fix/dashboard-first-size-record | success | 16s | 12s |
 | 2026-07-15 04:40 | ci | pull_request | fix/dashboard-first-size-record | success | 13m55s | 16m26s |
 | 2026-07-15 04:26 | observatory | workflow_dispatch | main | success | 11m44s | 23m06s |
@@ -143,8 +145,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 03:39 | ci | pull_request | feat/ci-observability | cancelled | 1m11s | 1m24s |
 | 2026-07-15 03:38 | conventional-commits | pull_request | feat/ci-observability | success | 17s | 14s |
 | 2026-07-15 03:38 | ci | pull_request | feat/ci-observability | cancelled | 1m28s | 1m45s |
-| 2026-07-15 03:36 | conventional-commits | pull_request | fix/mouse-encoder-size-and-scrol | success | 16s | 14s |
-| 2026-07-15 03:36 | ci | pull_request | fix/mouse-encoder-size-and-scrol | success | 12m49s | 15m17s |
 
 ---
 
