@@ -24,7 +24,8 @@ mod common;
 
 use phux_protocol::input::focus::FocusEvent;
 use phux_protocol::wire::frame::{
-    AttachTarget, ErrorCode, FrameKind, TYPE_ATTACHED, TYPE_ERROR, ViewportInfo,
+    AttachTarget, Command, CommandResult, CommandValue, ErrorCode, FrameKind, StateScope,
+    TYPE_ATTACHED, TYPE_COMMAND_RESULT, TYPE_ERROR, ViewportInfo,
 };
 use tempfile::TempDir;
 
@@ -89,10 +90,64 @@ async fn drain_successful_attach(
     focused_pane
 }
 
-async fn round_trip_ping(stream: &mut tokio::net::UnixStream, nonce: u64) {
-    send_frame(stream, &FrameKind::Ping { nonce }).await;
-    let (_type_byte, frame) = recv_typed(stream).await;
-    assert_eq!(frame, FrameKind::Pong { nonce }, "PING must receive PONG");
+/// Poll `GET_STATE` until the server's most-recently-touched session — the
+/// exact ordering `AttachTarget::Last` resolves against — is `expected_name`.
+///
+/// `INPUT_FOCUS` is fire-and-forget and, since ADR-0044, is applied via the
+/// dedicated input lane (its own OS thread), so a `PING`/`PONG` round-trip on
+/// the command lane does NOT prove the focus touch has landed: under parallel
+/// load the `PONG` can overtake the touch and `Last` still resolves to the
+/// last-attached session (the phux-mn3b flake). `GET_STATE` reads the touched
+/// order itself (`handle_get_state` → `most_recently_touched_session`), so
+/// polling it is the race-free flush.
+async fn await_focus_touch(stream: &mut tokio::net::UnixStream, expected_name: &str) {
+    let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
+    let mut request_id: u32 = 0xF0C0_0000;
+    loop {
+        request_id += 1;
+        send_frame(
+            stream,
+            &FrameKind::Command {
+                request_id,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        let focused_name = loop {
+            let (type_byte, frame) = recv_typed(stream).await;
+            if type_byte != TYPE_COMMAND_RESULT {
+                continue;
+            }
+            if let FrameKind::CommandResult {
+                request_id: got,
+                result,
+            } = frame
+                && got == request_id
+            {
+                match result {
+                    CommandResult::OkWith(CommandValue::State(snapshot)) => {
+                        break snapshot
+                            .sessions
+                            .iter()
+                            .find(|session| session.id == snapshot.focused_session)
+                            .map(|session| session.name.clone());
+                    }
+                    other => panic!("GET_STATE must return Ok_With(State(..)), got {other:?}"),
+                }
+            }
+        };
+        if focused_name.as_deref() == Some(expected_name) {
+            return;
+        }
+        assert!(
+            tokio::time::Instant::now() < deadline,
+            "focus touch for {expected_name:?} not observed via GET_STATE within deadline; \
+             last focused: {focused_name:?}",
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
+    }
 }
 
 #[test]
@@ -146,7 +201,7 @@ fn last_resolves_to_most_recently_focused_not_last_attached() {
             },
         )
         .await;
-        round_trip_ping(&mut default_stream, 0xA11C_E5ED).await;
+        await_focus_touch(&mut default_stream, "default").await;
 
         let mut last_stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
         send_frame(&mut last_stream, &attach_last()).await;
