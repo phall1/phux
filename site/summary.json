@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T08:44:46Z",
+  "generated_at": "2026-07-15T08:51:37Z",
   "recent_runs": [
     {
       "workflow": "stress",
@@ -10,6 +10,15 @@
       "created_at": "2026-07-15T08:44:34Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T08:44:22Z",
+      "duration_s": 423,
+      "runner_s": 1030
     },
     {
       "workflow": "ci",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T03:42:38Z",
       "duration_s": 14,
       "runner_s": 10
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:42:07Z",
-      "duration_s": 821,
-      "runner_s": 971
     }
   ],
   "workflows_30d": [
@@ -299,20 +299,20 @@
       "runner_minutes": 23
     },
     {
+      "workflow": "release-please",
+      "runs": 8,
+      "success_rate": 100,
+      "median_s": 21,
+      "p95_s": 44,
+      "runner_minutes": 20
+    },
+    {
       "workflow": "conventional-commits",
       "runs": 21,
       "success_rate": 90,
       "median_s": 16,
       "p95_s": 19,
       "runner_minutes": 4
-    },
-    {
-      "workflow": "release-please",
-      "runs": 7,
-      "success_rate": 100,
-      "median_s": 21,
-      "p95_s": 37,
-      "runner_minutes": 3
     }
   ],
   "ci_jobs_30d": [
