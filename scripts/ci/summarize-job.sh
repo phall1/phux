@@ -49,10 +49,15 @@ if [ -n "$junit_path" ] && [ -s "$junit_path" ]; then
         | sort -t"$(printf '\t')" -k3,3 -rn | head -15 \
         | jq -cRs '[split("\n")[] | select(length > 0) | split("\t")
                     | {binary: .[0], test: .[1], seconds: (.[2] | tonumber)}]')
+    # grep -c prints the 0 itself (exiting 1), so `|| true` — appending a
+    # fallback echo would emit "0\n0" and corrupt the --argjson input.
+    tests=$(grep -c '<testcase ' "$junit_path" || true)
+    failures=$(grep -c '<failure' "$junit_path" || true)
+    flaky=$(grep -c '<flakyFailure' "$junit_path" || true)
     junit_stats=$(jq -cn \
-        --argjson tests "$(grep -c '<testcase ' "$junit_path" || echo 0)" \
-        --argjson failures "$(grep -c '<failure' "$junit_path" || echo 0)" \
-        --argjson flaky "$(grep -c '<flakyFailure' "$junit_path" || echo 0)" \
+        --argjson tests "${tests:-0}" \
+        --argjson failures "${failures:-0}" \
+        --argjson flaky "${flaky:-0}" \
         '{tests: $tests, failures: $failures, flaky: $flaky}')
 fi
 
