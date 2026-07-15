@@ -54,7 +54,7 @@ jobs:
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         with:
           name: phux
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
