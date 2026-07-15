@@ -42,23 +42,40 @@ pub(crate) fn run_detach(session: Option<String>, socket: Option<PathBuf>) -> Ex
         .await
         {
             Ok(CommandResult::OkWith(CommandValue::Json(count))) => {
-                let n = count.trim().parse::<u64>().unwrap_or(0);
-                match session.as_deref() {
-                    Some(name) => println!("phux: detached {n} client(s) from session {name:?}"),
-                    None => println!("phux: detached {n} client(s)"),
-                }
-                ExitCode::SUCCESS
+                // The reply contract is a JSON count; anything unparsable is a
+                // malformed reply, not "0 clients detached".
+                count.trim().parse::<u64>().map_or_else(
+                    |_| {
+                        eprintln!("phux: malformed detach reply (expected a count): {count:?}");
+                        ExitCode::from(2)
+                    },
+                    |n| {
+                        match session.as_deref() {
+                            Some(name) => {
+                                println!("phux: detached {n} client(s) from session {name:?}");
+                            }
+                            None => println!("phux: detached {n} client(s)"),
+                        }
+                        ExitCode::SUCCESS
+                    },
+                )
             }
-            // A clean disconnect after the op is still success (the server may
-            // self-exit once its last consumer leaves).
-            Ok(CommandResult::Ok) | Err(AttachError::Disconnected) => ExitCode::SUCCESS,
             Ok(CommandResult::Error { message, .. }) => {
                 eprintln!("phux: detach refused: {message}");
                 ExitCode::from(2)
             }
+            // The reply contract is `OkWith(Json(count))`; a bare `Ok` (or any
+            // other shape) means we cannot confirm what happened.
             Ok(other) => {
                 eprintln!("phux: unexpected detach result: {other:?}");
                 ExitCode::from(2)
+            }
+            // Detaching clients never tears the server down (sessions persist
+            // detached), so a disconnect before the reply is a failure to
+            // confirm, not an implicit success.
+            Err(AttachError::Disconnected) => {
+                eprintln!("phux: connection closed before the detach reply");
+                ExitCode::FAILURE
             }
             Err(err) => report_no_server(&err, &socket_path, "detach"),
         }

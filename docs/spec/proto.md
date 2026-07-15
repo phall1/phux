@@ -492,7 +492,13 @@ down server-side, so its TUI exits cleanly. This is distinct from the
 `DETACH` frame, which detaches only the sending connection. The reply is
 `COMMAND_RESULT { OkWith(Json(count)) }` where `count` is the number of
 clients detached; an unknown session name detaches nobody and reports
-`0` (not an error).
+`0` (not an error). Scope: only session-attached clients (`ATTACH`
+consumers) are targeted; terminal-level subscribers (`ATTACH_TERMINAL`)
+have their own detach verb (`DETACH_TERMINAL`) and are not swept.
+Authorization matches the rest of the control plane (`KILL_TERMINAL`,
+`KILL_TERMINALS`): any peer that can reach the socket may issue it —
+transport access (UDS permissions, or the paired-token wss gate) is the
+trust boundary.
 
 `KILL_TERMINALS { ids: Vec<TerminalId> }` is the one atomic
 multi-terminal teardown operation

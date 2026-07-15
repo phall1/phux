@@ -532,9 +532,7 @@ pub(crate) async fn handle_command(
             None => handle_route_input(state, client_id, &terminal_id, event),
         },
         Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
-        Command::DetachClients { session } => {
-            handle_detach_clients(state, session.as_deref()).await
-        }
+        Command::DetachClients { session } => handle_detach_clients(state, session.as_deref()),
         Command::KillTerminal { terminal_id } => handle_kill_terminal(state, &terminal_id),
         Command::GetTerminalState {
             terminal_id,
@@ -1297,17 +1295,22 @@ pub(crate) fn handle_kill_terminals(
 /// can report how many clients it detached. An unknown session name detaches
 /// nobody and reports `0` — not an error, matching `KILL_TERMINALS`'s
 /// skip-silently shape.
-pub(crate) async fn handle_detach_clients(
-    state: &SharedState,
-    session: Option<&str>,
-) -> CommandResult {
+///
+/// Scope: this targets *session-attached* clients (the `ATTACH` consumers the
+/// `C-a d` keybinding serves) only. Terminal-level subscribers riding
+/// `ATTACH_TERMINAL` are a different consumer surface with their own detach
+/// verb (`DETACH_TERMINAL`) and are deliberately not swept here.
+pub(crate) fn handle_detach_clients(state: &SharedState, session: Option<&str>) -> CommandResult {
     let targets = state.with(|s| s.attached_clients_to_detach(session));
     let count = targets.len();
     for (client_id, tx) in targets {
-        // Best-effort DETACHED push; the teardown below removes the client
-        // regardless of whether this frame lands (a wedged writer is exactly
-        // the "stuck client" case `phux detach` exists to clear).
-        let _ = tx.send(Outbound::Frame(FrameKind::Detached)).await;
+        // Best-effort DETACHED push via `try_send`: a full or wedged mailbox
+        // is exactly the "stuck client" case `phux detach` exists to clear,
+        // so we must never await capacity here — that would hang the command
+        // loop on the victim's back-pressure. If the frame is dropped, the
+        // teardown below still removes the client and its connection closes,
+        // which the TUI treats as a disconnect and exits anyway.
+        let _ = tx.try_send(Outbound::Frame(FrameKind::Detached));
         super::client::detach_and_release_consumer_state(state, client_id);
     }
     debug!(

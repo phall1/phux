@@ -3173,6 +3173,10 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 // same `Ok = 0x00` / sequential convention as the rest of the wire.
 // -----------------------------------------------------------------------------
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match arm per Command wire tag; the dispatch is a flat encode table, clearer whole than split"
+)]
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
     match command {
         Command::AttachTerminal { terminal_id } => {
