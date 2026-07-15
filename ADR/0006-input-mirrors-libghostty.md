@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-05-28
+last-reviewed: 2026-07-15
 ---
 
 # 0006 — Input event types re-export libghostty-vt's atoms
@@ -165,8 +165,8 @@ intact. The implementation just got simpler.
 - **Encoder options stay server-local.** Cursor-key application mode,
   keypad mode, modifyOtherKeys, KIP flags, alt-esc-prefix, backarrow,
   macos-option-as-alt — none of this traverses the wire. The server
-  holds the `Terminal` and calls
-  `Encoder::set_options_from_terminal(&terminal)` before each encode.
+  actor owns the `Terminal` and publishes libghostty's exact derived options;
+  the dedicated input lane applies them before encoding (ADR-0044).
   Per-pane encoder state is private to the server.
 - **Per-pane encoder isolation is preserved.** Mouse, key, focus, paste
   encoders are per-pane. No shared global encoder state. This is the

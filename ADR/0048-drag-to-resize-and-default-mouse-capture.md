@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-15
 ---
 
 # 0048 — Drag-to-resize panes and default outer-terminal mouse capture
@@ -70,7 +70,7 @@ event, including ones inner TUIs (vim, htop) want.
    meaning. The client does **not** consult the server's per-pane
    tracking mode for routing; it forwards every pane-interior event and
    the server's `PerTerminalMouseEncoder` already produces empty bytes
-   when the inner app has no mode enabled (`set_options_from_terminal`).
+   when the inner app has no mode enabled (from its exact mode snapshot).
    That keeps routing a pure client-local geometry decision and avoids a
    new mode-mirror frame.
 

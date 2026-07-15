@@ -12,32 +12,24 @@
 //! `try_send`ing onto the pane actor's mailbox — still ran on the main thread,
 //! behind whatever output work the runtime was mid-poll on.
 //!
-//! This module lifts that routing stage onto its own OS thread. Because
-//! `SharedState` is `Arc<Mutex<ServerState>>` (Send + Sync) and the pane
-//! actor's input mailbox sender is a `Send` `mpsc::Sender<TerminalInput>`,
-//! routing needs nothing `!Send`: it never touches the `Terminal`. A keystroke
-//! can thus be gated and delivered into the actor's mailbox on a second core
-//! *in parallel with* an output-broadcast tick draining on the main thread,
-//! rather than waiting for the runtime to yield.
-//!
-//! What still lives on the actor thread: the **encode** stage
-//! (`TerminalActor::encode_input`). Encoding reads the
-//! pane's live DEC-mode state (cursor-key application mode, keypad mode, mouse
-//! tracking/format, DEC 1004 focus reporting, DEC 2004 bracketed paste) from
-//! the `!Send` `Terminal`, so it cannot cross the thread boundary without a
-//! `Send` mode snapshot. Moving encode onto the lane is deferred to
-//! phux-51n6.6; see ADR-0044 "Deferred".
+//! This module lifts routing **and encoding** onto its own OS thread. The pane
+//! actor publishes a complete `Send` snapshot after each terminal mutation:
+//! libghostty-captured key options, already-resolved mouse tracking/format,
+//! focus/paste modes, and grid/cell dimensions. The lane owns one stateful
+//! encoder set per generational pane and hands the resulting bytes to a bounded
+//! actor mailbox with `try_send`; neither encoding nor backpressure waits for
+//! the main runtime to yield. The `!Send` `Terminal` remains actor-owned.
 //!
 //! ## Ordering and lease correctness
 //!
 //! * **Per-client input order** is preserved end to end: a client's read loop
 //!   enqueues its local `INPUT_*` and `ROUTE_INPUT` frames onto the same lane
 //!   channel in wire order, the tokio mpsc channel is FIFO, the single lane
-//!   thread drains it FIFO, and the pane mailbox it forwards into is FIFO.
+//!   thread drains it FIFO, and the encoded-byte mailbox it forwards into is FIFO.
 //!   Mixed data-plane and control-plane input therefore cannot overtake.
 //! * **Lease exclusion** (ADR-0033 "take the wheel") is unchanged: the lane
-//!   calls the *same* `handle_terminal_input`,
-//!   which re-evaluates the subscription and lease gates atomically under the
+//!   calls the same destination-resolution helpers as the inline test path,
+//!   which re-evaluate the subscription and lease gates atomically under the
 //!   state `Mutex` at delivery time. Whoever holds the wheel *when the lane
 //!   routes* is honored.
 //! * The one behavioral shift: a client's own `INPUT_*` frame now routes on the
@@ -61,8 +53,15 @@ use phux_protocol::input::InputEvent;
 use phux_protocol::wire::frame::{CommandResult, ErrorCode};
 use tokio::sync::{mpsc, oneshot};
 
-use super::{handle_route_input, handle_terminal_input};
+use super::{
+    terminal_input_from_event, with_attached_input_destination, with_route_input_destination,
+};
+use crate::input::{
+    InputEncoderSnapshot, PasteOutcome, PerTerminalFocusEncoder, PerTerminalKeyEncoder,
+    PerTerminalMouseEncoder, PerTerminalPasteEncoder,
+};
 use crate::state::{ClientId, SharedState, TerminalInput};
+use crate::terminal_actor::TerminalHandle;
 
 /// Bound on the lane's inbound queue. Input events are tiny and low-rate, so a
 /// generous cap absorbs a paste-expanded burst without unbounded growth. On
@@ -250,8 +249,8 @@ impl Drop for InputLane {
 /// Spawn the dedicated input-lane thread and return its owner.
 ///
 /// The thread blocks on the channel and, for each [`RoutedInput`], runs the
-/// existing attached-input or headless-input handler off the main runtime, so
-/// routing never waits behind an output-broadcast tick. The thread exits when
+/// existing attached-input or headless-input gates plus snapshot-driven encode
+/// off the main runtime. The thread exits when
 /// the channel closes (all senders dropped), releasing its `SharedState`
 /// clone.
 ///
@@ -259,31 +258,225 @@ impl Drop for InputLane {
 ///
 /// Returns the OS error if the lane thread cannot be spawned (a fatal
 /// server-startup condition; the caller propagates it).
+#[derive(Debug)]
+struct LaneEncoderSet {
+    key: PerTerminalKeyEncoder,
+    mouse: PerTerminalMouseEncoder,
+    focus: PerTerminalFocusEncoder,
+    paste: PerTerminalPasteEncoder,
+    snapshot: tokio::sync::watch::Receiver<InputEncoderSnapshot>,
+}
+
+impl LaneEncoderSet {
+    fn new(handle: &TerminalHandle) -> Result<Self, libghostty_vt::Error> {
+        Ok(Self {
+            key: PerTerminalKeyEncoder::new()?,
+            mouse: PerTerminalMouseEncoder::new()?,
+            focus: PerTerminalFocusEncoder::new(),
+            paste: PerTerminalPasteEncoder::new(),
+            snapshot: handle.input_snapshot.clone(),
+        })
+    }
+
+    fn encode(&mut self, input: &TerminalInput) -> Result<Option<Vec<u8>>, libghostty_vt::Error> {
+        let snapshot = *self.snapshot.borrow();
+        match input {
+            TerminalInput::Key(event) => Ok(Some(
+                self.key.encode_with_options(event, snapshot.key)?.to_vec(),
+            )),
+            TerminalInput::Mouse(event) => Ok(Some(
+                self.mouse
+                    .encode_with_options(
+                        event,
+                        snapshot.mouse,
+                        snapshot.cols,
+                        snapshot.rows,
+                        snapshot.cell_px,
+                    )?
+                    .to_vec(),
+            )),
+            TerminalInput::Focus(event) => Ok(self
+                .focus
+                .encode_with_mode(*event, snapshot.focus_reporting)?
+                .map(<[u8]>::to_vec)),
+            TerminalInput::Paste(event) => match self
+                .paste
+                .encode_with_mode(event, snapshot.bracketed_paste)?
+            {
+                PasteOutcome::Encoded(bytes) => Ok(Some(bytes.to_vec())),
+                PasteOutcome::Rejected => Ok(None),
+            },
+        }
+    }
+}
+
+fn prune_closed_encoders(
+    encoders: &mut std::collections::HashMap<phux_core::ids::TerminalId, LaneEncoderSet>,
+) {
+    encoders.retain(|_, encoder| encoder.snapshot.has_changed().is_ok());
+}
+
+fn encoder_for<'a>(
+    encoders: &'a mut std::collections::HashMap<phux_core::ids::TerminalId, LaneEncoderSet>,
+    pane: phux_core::ids::TerminalId,
+    handle: &TerminalHandle,
+) -> Result<&'a mut LaneEncoderSet, libghostty_vt::Error> {
+    let replace = encoders
+        .get(&pane)
+        .is_some_and(|encoder| !encoder.snapshot.same_channel(&handle.input_snapshot));
+    if replace {
+        encoders.remove(&pane);
+    }
+    match encoders.entry(pane) {
+        std::collections::hash_map::Entry::Occupied(entry) => Ok(entry.into_mut()),
+        std::collections::hash_map::Entry::Vacant(entry) => {
+            Ok(entry.insert(LaneEncoderSet::new(handle)?))
+        }
+    }
+}
+
+fn encode_input(
+    encoders: &mut std::collections::HashMap<phux_core::ids::TerminalId, LaneEncoderSet>,
+    pane: phux_core::ids::TerminalId,
+    handle: &TerminalHandle,
+    input: &TerminalInput,
+) -> Option<Vec<u8>> {
+    match encoder_for(encoders, pane, handle).and_then(|encoder| encoder.encode(input)) {
+        Ok(Some(bytes)) if !bytes.is_empty() => Some(bytes),
+        Ok(_) => None,
+        Err(err) => {
+            tracing::warn!(error = %err, ?pane, "input lane encode failed; dropping event");
+            None
+        }
+    }
+}
+
+fn handoff_encoded(
+    pane: phux_core::ids::TerminalId,
+    handle: &TerminalHandle,
+    bytes: Option<Vec<u8>>,
+) -> Result<bool, CommandResult> {
+    let Some(bytes) = bytes else {
+        return Ok(true);
+    };
+    match handle.encoded_input.try_send(bytes) {
+        Ok(()) => Ok(true),
+        Err(mpsc::error::TrySendError::Full(_)) => {
+            tracing::warn!(
+                ?pane,
+                "encoded-input actor mailbox full; dropping (fire-and-forget per SPEC §9)"
+            );
+            Ok(false)
+        }
+        Err(mpsc::error::TrySendError::Closed(_)) => Err(CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "pane actor unavailable for ROUTE_INPUT".to_owned(),
+        }),
+    }
+}
+
+fn process_attached(
+    state: &SharedState,
+    encoders: &mut std::collections::HashMap<phux_core::ids::TerminalId, LaneEncoderSet>,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    input: &TerminalInput,
+    frame_label: &'static str,
+) {
+    let is_focus_gained = matches!(
+        input,
+        TerminalInput::Focus(phux_protocol::input::focus::FocusEvent::Gained)
+    );
+    let Some(destination) = with_attached_input_destination(
+        state,
+        client_id,
+        terminal_id,
+        frame_label,
+        std::convert::identity,
+    ) else {
+        return;
+    };
+    let bytes = encode_input(encoders, destination.pane, &destination.handle, input);
+    // Re-run the authority gate and perform the non-blocking send under the
+    // same state lock, so a lease change cannot slip between gate and delivery
+    // while encoding happens off-lock.
+    let accepted =
+        with_attached_input_destination(state, client_id, terminal_id, frame_label, |current| {
+            if !destination
+                .handle
+                .input_snapshot
+                .same_channel(&current.handle.input_snapshot)
+            {
+                return Ok(false);
+            }
+            handoff_encoded(current.pane, &current.handle, bytes)
+        })
+        .and_then(Result::ok)
+        .unwrap_or(false);
+    if accepted && is_focus_gained {
+        crate::hooks::fire_hook(
+            state,
+            crate::hooks::HookEvent::focus_changed(terminal_id, client_id),
+        );
+    }
+}
+
+fn process_headless(
+    state: &SharedState,
+    encoders: &mut std::collections::HashMap<phux_core::ids::TerminalId, LaneEncoderSet>,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    event: InputEvent,
+) -> CommandResult {
+    let destination =
+        match with_route_input_destination(state, client_id, terminal_id, std::convert::identity) {
+            Ok(destination) => destination,
+            Err(result) => return result,
+        };
+    let input = match terminal_input_from_event(event) {
+        Ok(input) => input,
+        Err(result) => return result,
+    };
+    let bytes = encode_input(encoders, destination.pane, &destination.handle, &input);
+    match with_route_input_destination(state, client_id, terminal_id, |current| {
+        if !destination
+            .handle
+            .input_snapshot
+            .same_channel(&current.handle.input_snapshot)
+        {
+            return Ok(false);
+        }
+        handoff_encoded(current.pane, &current.handle, bytes)
+    }) {
+        Ok(Ok(_)) => CommandResult::Ok,
+        Ok(Err(result)) | Err(result) => result,
+    }
+}
+
 pub(crate) fn spawn_input_lane(state: SharedState) -> std::io::Result<InputLane> {
     let (tx, mut rx) = mpsc::channel::<RoutedInput>(INPUT_LANE_CAPACITY);
     let join = std::thread::Builder::new()
         .name("phux-input-lane".to_owned())
         .spawn(move || {
-            // `blocking_recv` parks the thread with no tokio runtime on it —
-            // the lane does no async work. `handle_terminal_input` is a
-            // synchronous function: it takes the `std::sync::Mutex` state lock,
-            // gates, and `try_send`s onto the (cross-thread) pane mailbox,
-            // never awaiting. The mailbox waker fires the actor task back on
-            // the main runtime.
+            let mut encoders = std::collections::HashMap::new();
+            // `blocking_recv` parks the thread with no tokio runtime on it.
+            // Gating, snapshot reads, encoding, and the bounded actor handoff
+            // are all synchronous and non-blocking.
             while let Some(routed) = rx.blocking_recv() {
+                prune_closed_encoders(&mut encoders);
                 match routed.kind {
-                    RoutedInputKind::Attached { input, frame_label } => {
-                        handle_terminal_input(
-                            &state,
-                            routed.client_id,
-                            &routed.terminal_id,
-                            input,
-                            frame_label,
-                        );
-                    }
+                    RoutedInputKind::Attached { input, frame_label } => process_attached(
+                        &state,
+                        &mut encoders,
+                        routed.client_id,
+                        &routed.terminal_id,
+                        &input,
+                        frame_label,
+                    ),
                     RoutedInputKind::Headless { event, reply } => {
-                        let result = handle_route_input(
+                        let result = process_headless(
                             &state,
+                            &mut encoders,
                             routed.client_id,
                             &routed.terminal_id,
                             event,
@@ -341,7 +534,11 @@ mod tests {
     /// Build the fixture and spawn the actor. Must run inside a `LocalSet`
     /// (the pane actor owns a `!Send` `Terminal`, per ADR-0014).
     fn spawn_fixture() -> Fixture {
-        let bundle = TerminalActor::new(80, 24).expect("actor");
+        spawn_fixture_with_seed(b"")
+    }
+
+    fn spawn_fixture_with_seed(seed: &[u8]) -> Fixture {
+        let bundle = TerminalActor::new_with_seed(80, 24, seed).expect("actor");
         let handle = bundle.handle.clone();
         let token = bundle.token.clone();
         let mut actor = bundle.actor;
@@ -524,6 +721,80 @@ mod tests {
                 fx.token.cancel();
             })
             .await;
+    }
+
+    #[tokio::test(flavor = "current_thread")]
+    async fn lane_encodes_from_published_bracketed_paste_snapshot() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let mut fx = spawn_fixture_with_seed(b"\x1b[?2004h");
+                let lane = spawn_input_lane(fx.state.clone()).expect("spawn lane");
+                lane.handle().route(RoutedInput::attached(
+                    fx.client_a,
+                    fx.wire.clone(),
+                    paste(b"lane"),
+                    "INPUT_PASTE",
+                ));
+                let got = tokio::time::timeout(Duration::from_secs(2), fx.writer_rx.recv())
+                    .await
+                    .expect("lane delivery")
+                    .expect("writer open");
+                assert_eq!(got, b"\x1b[200~lane\x1b[201~");
+                fx.token.cancel();
+            })
+            .await;
+    }
+
+    #[test]
+    fn encoded_actor_handoff_is_bounded_and_nonblocking() {
+        let bundle = TerminalActor::new(80, 24).expect("actor");
+        for _ in 0..crate::terminal_actor::DEFAULT_INPUT_MAILBOX {
+            bundle
+                .handle
+                .encoded_input
+                .try_send(vec![b'x'])
+                .expect("capacity available");
+        }
+        assert!(matches!(
+            bundle.handle.encoded_input.try_send(vec![b'y']),
+            Err(mpsc::error::TrySendError::Full(_))
+        ));
+    }
+
+    #[test]
+    fn encoder_cache_drops_closed_actor_generations() {
+        let bundle = TerminalActor::new(80, 24).expect("actor");
+        let state = SharedState::new();
+        let pane = state.with_mut(|s| s.seed_session("s").2);
+        let mut encoders = std::collections::HashMap::new();
+        encoder_for(&mut encoders, pane, &bundle.handle).expect("encoder");
+        assert_eq!(encoders.len(), 1);
+        drop(bundle);
+        prune_closed_encoders(&mut encoders);
+        assert!(encoders.is_empty());
+    }
+
+    #[test]
+    fn encoder_cache_replaces_state_when_actor_generation_changes() {
+        let first = TerminalActor::new(80, 24).expect("first actor");
+        let second = TerminalActor::new(80, 24).expect("second actor");
+        let state = SharedState::new();
+        let pane = state.with_mut(|s| s.seed_session("s").2);
+        let mut encoders = std::collections::HashMap::new();
+        encoder_for(&mut encoders, pane, &first.handle).expect("first encoder");
+        assert!(
+            encoders[&pane]
+                .snapshot
+                .same_channel(&first.handle.input_snapshot)
+        );
+        encoder_for(&mut encoders, pane, &second.handle).expect("replacement encoder");
+        assert!(
+            encoders[&pane]
+                .snapshot
+                .same_channel(&second.handle.input_snapshot)
+        );
+        assert_eq!(encoders.len(), 1, "one encoder set per pane generation");
     }
 
     /// `INPUT_*` and `ROUTE_INPUT` use one lane FIFO. Distinct paste payloads

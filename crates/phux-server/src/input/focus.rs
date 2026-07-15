@@ -37,7 +37,16 @@ impl PerTerminalFocusEncoder {
         event: FocusEvent,
         terminal: &GhosttyTerminal<'_, '_>,
     ) -> Result<Option<&[u8]>, Error> {
-        if !terminal.mode(Mode::FOCUS_EVENT)? {
+        self.encode_with_mode(event, terminal.mode(Mode::FOCUS_EVENT)?)
+    }
+
+    /// Encode from a snapshotted DEC 1004 focus-reporting mode.
+    pub fn encode_with_mode(
+        &mut self,
+        event: FocusEvent,
+        focus_reporting: bool,
+    ) -> Result<Option<&[u8]>, Error> {
+        if !focus_reporting {
             return Ok(None);
         }
         // Wire atom -> libghostty's focus::Event for the encoder (ADR-0024).
