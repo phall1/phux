@@ -78,6 +78,9 @@ amends / extends) are hand-curated from each ADR's body.
 | [0044](./0044-dedicated-input-lane.md) | Dedicated input lane: route input off the single runtime thread | Accepted |
 | [0045](./0045-client-side-copy-mode.md) | Client-side copy-mode over the consumer's own engine | Accepted (builds on [0030](./0030-engine-delegated-wire-and-projection-consumers.md), supersedes the abi epic's server-side selection frames) |
 | [0046](./0046-server-side-agent-state-detection.md) | The server derives agent state; detection is level-triggered | Accepted (extends [0040](./0040-agent-identity-metadata.md); implements [0029](./0029-one-cursor-authority-and-repaint-scheduler.md)'s repaint accumulator) |
+| [0047](./0047-ci-metrics-branch.md) | CI metrics recorded to an orphan `ci-metrics` branch | Accepted |
+| [0048](./0048-drag-to-resize-and-default-mouse-capture.md) | Drag-to-resize panes and default outer-terminal mouse capture | Accepted |
+| [0049](./0049-client-local-focus-and-advisory-attention.md) | Client-local focus and advisory agent attention | Accepted (reaffirms [0019](./0019-tui-multi-pane-rendering.md)) |
 
 ## When to write an ADR
 

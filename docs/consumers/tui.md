@@ -1019,7 +1019,7 @@ test, so this table cannot silently drift):
 | `take-input`      | seize the focused pane's input lease (ADR-0033) |
 | `give-input`      | release the focused pane's input lease (ADR-0033) |
 | `signal-terminal` | `signal` = `interrupt`\|`freeze`\|`resume`\|`terminate`\|`kill` (ADR-0033) |
-| `set-pane`        | `mouse` = `on`\|`off`\|`toggle` — per-pane mouse opt-out (§7, ADR-0035) |
+| `set-pane`        | `mouse` = `on`\|`off`\|`toggle` — per-pane mouse opt-out (§7, ADR-0048) |
 | `plugin-action`   | `plugin`, `action` — run a plugin manifest action (§5.5) |
 | `plugin-pane`     | `plugin`, `pane` — open a plugin manifest pane (§5.5) |
 | `reload-config`   | re-read the config and apply it in place (§4.3) |
@@ -1286,7 +1286,7 @@ holds at every viewport size.
 ### 6.3 Resize commands
 
 > **Status:** Keyboard `resize-pane` actions and mouse divider dragging ship
-> (ADR-0035, phux-foz.3). `resize-pane` dispatches through the
+> (ADR-0048, phux-foz.3). `resize-pane` dispatches through the
 > single-dispatch action registry, `C-a H/J/K/L` are the default bindings
 > (see §5.3), the command palette offers a resize row, and drag-on-divider
 > (§7) commits through the same ratio math.
@@ -1425,7 +1425,7 @@ dropped. The same targets stay keyboard-reachable through their actions
 
 ## 7. Mouse
 
-> **Status:** Shipped (ADR-0035; per-pane opt-out in phux-npb3).
+> **Status:** Shipped (ADR-0048; per-pane opt-out in phux-npb3).
 > Click-to-focus, drag-on-divider to resize, and default outer-terminal
 > mouse capture are implemented. The client enables its own mouse
 > tracking on attach so divider drags work without an inner program
