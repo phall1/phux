@@ -268,6 +268,7 @@ fn reattach_to_multipane_session_can_type_into_non_active_pane() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;

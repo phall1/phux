@@ -2,11 +2,11 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use phux_core::session_list::{SessionJson, SessionListJson};
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
+
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{cli_runtime, report_no_server, request_command};
+use crate::commands::{cli_runtime, report_no_server};
 
 /// `phux ls` — list sessions via `GET_STATE`. Does not auto-start a
 /// server. With `json`, emits the stable [`SessionListJson`] contract
@@ -17,14 +17,8 @@ pub(crate) fn run_ls(json: bool, socket: Option<PathBuf>) -> ExitCode {
         Ok(rt) => rt,
         Err(code) => return code,
     };
-    let result = rt.block_on(request_command(
-        &socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    ));
-    match result {
-        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => {
+    match rt.block_on(phux_client::state::get_state(&socket_path)) {
+        Ok(snapshot) => {
             if json {
                 print_sessions_json(&snapshot)
             } else {
@@ -32,15 +26,12 @@ pub(crate) fn run_ls(json: bool, socket: Option<PathBuf>) -> ExitCode {
                 ExitCode::SUCCESS
             }
         }
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            ExitCode::FAILURE
-        }
         Err(err) => report_no_server(&err, &socket_path, "ls"),
     }
 }
 
-/// Render the session list, one line per session (tmux-`ls`-ish).
+/// Render the session list, one line per session (tmux-`ls`-ish), followed
+/// by satellite Terminals that cannot be joined to hub-local sessions.
 pub(crate) fn print_sessions(snapshot: &SessionSnapshot) {
     let mut sessions: Vec<_> = snapshot.sessions.iter().collect();
     sessions.sort_by(|a, b| a.name.cmp(&b.name));
@@ -56,6 +47,14 @@ pub(crate) fn print_sessions(snapshot: &SessionSnapshot) {
             ""
         };
         println!("{}: {} {windows}{attached}", s.name, s.window_count);
+    }
+    for pane in &snapshot.panes {
+        if pane.id.host().is_some() {
+            println!(
+                "{}: satellite terminal",
+                crate::selector::format_terminal_id(&pane.id)
+            );
+        }
     }
 }
 
@@ -74,7 +73,12 @@ pub(crate) fn print_sessions_json(snapshot: &SessionSnapshot) -> ExitCode {
             attached: s.attached_client_count > 0,
         })
         .collect();
-    let list = SessionListJson::new(entries);
+    let terminals = snapshot
+        .panes
+        .iter()
+        .map(|pane| crate::selector::format_terminal_id(&pane.id))
+        .collect();
+    let list = SessionListJson::new(entries).with_terminals(terminals);
     match serde_json::to_string_pretty(&list) {
         Ok(s) => {
             println!("{s}");

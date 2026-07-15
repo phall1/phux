@@ -14,8 +14,8 @@ use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
 use super::{
-    broadcast_event, prepare_attach, seed_session_with_actor, seed_session_with_pty_and_colors,
-    send_error, spawn_pane_with_pty_and_colors,
+    SpawnOwnership, broadcast_event, prepare_attach, seed_session_with_actor,
+    seed_session_with_pty_and_colors, send_error, spawn_pane_with_pty_and_colors,
 };
 use crate::state::{AttachSnapshotPane, ClientId, Outbound, SharedState};
 use crate::terminal_actor::{
@@ -494,6 +494,8 @@ pub(crate) struct SpawnRequest {
     pub(crate) term: Option<String>,
     /// Satellite host to route the spawn to (phux-v45.6), `None` = local.
     pub(crate) satellite: Option<phux_protocol::ids::SatelliteHost>,
+    /// Existing local Terminal whose exact window must own the new pane.
+    pub(crate) owner_terminal: Option<phux_protocol::ids::TerminalId>,
 }
 
 /// Relay one satellite-addressed spawn over the owning hub link
@@ -575,6 +577,7 @@ async fn relay_spawn_to_satellite(
 /// (L1 §3.1 / §9.1).
 #[allow(
     clippy::too_many_lines,
+    clippy::cognitive_complexity,
     reason = "linear orchestration: route satellite spawns → validate group → build CommandBuilder from wire frame → resolve hosting session → spawn PTY-backed pane into its window → auto-subscribe spawning client + spawn output pump → reply on the wire. Each step is small; splitting them scatters the SPAWN_TERMINAL contract without simplifying the logic."
 )]
 pub(crate) async fn handle_spawn_terminal(
@@ -592,6 +595,7 @@ pub(crate) async fn handle_spawn_terminal(
         env,
         term,
         satellite,
+        owner_terminal,
     } = request;
     debug!(
         ?client_id,
@@ -601,6 +605,7 @@ pub(crate) async fn handle_spawn_terminal(
         cwd = ?cwd,
         env_count = env.as_ref().map_or(0, Vec::len),
         satellite = ?satellite,
+        owner_terminal = ?owner_terminal,
         "SPAWN_TERMINAL",
     );
 
@@ -609,7 +614,13 @@ pub(crate) async fn handle_spawn_terminal(
     // satellite, whose errors relay back verbatim. Never falls through to
     // local dispatch.
     if let Some(host) = satellite {
-        let result = relay_spawn_to_satellite(state, &host, group, command, cwd, env, term).await;
+        let result = if owner_terminal.is_some() {
+            SpawnResult::Err(SpawnError::SpawnFailed(
+                "owner-terminal targeting is local-only".to_owned(),
+            ))
+        } else {
+            relay_spawn_to_satellite(state, &host, group, command, cwd, env, term).await
+        };
         let _ = out_tx
             .send(Outbound::Frame(FrameKind::TerminalSpawned {
                 request_id,
@@ -688,7 +699,24 @@ pub(crate) async fn handle_spawn_terminal(
             .or_else(|| s.most_recently_touched_session())
             .or_else(|| s.registry.sessions().next().map(|(id, _)| id))
     });
-    let Some(session) = session else {
+    let ownership = if let Some(owner) = owner_terminal {
+        if !matches!(owner, phux_protocol::ids::TerminalId::Local { .. })
+            || state.with(|s| s.terminal_from_wire(&owner).is_none())
+        {
+            let _ = out_tx
+                .send(Outbound::Frame(FrameKind::TerminalSpawned {
+                    request_id,
+                    result: SpawnResult::Err(SpawnError::SpawnFailed(
+                        "owner terminal was not found on this server".to_owned(),
+                    )),
+                }))
+                .await;
+            return;
+        }
+        SpawnOwnership::Terminal(owner)
+    } else if let Some(session) = session {
+        SpawnOwnership::Session(session)
+    } else {
         let _ = out_tx
             .send(Outbound::Frame(FrameKind::TerminalSpawned {
                 request_id,
@@ -710,7 +738,7 @@ pub(crate) async fn handle_spawn_terminal(
     });
     let core_terminal_id = match spawn_pane_with_pty_and_colors(
         state,
-        session,
+        &ownership,
         builder,
         history_limit,
         root_token,
@@ -720,15 +748,13 @@ pub(crate) async fn handle_spawn_terminal(
         Ok(None) => {
             warn!(
                 ?client_id,
-                request_id,
-                ?session,
-                "SPAWN_TERMINAL: attached session has no window to host the pane",
+                request_id, "SPAWN_TERMINAL: selected owner has no window to host the pane",
             );
             let _ = out_tx
                 .send(Outbound::Frame(FrameKind::TerminalSpawned {
                     request_id,
                     result: SpawnResult::Err(SpawnError::SpawnFailed(
-                        "attached session has no window to host the pane".to_owned(),
+                        "selected owner has no window to host the pane".to_owned(),
                     )),
                 }))
                 .await;

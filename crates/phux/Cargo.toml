@@ -41,6 +41,9 @@ tracing-subscriber.workspace = true
 rustix = { version = "0.38", default-features = false, features = ["std", "process"] }
 
 [dev-dependencies]
+# Command-level wire mocks encode framed replies with the protocol's native
+# BytesMut API; bytes is already a workspace/runtime dependency.
+bytes.workspace = true
 # Raw-PTY black-box harnesses (examples/) that spawn the real `phux attach`
 # binary in a pseudoterminal, drive it, resize the PTY, and inspect what the
 # client paints via a libghostty oracle. Used to reproduce/verify

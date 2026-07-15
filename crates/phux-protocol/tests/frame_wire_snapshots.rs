@@ -752,6 +752,7 @@ fn snap_spawn_terminal_minimal() {
         env: None,
         term: None,
         satellite: None,
+        owner_terminal: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -771,6 +772,7 @@ fn snap_spawn_terminal_full() {
         ]),
         term: None,
         satellite: None,
+        owner_terminal: Some(TerminalId::local(42)),
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }
@@ -788,6 +790,7 @@ fn snap_spawn_terminal_term_field() {
         env: None,
         term: Some("ghostty".to_owned()),
         satellite: None,
+        owner_terminal: None,
     };
     insta::assert_snapshot!(dump_frame(&frame));
 }

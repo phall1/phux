@@ -209,9 +209,11 @@ phux wait --until "PHUX-READY" --timeout 10 .
 phux snapshot --json --scrollback 50 .
 ```
 
-For MCP clients, point the client at the bundled `phux-mcp` binary. It exposes
-the same `ls`, `snapshot`, `send-keys`, `run`, `wait`, `ask`, `new`, `kill`,
-`watch`, plugin-action, and plugin-workspace surfaces over JSON-RPC stdio.
+Installing the bundled `phux-mcp` binary does not register it with an MCP
+host. Follow [Registering with a host](./docs/consumers/mcp.md#registering-with-a-host)
+for the Claude Code command, generic stdio configuration, and non-default
+socket setup. The phux server must already be running before the host calls a
+tool.
 
 ## Headless and agent control
 
@@ -235,11 +237,16 @@ Selectors are shared across the CLI:
 | `work` | session named `work` |
 | `work:1.0` | session `work`, window 1, pane 0 |
 | `@42` | opaque server-local terminal id |
-| `=` | last-focused target |
 
-Point an MCP agent at `phux-mcp` and it gets the same core verbs over JSON-RPC
-stdio, plus `phux_ask` and plugin workspace profile discovery. Start with
-[Agents](./docs/consumers/agents.md) and [MCP](./docs/consumers/mcp.md).
+Headless CLI/MCP calls reject `=` because they have no attached-client focus
+history. In the attached TUI, `C-a =` jumps to the previous pane. This local
+MRU behavior depends on the focus model recorded by ADR-0049 on the sibling
+focus branch; this branch does not duplicate that ADR.
+
+Register `phux-mcp` with the agent's host to expose the same core verbs over
+JSON-RPC stdio, plus `phux_ask` and plugin workspace profile discovery. Start
+with [Agents](./docs/consumers/agents.md) and
+[MCP host registration](./docs/consumers/mcp.md#registering-with-a-host).
 
 ## Agent workbench
 
@@ -338,6 +345,8 @@ Anything not in the first two lists is a direction, not a feature.
 | Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
 | Understand the model | [Concepts](./docs/CONCEPTS.md) |
 | Drive it from an agent | [Agents](./docs/consumers/agents.md) |
+| Connect OpenCode | [OpenCode](./docs/consumers/opencode.md) |
+| Connect Pi | [Pi](./docs/consumers/pi.md) |
 | Use the MCP adapter | [MCP](./docs/consumers/mcp.md) |
 | Read the wire spec | [Spec](./docs/spec/) |
 | See how it is built | [Architecture](./docs/architecture/) |

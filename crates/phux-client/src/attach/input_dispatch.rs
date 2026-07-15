@@ -20,7 +20,8 @@ use phux_protocol::wire::frame::{
 
 use super::actions::{self, ActionError, PendingSplit, PendingWindow};
 use super::connection::Connection;
-use super::driver::{AttachError, DEFAULT_GROUP_ID, PaneSlot, layout_key};
+use super::driver::{AttachError, AttentionNavigation, DEFAULT_GROUP_ID, PaneSlot, layout_key};
+use super::focus::FocusHistory;
 use super::input::make_named_key;
 use super::paint::{SidebarReservation, content_rect};
 use super::plugin_actions::{PluginActionEntry, PluginRunResult};
@@ -41,6 +42,8 @@ pub(super) struct DispatchCtx<'a> {
     /// to parse; the dispatcher then forwards every key to the focused
     /// pane unchanged.
     pub resolver: Option<&'a mut phux_config::keybind::Resolver>,
+    /// Client-local focus transition/MRU bookkeeping.
+    pub focus_history: FocusHistory,
     /// Client-side multi-window mirror. Pane actions operate on the
     /// active window ([`Workspace::active_window_mut`]); the whole
     /// workspace is what gets serialized to L3 on a `SET_METADATA`.
@@ -169,13 +172,13 @@ pub(super) struct DispatchCtx<'a> {
     /// or in fixtures that don't exercise bar clicks (the row is still
     /// claimed as chrome; every click on it is a no-op).
     pub status_bar: Option<&'a crate::render::chrome::status_bar::StatusBarPainter>,
-    /// ADR-0035: the in-flight divider drag, or `None` when no divider is
+    /// ADR-0048: the in-flight divider drag, or `None` when no divider is
     /// grabbed. A press on a divider cell records the grabbed split here;
     /// subsequent button-motion events re-tune that split's ratio from the
     /// pointer position; a release clears it. Owned by `main_loop` (it
     /// must survive across dispatch batches) and threaded in by reference.
     pub drag: &'a mut Option<DragGrab>,
-    /// phux-npb3 (ADR-0035 decision 3 follow-up): panes that opted out of
+    /// phux-npb3 (ADR-0048 decision 3 follow-up): panes that opted out of
     /// client mouse handling via `set-pane mouse off`. Client-local state,
     /// owned by `main_loop` like `drag` and lent in by reference. Two
     /// consumers: the dispatcher skips synthesizing `INPUT_MOUSE` (and the
@@ -184,6 +187,10 @@ pub(super) struct DispatchCtx<'a> {
     /// this set — so the host terminal's raw mouse handling returns for that
     /// pane without forcing the whole session to `mouse = false`.
     pub mouse_optout: &'a mut std::collections::HashSet<TerminalId>,
+    /// phux-oih5.16: driver-owned, client-local attention excursion state.
+    /// The first `next-attention` saves an origin; later cycles preserve it,
+    /// and `return-from-attention` consumes it. Never serialized or shared.
+    pub attention_navigation: &'a mut AttentionNavigation,
     /// phux-r82.5: enabled plugins' manifest `[[actions]]`, snapshotted at
     /// driver start (same lifecycle as `keybindings`). The command palette
     /// appends one namespaced row per entry under a "Plugin" header.
@@ -219,7 +226,7 @@ pub(super) struct DispatchCtx<'a> {
     pub vcs: &'a mut super::driver::VcsIndex,
 }
 
-/// An active divider drag (ADR-0035).
+/// An active divider drag (ADR-0048).
 ///
 /// Press on a divider cell records the controlling split (`node_path`) and
 /// its `axis`; while held, each button-motion event sets that split's
@@ -469,7 +476,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
             }
         }
-        // phux-4li.6 / ADR-0035: INPUT_MOUSE routing + click-to-focus +
+        // phux-4li.6 / ADR-0048: INPUT_MOUSE routing + click-to-focus +
         // divider drag-to-resize. The parser emits mouse coordinates in
         // outer-viewport cells (treated as 1-px-per-cell f64 per SPEC
         // §9.2.1); we hit-test against the multi-pane composition's
@@ -483,7 +490,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // client claims).
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
-            // ADR-0035: a release ALWAYS ends any in-flight drag first,
+            // ADR-0048: a release ALWAYS ends any in-flight drag first,
             // regardless of where it lands — the cursor may have left the
             // divider cell mid-drag. The commit broadcasts the final
             // layout via SET_METADATA, the same persistence path the
@@ -518,7 +525,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 continue;
             }
-            // phux-npb3 hardening (PR #142 review, recorded in ADR-0035):
+            // phux-npb3 hardening (PR #142 review, recorded in ADR-0048):
             // while a divider drag is active, ONLY a release ends it and
             // ONLY motion re-tunes it — both handled above. Anything else
             // (notably a second Press from a chorded button, a wheel tick,
@@ -664,7 +671,11 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                         if let Some(ls) = ctx.workspace.active_window_mut() {
                             ls.focus = Some(target.clone());
                         }
-                        *focused_pane = Some(target.clone());
+                        apply_focus_transition(
+                            &mut ctx.focus_history,
+                            focused_pane,
+                            target.clone(),
+                        );
                         // Re-anchor predict to the clicked pane: drop the
                         // old pane's queue AND reset the cursor + viewport
                         // to the new pane, so a keystroke before the next
@@ -764,7 +775,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     continue;
                 }
                 RouteDecision::Divider { node_path, axis } => {
-                    // ADR-0035: a LEFT-button press on a divider starts a drag
+                    // ADR-0048: a LEFT-button press on a divider starts a drag
                     // and immediately snaps the split to the press position (so
                     // a click-without-motion still nudges, matching the
                     // intuitive "grab here"). Scroll-wheel and right/middle
@@ -1184,6 +1195,15 @@ fn quantize_cell(p: f64) -> u16 {
     }
 }
 
+/// Apply a client-local focus change through the single MRU transition path.
+fn apply_focus_transition(
+    history: &mut FocusHistory,
+    focused_pane: &mut Option<TerminalId>,
+    target: TerminalId,
+) {
+    history.transition(focused_pane, Some(target));
+}
+
 /// Apply the side-effects of a resolved action: layout-mutation repaint
 /// signal, focus move, prediction reset, `SET_METADATA` broadcast, bell,
 /// detach, parked spawn (split / new-window), and kill-frame sequences.
@@ -1235,7 +1255,7 @@ async fn apply_action_effects<W: super::RenderSink>(
         *ctx.sidebar_enabled = !*ctx.sidebar_enabled;
     }
     if let Some(target) = effects.set_focus {
-        *focused_pane = Some(target);
+        apply_focus_transition(&mut ctx.focus_history, focused_pane, target);
         // Focus moved (keybinding pane navigation) — re-anchor predict to
         // the new pane: reset its cursor + viewport and drop the old pane's
         // queue, so a keystroke before the next reconcile echoes at the
@@ -1576,6 +1596,7 @@ pub const ACTION_NAMES: &[&str] = &[
     "detach",
     "next-pane",
     "previous-pane",
+    "last-pane",
     "toggle-zoom",
     "toggle-sidebar",
     "command-palette",
@@ -1583,6 +1604,8 @@ pub const ACTION_NAMES: &[&str] = &[
     "session-picker",
     "agent-fleet",
     "focus-pane",
+    "next-attention",
+    "return-from-attention",
     "switch-session",
     "new-session",
     "take-input",
@@ -1660,6 +1683,7 @@ fn run_action(
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             };
             effects.spawn_terminal = Some((
                 request_id,
@@ -1757,7 +1781,7 @@ fn run_action(
             });
         }
         "set-pane" => {
-            // phux-npb3 (ADR-0035 decision 3 follow-up): flip the focused
+            // phux-npb3 (ADR-0048 decision 3 follow-up): flip the focused
             // pane's per-pane mouse opt-out. `mouse = "off"` opts the pane
             // out of client mouse handling (no synthesized INPUT_MOUSE; the
             // driver drops outer capture while the pane is focused, so the
@@ -1815,6 +1839,7 @@ fn run_action(
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             };
             effects.spawn_window = Some((request_id, PendingWindow { name }, frame));
         }
@@ -2081,6 +2106,56 @@ fn run_action(
                     .with_live_key(super::fleet::FLEET_LIVE_KEY),
             ));
         }
+        "next-attention" => {
+            // phux-oih5.16 / ADR-0049: advisory, client-local navigation over
+            // asking panes. Flatten windows in display order and each tree in
+            // DFS leaf order; choose the first asking pane strictly after the
+            // current pane, wrapping once. No attention means a bell-no-op and
+            // does not arm a return origin.
+            let ordered = ordered_workspace_panes(ctx.workspace);
+            let current = focused.and_then(|id| ordered.iter().position(|(_, pane)| pane == id));
+            let target = ordered
+                .iter()
+                .enumerate()
+                .filter(|(_, (_, id))| panes.get(id).is_some_and(|slot| slot.attention))
+                .find(|(index, _)| current.is_none_or(|current| *index > current))
+                .or_else(|| {
+                    ordered
+                        .iter()
+                        .enumerate()
+                        .find(|(_, (_, id))| panes.get(id).is_some_and(|slot| slot.attention))
+                })
+                .map(|(_, (window, id))| (*window, id.clone()));
+            let Some((window, target)) = target else {
+                effects.bell = true;
+                return effects;
+            };
+
+            ctx.attention_navigation.save_origin_once(focused);
+            focus_terminal(ctx.workspace, window, target.clone());
+            effects.layout_mutated = true;
+            effects.set_focus = Some(target);
+        }
+        "return-from-attention" => {
+            // Consume first: a pane that disappeared while we were cycling is
+            // a safe bell-no-op, not a sticky origin that can later resolve to
+            // a different pane. TerminalId is stable across window reordering,
+            // so a surviving origin is found in its current window/DFS slot.
+            let Some(origin) = ctx.attention_navigation.take_origin() else {
+                effects.bell = true;
+                return effects;
+            };
+            let Some((window, _)) = ordered_workspace_panes(ctx.workspace)
+                .into_iter()
+                .find(|(_, id)| id == &origin)
+            else {
+                effects.bell = true;
+                return effects;
+            };
+            focus_terminal(ctx.workspace, window, origin.clone());
+            effects.layout_mutated = true;
+            effects.set_focus = Some(origin);
+        }
         "focus-pane" => {
             // phux-foz.7: focus a specific pane addressed as
             // (window index, DFS leaf ordinal) — the commit the fleet
@@ -2282,6 +2357,34 @@ fn run_action(
                 effects.set_focus = new_focus;
             }
         }
+        "last-pane" => {
+            // One-entry MRU jump-back. The target may be in another window;
+            // locate it by stable TerminalId, switch the client-local active
+            // window, and restore that window's local focus. Applying the
+            // resulting focus change records the pane we jumped from as the
+            // next MRU, so repeated invocations toggle between two panes.
+            let Some(target) = ctx.focus_history.target(focused, ctx.workspace) else {
+                effects.bell = true;
+                return effects;
+            };
+            let owner = ctx.workspace.windows.iter().position(|window| {
+                window
+                    .state
+                    .tree
+                    .as_ref()
+                    .is_some_and(|tree| crate::layout::leaves(tree).contains(&target))
+            });
+            let Some(window) = owner else {
+                tracing::debug!(terminal = ?target, "last-pane MRU target is no longer live");
+                effects.bell = true;
+                return effects;
+            };
+            ctx.workspace.active = window;
+            ctx.workspace.windows[window].state.focus = Some(target.clone());
+            effects.layout_mutated = true;
+            effects.clear_predict = true;
+            effects.set_focus = Some(target);
+        }
         "toggle-zoom" => {
             // phux-x2hm: zoom needs more than one pane (a single-pane window
             // bells, like tmux). When already zoomed the REAL tree still has
@@ -2318,6 +2421,33 @@ fn run_action(
         }
     }
     effects
+}
+
+/// Flatten a workspace deterministically: window order, then DFS leaf order.
+fn ordered_workspace_panes(workspace: &Workspace) -> Vec<(usize, TerminalId)> {
+    workspace
+        .windows
+        .iter()
+        .enumerate()
+        .flat_map(|(window, state)| {
+            state
+                .state
+                .tree
+                .as_ref()
+                .map(crate::layout::leaves)
+                .unwrap_or_default()
+                .into_iter()
+                .map(move |id| (window, id))
+        })
+        .collect()
+}
+
+/// Apply a resolved local focus target without producing shared-layout state.
+fn focus_terminal(workspace: &mut Workspace, window: usize, target: TerminalId) {
+    workspace.select(window);
+    if let Some(state) = workspace.active_window_mut() {
+        state.focus = Some(target);
+    }
 }
 
 /// Pull a `Direction` out of a [`phux_config::keybind::ResolvedAction`]'s `direction = "..."`
@@ -2378,7 +2508,7 @@ fn str_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option
 enum PaneMouseArg {
     /// Opt the pane back in to client mouse handling.
     On,
-    /// Opt the pane out (`set-pane mouse off`, ADR-0035's escape hatch).
+    /// Opt the pane out (`set-pane mouse off`, ADR-0048's escape hatch).
     Off,
     /// Flip the pane's current state (the palette default).
     Toggle,
@@ -2960,6 +3090,14 @@ mod tests {
         action: &phux_config::keybind::ResolvedAction,
         workspace: &mut Workspace,
     ) -> ActionEffects {
+        run_with_last(action, workspace, None)
+    }
+
+    fn run_with_last(
+        action: &phux_config::keybind::ResolvedAction,
+        workspace: &mut Workspace,
+        last_focused: Option<TerminalId>,
+    ) -> ActionEffects {
         let mut next_request_id = 100;
         let mut pending_splits = HashMap::new();
         let mut pending_windows = HashMap::new();
@@ -2977,6 +3115,8 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: last_focused
+                .map_or_else(FocusHistory::default, FocusHistory::with_previous),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3000,6 +3140,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -3036,6 +3177,7 @@ mod tests {
         let effects = {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -3059,6 +3201,7 @@ mod tests {
                 status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
+                attention_navigation: &mut AttentionNavigation::default(),
                 plugin_actions: &[],
                 plugin_panes: &[],
                 plugin_tx: None,
@@ -3192,6 +3335,53 @@ mod tests {
         assert!(effects.clear_predict);
         assert!(!effects.set_metadata, "window switch is per-client");
         assert_eq!(effects.set_focus, Some(tid(2)));
+    }
+
+    #[test]
+    fn last_pane_dispatch_jumps_across_windows_and_toggles() {
+        let mut workspace = Workspace::single(tid(1));
+        workspace.add_window("2".to_owned(), tid(2));
+        workspace.select(0);
+
+        let action = bare_action("last-pane");
+        let effects = run_with_last(&action, &mut workspace, Some(tid(2)));
+        assert_eq!(workspace.active, 1);
+        assert_eq!(
+            workspace.active_window().and_then(|w| w.focus.clone()),
+            Some(tid(2))
+        );
+        assert_eq!(effects.set_focus, Some(tid(2)));
+        assert!(effects.clear_predict);
+        assert!(!effects.set_metadata, "focus MRU is client-local");
+        let mut focused = Some(tid(1));
+        let mut history = FocusHistory::with_previous(tid(2));
+        apply_focus_transition(
+            &mut history,
+            &mut focused,
+            effects.set_focus.expect("dispatch target"),
+        );
+        assert_eq!(history.previous(), Some(&tid(1)));
+
+        // Feed the recorded pane back through dispatch + the same apply path:
+        // repeated last-pane genuinely toggles and repairs the MRU to pane 2.
+        let effects = run_with_last(&action, &mut workspace, Some(tid(1)));
+        assert_eq!(workspace.active, 0);
+        apply_focus_transition(
+            &mut history,
+            &mut focused,
+            effects.set_focus.expect("toggle target"),
+        );
+        assert_eq!(focused, Some(tid(1)));
+        assert_eq!(history.previous(), Some(&tid(2)));
+    }
+
+    #[test]
+    fn last_pane_without_history_bells_without_mutation() {
+        let mut workspace = Workspace::single(tid(1));
+        let effects = run(&bare_action("last-pane"), &mut workspace);
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
+        assert!(effects.set_focus.is_none());
     }
 
     #[test]
@@ -3417,6 +3607,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3440,6 +3631,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -3481,6 +3673,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3504,6 +3697,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -3580,6 +3774,7 @@ mod tests {
             let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -3603,6 +3798,7 @@ mod tests {
                 status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
+                attention_navigation: &mut AttentionNavigation::default(),
                 plugin_actions: &[],
                 plugin_panes: &[],
                 plugin_tx: None,
@@ -3742,6 +3938,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -3765,6 +3962,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: panes,
             plugin_tx: None,
@@ -4141,6 +4339,194 @@ mod tests {
         assert!(!effects.set_metadata, "window switch is per-client");
     }
 
+    // ---------- phux-oih5.16: client-local attention navigation ----------
+
+    /// Run an attention action with caller-owned pane flags and excursion
+    /// state, so successive dispatches exercise origin preservation.
+    fn run_attention(
+        action: &str,
+        workspace: &mut Workspace,
+        panes: &HashMap<TerminalId, PaneSlot>,
+        navigation: &mut AttentionNavigation,
+    ) -> ActionEffects {
+        let mut next_request_id = 100;
+        let mut pending_splits = HashMap::new();
+        let mut pending_windows = HashMap::new();
+        let mut overlays = OverlayState::new();
+        let theme = Theme::default();
+        let mut switch_request = None;
+        let mut session_name = String::new();
+        let mut zoomed = None;
+        let mut sidebar_enabled = false;
+        let mut drag = None;
+        let mut reload_request = false;
+        let mut mouse_optout = std::collections::HashSet::new();
+        let agent_meta = HashMap::new();
+        let mut vcs = crate::attach::driver::VcsIndex::default();
+        let focus_history = FocusHistory::default();
+        let focused = workspace.active_window().and_then(|w| w.focus.clone());
+        let mut ctx = DispatchCtx {
+            resolver: None,
+            workspace,
+            viewport: (80, 24),
+            cell_px: (1, 1),
+            next_request_id: &mut next_request_id,
+            pending_splits: &mut pending_splits,
+            pending_windows: &mut pending_windows,
+            overlays: &mut overlays,
+            keybindings: None,
+            theme: &theme,
+            sessions: &[],
+            foreign_layouts: &HashMap::new(),
+            foreign_agents: &HashMap::new(),
+            focused_session: None,
+            session_name: &mut session_name,
+            switch_request: &mut switch_request,
+            zoomed: &mut zoomed,
+            sidebar: None,
+            sidebar_enabled: &mut sidebar_enabled,
+            sidebar_agents: &[],
+            bar: None,
+            status_bar: None,
+            drag: &mut drag,
+            mouse_optout: &mut mouse_optout,
+            attention_navigation: navigation,
+            focus_history,
+            plugin_actions: &[],
+            plugin_panes: &[],
+            plugin_tx: None,
+            reload_request: &mut reload_request,
+            agent_meta: &agent_meta,
+            vcs: &mut vcs,
+        };
+        run_action(&bare_action(action), &mut ctx, focused.as_ref(), panes)
+    }
+
+    fn asking_panes(ids: &[u32]) -> HashMap<TerminalId, PaneSlot> {
+        ids.iter()
+            .map(|id| {
+                let terminal = tid(*id);
+                let mut slot = PaneSlot::new_with_size(20, 4).expect("pane slot");
+                slot.attention = true;
+                (terminal, slot)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn next_attention_with_no_attention_is_a_local_bell_noop() {
+        let mut workspace = fleet_workspace();
+        workspace.select(0);
+        let before = workspace.clone();
+        let mut navigation = AttentionNavigation::default();
+        let effects = run_attention(
+            "next-attention",
+            &mut workspace,
+            &HashMap::new(),
+            &mut navigation,
+        );
+        assert!(effects.bell);
+        assert!(!effects.layout_mutated);
+        assert!(!effects.set_metadata);
+        assert_eq!(workspace, before);
+        assert!(
+            navigation.take_origin().is_none(),
+            "no jump must not save an origin"
+        );
+    }
+
+    #[test]
+    fn next_attention_cycles_window_then_dfs_with_wrap_and_one_origin() {
+        // fleet_workspace is window 0 DFS [1,2], then window 1 DFS [3].
+        let mut workspace = fleet_workspace();
+        workspace.select(0);
+        let panes = asking_panes(&[2, 3]);
+        let mut navigation = AttentionNavigation::default();
+
+        let first = run_attention("next-attention", &mut workspace, &panes, &mut navigation);
+        assert_eq!(workspace.active, 0);
+        assert_eq!(workspace.windows[0].state.focus, Some(tid(2)));
+        assert_eq!(first.set_focus, Some(tid(2)));
+        assert!(!first.set_metadata, "attention focus is never shared");
+
+        let cross = run_attention("next-attention", &mut workspace, &panes, &mut navigation);
+        assert_eq!(
+            workspace.active, 1,
+            "cycle crosses windows in display order"
+        );
+        assert_eq!(cross.set_focus, Some(tid(3)));
+        assert!(!cross.set_metadata);
+
+        let wrapped = run_attention("next-attention", &mut workspace, &panes, &mut navigation);
+        assert_eq!(workspace.active, 0, "last asking pane wraps to the first");
+        assert_eq!(wrapped.set_focus, Some(tid(2)));
+        assert!(!wrapped.set_metadata);
+
+        let returned = run_attention(
+            "return-from-attention",
+            &mut workspace,
+            &panes,
+            &mut navigation,
+        );
+        assert_eq!(
+            returned.set_focus,
+            Some(tid(1)),
+            "cycling kept the first origin"
+        );
+        assert_eq!(workspace.windows[0].state.focus, Some(tid(1)));
+        assert!(!returned.set_metadata);
+
+        let consumed = run_attention(
+            "return-from-attention",
+            &mut workspace,
+            &panes,
+            &mut navigation,
+        );
+        assert!(consumed.bell, "return consumes the single saved origin");
+        assert!(!consumed.layout_mutated);
+        assert!(!consumed.set_metadata);
+    }
+
+    #[test]
+    fn return_from_attention_consumes_a_stale_origin_safely() {
+        let mut workspace = fleet_workspace();
+        workspace.select(0);
+        let panes = asking_panes(&[2]);
+        let mut navigation = AttentionNavigation::default();
+        let jumped = run_attention("next-attention", &mut workspace, &panes, &mut navigation);
+        assert_eq!(jumped.set_focus, Some(tid(2)));
+
+        // The original pane closes while the user is examining the question.
+        workspace.windows[0].state = crate::layout::LayoutState::single(tid(2));
+        let before = workspace.clone();
+        let stale = run_attention(
+            "return-from-attention",
+            &mut workspace,
+            &panes,
+            &mut navigation,
+        );
+        assert!(stale.bell);
+        assert!(!stale.layout_mutated);
+        assert!(stale.set_focus.is_none());
+        assert!(!stale.set_metadata);
+        assert_eq!(
+            workspace, before,
+            "stale return must not focus another pane"
+        );
+
+        let consumed = run_attention(
+            "return-from-attention",
+            &mut workspace,
+            &panes,
+            &mut navigation,
+        );
+        assert!(
+            consumed.bell,
+            "stale origin is consumed on the first return"
+        );
+        assert!(!consumed.layout_mutated);
+    }
+
     // ---------- phux-foz.7: agent-fleet dashboard + focus-pane ----------
 
     #[test]
@@ -4462,6 +4848,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4485,6 +4872,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -4547,6 +4935,7 @@ mod tests {
             let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -4570,6 +4959,7 @@ mod tests {
                 status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
+                attention_navigation: &mut AttentionNavigation::default(),
                 plugin_actions: &[],
                 plugin_panes: &[],
                 plugin_tx: None,
@@ -4720,6 +5110,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4743,6 +5134,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -4831,6 +5223,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: Some(&mut resolver),
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -4854,6 +5247,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -4989,6 +5383,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (8, 4),
             cell_px: (1, 1),
@@ -5012,6 +5407,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -5172,6 +5568,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -5198,6 +5595,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -5368,6 +5766,7 @@ mod tests {
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px: (1, 1),
@@ -5391,6 +5790,7 @@ mod tests {
                 status_bar: with_painter.then_some(&painter),
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
+                attention_navigation: &mut AttentionNavigation::default(),
                 plugin_actions: &[],
                 plugin_panes: &[],
                 plugin_tx: None,
@@ -5632,6 +6032,7 @@ mod tests {
         {
             let mut ctx = DispatchCtx {
                 resolver: None,
+                focus_history: FocusHistory::default(),
                 workspace: &mut workspace,
                 viewport: (80, 24),
                 cell_px,
@@ -5655,6 +6056,7 @@ mod tests {
                 status_bar: None,
                 drag: &mut drag,
                 mouse_optout: &mut mouse_optout,
+                attention_navigation: &mut AttentionNavigation::default(),
                 plugin_actions: &[],
                 plugin_panes: &[],
                 plugin_tx: None,
@@ -5978,6 +6380,7 @@ mod tests {
         let mut fleet_vcs = crate::attach::driver::VcsIndex::default();
         let mut ctx = DispatchCtx {
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -6001,6 +6404,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,
@@ -6196,6 +6600,7 @@ mod tests {
             // past the predict layer — no keybinding interception to muddy
             // the gate assertion.
             resolver: None,
+            focus_history: FocusHistory::default(),
             workspace: &mut workspace,
             viewport: (80, 24),
             cell_px: (1, 1),
@@ -6219,6 +6624,7 @@ mod tests {
             status_bar: None,
             drag: &mut drag,
             mouse_optout: &mut mouse_optout,
+            attention_navigation: &mut AttentionNavigation::default(),
             plugin_actions: &[],
             plugin_panes: &[],
             plugin_tx: None,

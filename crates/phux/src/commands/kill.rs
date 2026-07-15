@@ -3,14 +3,14 @@ use std::process::ExitCode;
 
 use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
+use phux_protocol::wire::frame::{Command as WireCommand, CommandResult};
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{cli_runtime, command_on, report_no_server};
 use crate::selector;
 
 /// `phux kill TARGET` — resolve the selector client-side, then ask the
-/// server to tear it down. A whole-session target (`.`, `=`, or a bare
+/// server to tear it down. A whole-session target (`.` or a bare
 /// `name`) resolves to its full Terminal-id list and rides a single
 /// `KILL_TERMINALS { ids }` round-trip — the atomic multi-terminal op the
 /// v0.3.0 "Option B" re-tier (ADR-0019 / ADR-0027) put in place of the
@@ -38,20 +38,8 @@ pub(crate) fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
         };
 
         // Resolve the selector against a fresh snapshot.
-        let snapshot = match command_on(
-            &mut conn,
-            0,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )
-        .await
-        {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-            Ok(other) => {
-                eprintln!("phux: unexpected GET_STATE result: {other:?}");
-                return ExitCode::FAILURE;
-            }
+        let snapshot = match phux_client::state::get_state_on(&mut conn).await {
+            Ok(snapshot) => snapshot,
             Err(err) => return report_no_server(&err, &socket_path, "kill"),
         };
 
@@ -91,7 +79,7 @@ pub(crate) fn run_kill(target: &str, socket: Option<PathBuf>) -> ExitCode {
         // A `#tag` selector resolves against L3 tag metadata fetched on this
         // same connection; every other form is pure snapshot resolution.
         let terminals = if matches!(selector, selector::Selector::Tag(_)) {
-            let index = crate::commands::tag::fetch_tag_index(&mut conn, &snapshot).await;
+            let index = phux_client::state::fetch_tag_index(&mut conn, &snapshot).await;
             selector::resolve_with_tags(&selector, &snapshot, &index)
         } else {
             selector::resolve(&selector, &snapshot)

@@ -187,10 +187,7 @@ pub(super) const fn record_attention(attention: AgentAttention) -> Attention {
 }
 
 pub(crate) fn format_terminal(id: &TerminalId) -> String {
-    match id {
-        TerminalId::Local { id } => format!("@{id}"),
-        TerminalId::Satellite { host, id } => format!("{}/@{id}", host.as_str()),
-    }
+    crate::selector::format_terminal_id(id)
 }
 
 pub(super) fn identity(id: &str, label: &str, kind: AgentKind) -> AgentIdentity {

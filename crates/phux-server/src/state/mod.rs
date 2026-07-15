@@ -454,6 +454,11 @@ mod tests {
         let (unsubscribe_from_events_tx, _unsubscribe_from_events_rx) = mpsc::channel(8);
         TerminalHandle {
             input: input_tx,
+            encoded_input: mpsc::channel(8).0,
+            input_snapshot: tokio::sync::watch::channel(
+                crate::input::InputEncoderSnapshot::default(),
+            )
+            .1,
             snapshot: snapshot_tx,
             set_default_colors: mpsc::channel(8).0,
             screen: screen_tx,

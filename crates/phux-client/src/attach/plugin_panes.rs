@@ -146,6 +146,7 @@ impl PluginPaneEntry {
             env: Some(self.spawn_env()),
             term: None,
             satellite: None,
+            owner_terminal: None,
         }
     }
 }
@@ -294,12 +295,14 @@ mod tests {
             env,
             term,
             satellite,
+            owner_terminal,
         } = entry.spawn_frame(7)
         else {
             panic!("expected SpawnTerminal");
         };
         assert_eq!(request_id, 7);
         assert_eq!(satellite, None, "plugin panes spawn locally");
+        assert_eq!(owner_terminal, None, "plugin panes use attached ownership");
         assert_eq!(group, DEFAULT_GROUP_ID);
         assert_eq!(
             command,

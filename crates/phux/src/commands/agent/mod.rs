@@ -6,13 +6,10 @@ mod record;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
 use phux_protocol::wire::info::{SessionSnapshot, TerminalInfo, WindowInfo};
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{
-    cli_runtime, parse_selector, report_no_server, request_command, resolve_targets,
-};
+use crate::commands::{cli_runtime, parse_selector, report_no_server, resolve_targets};
 
 use self::config::configured_agents;
 use self::detect::infer_agent_state;
@@ -187,21 +184,9 @@ fn run_agent_one(action: &AgentAction) -> ExitCode {
 }
 
 async fn fetch_snapshot(socket_path: &Path, verb: &str) -> Result<SessionSnapshot, ExitCode> {
-    match request_command(
-        socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    {
-        Ok(CommandResult::OkWith(CommandValue::State(snapshot))) => Ok(snapshot),
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            Err(ExitCode::FAILURE)
-        }
-        Err(err) => Err(report_no_server(&err, socket_path, verb)),
-    }
+    phux_client::state::get_state(socket_path)
+        .await
+        .map_err(|err| report_no_server(&err, socket_path, verb))
 }
 
 async fn classify_snapshot(

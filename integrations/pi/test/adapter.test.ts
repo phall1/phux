@@ -176,6 +176,77 @@ test("run treats a documented nonzero child exit as typed data", async () => {
   ]);
 });
 
+test("orchestration commands use exact canonical argv and typed responses", async () => {
+  const requests: RunRequest[] = [];
+  const outputs: ProcessResult[] = [
+    completed(JSON.stringify({ terminal_id: 8, satellite: null })),
+    completed(JSON.stringify({ schema_version: 1, terminal_id: 9, integration: "codex", plugin: "agents", argv: ["not-exposed"] })),
+    completed(""), completed("phux: signalled @8 (Freeze)\n"),
+    completed("@8\tbuild ci\n"),
+    completed(JSON.stringify({ event: "asked", terminal: "@8", id: "q", question: "Approve?", suggestions: ["yes"], elapsed_seconds: 3 })),
+  ];
+  const runner: ProcessRunner = async (request) => {
+    requests.push(request);
+    const result = outputs.shift();
+    if (result === undefined) throw new Error("unexpected request");
+    return result;
+  };
+  const cli = new PhuxCli({ runner, socket: "/tmp/p.sock" });
+
+  assert.deepEqual(await cli.spawn({ cwd: "/repo", command: ["bash"] }), { terminal_id: 8, satellite: null });
+  assert.equal((await cli.launch("codex", { extra: ["--model", "x"] })).terminal_id, 9);
+  await cli.kill("@8");
+  await cli.signal("@8", "freeze");
+  assert.deepEqual(await cli.tag("add", "@8", ["build", "ci"]), [{ terminal: "@8", tagsText: "build ci" }]);
+  assert.equal((await cli.ask("@8", "Approve?", { id: "q", suggestions: ["yes"], elapsedSeconds: 3 })).event, "asked");
+
+  assert.deepEqual(requests.map((request) => request.args), [
+    ["spawn", "--json", "--cwd", "/repo", "--socket", "/tmp/p.sock", "--", "bash"],
+    ["launch", "--json", "--socket", "/tmp/p.sock", "codex", "--", "--model", "x"],
+    ["kill", "@8", "--socket", "/tmp/p.sock"],
+    ["signal", "@8", "freeze", "--socket", "/tmp/p.sock"],
+    ["tag", "add", "@8", "build", "ci", "--socket", "/tmp/p.sock"],
+    ["ask", "@8", "--json", "--id", "q", "--suggest", "yes", "--elapsed-seconds", "3", "--socket", "/tmp/p.sock", "Approve?"],
+  ]);
+});
+
+test("watch turns the streaming CLI into a bounded typed event collection", async () => {
+  const fake = fakeRunner({
+    termination: "timed_out", exitCode: null, stderr: "",
+    stdout: [
+      JSON.stringify({ event: "dirty", terminal: "@3" }),
+      JSON.stringify({ event: "asked", terminal: "@3", id: "q", question: "Help?", suggestions: [], elapsed_seconds: null }),
+    ].join("\n"),
+  });
+  const cli = new PhuxCli({ runner: fake.runner, socket: "/tmp/p.sock" });
+
+  const result = await cli.watch({ target: "@3", durationMs: 250, maxEvents: 1 });
+
+  assert.deepEqual(result.events.map((event) => event.event), ["asked"]);
+  assert.equal(result.truncated, true);
+  assert.equal(result.ended, false);
+  assert.equal(fake.requests[0]?.timeoutMs, 250);
+  assert.deepEqual(fake.requests[0]?.args, ["watch", "--json", "--socket", "/tmp/p.sock", "@3"]);
+});
+
+test("rendered snapshot validates its dense versioned frame", async () => {
+  const style = {
+    bold: false, faint: false, italic: false, underline: false, blink: false,
+    inverse: false, invisible: false, strikethrough: false, overline: false,
+    fg: { kind: "default" }, bg: { kind: "default" },
+  };
+  const fake = fakeRunner(completed(JSON.stringify({
+    schema_version: 1, cols: 2, rows: 1, cursor: null,
+    cells: [{ grapheme: "a", style }, { grapheme: " ", style }],
+  })));
+  const cli = new PhuxCli({ runner: fake.runner, socket: "/tmp/p.sock" });
+
+  assert.equal((await cli.renderedSnapshot({ session: "work", cols: 2, rows: 1 })).cells.length, 2);
+  assert.deepEqual(fake.requests[0]?.args, [
+    "snapshot", "--rendered", "--json", "--cols", "2", "--rows", "1", "--socket", "/tmp/p.sock", "work",
+  ]);
+});
+
 test("malformed JSON is normalized", async () => {
   const cli = new PhuxCli({ runner: fakeRunner(completed("not-json")).runner });
   await assert.rejects(cli.ls(), expectCode("malformed_json"));
