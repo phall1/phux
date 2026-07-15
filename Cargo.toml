@@ -101,9 +101,13 @@ portable-pty = "0.9"
 # `phux-client` declares `ratatui`; the pane-interior substrate lives in
 # `phux-client-core`, which has no `ratatui` dependency, so a stray
 # `use ratatui` there fails to compile. See epic phux-5ke. Default features
-# only — the render layer drives stdout directly alongside the libghostty
-# pane painter.
-ratatui = "0.30"
+# plus `unstable-rendered-line-info`, which gates `Paragraph::line_count` —
+# the wrapped-display-row count the help overlay's scroll window needs
+# (phux-9adu); counting logical lines undercounts whenever a row wraps.
+# "Unstable" here means semver-exempt upstream (ratatui#293), so a ratatui
+# bump must re-check it; the alternative was reimplementing ratatui's word
+# wrapper to count rows, which would drift from the renderer.
+ratatui = { version = "0.30", features = ["unstable-rendered-line-info"] }
 chrono = { version = "0.4", default-features = false, features = ["std", "clock", "serde"] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
