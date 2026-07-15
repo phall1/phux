@@ -1,10 +1,10 @@
-import type { Theme } from "@mariozechner/pi-coding-agent";
+import type { Theme } from "@earendil-works/pi-coding-agent";
 import {
   SelectList,
   truncateToWidth,
   type Component,
   type SelectItem,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 
 import type { AgentPane } from "./schemas.js";
 import { formatPaneDisplay } from "./target-store.js";

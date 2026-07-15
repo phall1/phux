@@ -74,14 +74,23 @@ export class PhuxTargetStore {
       const selection = this.snapshotValue.selection;
       if (selection === null) {
         this.snapshotValue = { selection: null, availability: "unselected" };
-      } else if (result.agents.some((pane) => pane.terminal === selection.selector)) {
-        this.snapshotValue = { selection, availability: "available" };
       } else {
-        this.snapshotValue = {
-          selection,
-          availability: "stale",
-          reason: `pane ${selection.selector} is no longer present`,
-        };
+        const pane = result.agents.find((candidate) => candidate.terminal === selection.selector);
+        if (pane === undefined) {
+          this.snapshotValue = {
+            selection,
+            availability: "stale",
+            reason: `pane ${selection.selector} is no longer present`,
+          };
+        } else if (pane.session !== selection.session || pane.window !== selection.window) {
+          this.snapshotValue = {
+            selection,
+            availability: "stale",
+            reason: `pane ${selection.selector} now belongs to ${pane.session}:${pane.window}; expected ${selection.session}:${selection.window}`,
+          };
+        } else {
+          this.snapshotValue = { selection, availability: "available" };
+        }
       }
     } catch (error) {
       this.panesValue = [];

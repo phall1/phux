@@ -77,6 +77,23 @@ test("missing restored panes stay selected and are reported stale without fallba
   assert.match(formatTargetStatus(store.snapshot), /stale/);
 });
 
+test("reused pane ids with different ownership are stale", async () => {
+  const store = new PhuxTargetStore(
+    { appendEntry: () => {} },
+    { agentList: async () => ({ agents: [{ ...pane, session: "other", window: "window-9" }] }) },
+  );
+  store.restoreFromBranch([{ type: "custom", customType: PHUX_TARGET_ENTRY, data: saved }]);
+
+  await store.refresh();
+
+  assert.equal(store.snapshot.selection?.selector, "@3");
+  assert.equal(store.snapshot.availability, "stale");
+  assert.equal(
+    store.snapshot.reason,
+    "pane @3 now belongs to other:window-9; expected work:window-0",
+  );
+});
+
 test("inventory failures preserve the target and expose unavailable state", async () => {
   const store = new PhuxTargetStore(
     { appendEntry: () => {} },

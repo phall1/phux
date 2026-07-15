@@ -1,12 +1,12 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 
+import { PhuxCli } from "../src/adapter.js";
 import {
   formatAttachHandoff,
   formatDetailedStatus,
-  isInteractiveContext,
   registerPhuxExtension,
 } from "../src/extension.js";
 import type { PhuxTargetSnapshot } from "../src/target-store.js";
@@ -40,34 +40,56 @@ test("detailed status exposes stale state instead of choosing another pane", () 
   );
 });
 
-test("TUI guard honors mode when supplied and falls back to Pi hasUI", () => {
-  assert.equal(isInteractiveContext({ mode: "rpc", hasUI: true } as unknown as ExtensionContext), false);
-  assert.equal(isInteractiveContext({ mode: "interactive", hasUI: false } as unknown as ExtensionContext), true);
-  assert.equal(isInteractiveContext({ hasUI: true } as unknown as ExtensionContext), true);
-  assert.equal(isInteractiveContext({ hasUI: false } as unknown as ExtensionContext), false);
-});
-
-test("registers Pi-native commands and does not open TUI in RPC mode", async () => {
+test("registers Pi-native commands and tolerates custom UI being unavailable", async () => {
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const events: string[] = [];
+  let appended = 0;
   const api = {
-    appendEntry: () => {},
+    appendEntry: () => { appended++; },
     on: (name: string) => { events.push(name); },
     registerCommand: (name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => {
       commands.set(name, options.handler);
     },
   } as unknown as ExtensionAPI;
-  registerPhuxExtension(api);
+  const cli = new PhuxCli({
+    runner: async () => ({
+      termination: "completed",
+      exitCode: 0,
+      stderr: "",
+      stdout: JSON.stringify({
+        schema_version: 1,
+        agents: [{
+          terminal: "@3",
+          session: "work",
+          window: "window-0",
+          agent: { id: "codex", label: "Codex", kind: "codex" },
+          state: "working",
+          confidence: 0.9,
+          attention: "normal",
+          title: null,
+          cwd: "/repo",
+          sources: [],
+          explanation: "working cue",
+        }],
+      }),
+    }),
+  });
+  registerPhuxExtension(api, { cli });
 
   assert.deepEqual([...commands.keys()], ["phux", "phux-status", "phux-attach"]);
   assert.deepEqual(events, ["session_start", "session_tree"]);
 
   let customCalls = 0;
   const ctx = {
-    mode: "rpc",
     hasUI: true,
-    ui: { custom: async () => { customCalls++; } },
+    signal: undefined,
+    ui: {
+      custom: async () => { customCalls++; return undefined; },
+      setStatus: () => {},
+      notify: () => {},
+    },
   } as unknown as ExtensionContext;
   await commands.get("phux")?.("", ctx);
-  assert.equal(customCalls, 0);
+  assert.equal(customCalls, 1);
+  assert.equal(appended, 0);
 });

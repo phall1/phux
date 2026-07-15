@@ -1,7 +1,7 @@
 import type {
   ExtensionAPI,
   ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 import { PhuxCli } from "./adapter.js";
 import { PhuxTargetPicker } from "./components.js";
@@ -24,7 +24,7 @@ export function registerPhuxExtension(
   const store = new PhuxTargetStore(pi, options.cli ?? new PhuxCli());
 
   const updateStatus = (ctx: ExtensionContext): void => {
-    if (!isInteractiveContext(ctx)) return;
+    if (!ctx.hasUI) return;
     ctx.ui.setStatus("phux", formatTargetStatus(store.snapshot));
   };
 
@@ -40,7 +40,7 @@ export function registerPhuxExtension(
   pi.registerCommand("phux", {
     description: "Select the default phux pane target",
     handler: async (_args, ctx) => {
-      if (!isInteractiveContext(ctx)) return;
+      if (!ctx.hasUI) return;
       const snapshot = await store.refresh(ctx.signal);
       updateStatus(ctx);
       if (snapshot.availability === "unavailable") {
@@ -54,7 +54,7 @@ export function registerPhuxExtension(
 
       const selected = await ctx.ui.custom<AgentPane | null>((tui, theme, _keybindings, done) =>
         new PhuxTargetPicker(store.panes, theme, done, () => done(null), () => tui.requestRender()));
-      if (selected === null) return;
+      if (selected == null) return;
       const selection = store.select(selected);
       updateStatus(ctx);
       ctx.ui.notify(`phux target: ${selection.display}`, "info");
@@ -66,7 +66,7 @@ export function registerPhuxExtension(
     handler: async (_args, ctx) => {
       await store.refresh(ctx.signal);
       updateStatus(ctx);
-      if (isInteractiveContext(ctx)) {
+      if (ctx.hasUI) {
         ctx.ui.notify(formatDetailedStatus(store.snapshot), statusNotice(store.snapshot));
       }
     },
@@ -75,7 +75,7 @@ export function registerPhuxExtension(
   pi.registerCommand("phux-attach", {
     description: "Show a safe human attach handoff for the selected phux session",
     handler: async (_args, ctx) => {
-      if (!isInteractiveContext(ctx)) return;
+      if (!ctx.hasUI) return;
       const selection = store.snapshot.selection;
       if (selection === null) {
         ctx.ui.notify("No phux target selected. Run /phux first.", "warning");
@@ -88,11 +88,6 @@ export function registerPhuxExtension(
   return store;
 }
 
-/** Pi 0.73 exposes hasUI; mode-aware hosts can be guarded more precisely. */
-export function isInteractiveContext(ctx: ExtensionContext): boolean {
-  const mode = (ctx as ExtensionContext & { readonly mode?: string }).mode;
-  return mode === undefined ? ctx.hasUI : mode === "interactive";
-}
 
 export function formatDetailedStatus(snapshot: PhuxTargetSnapshot): string {
   const base = formatTargetStatus(snapshot);
