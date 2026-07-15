@@ -45,7 +45,7 @@ pub(crate) fn schema() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, or `.`/`=` for the focused session." },
+                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, or `.` for the focused session. `=` is unsupported because MCP has no attached-client focus history." },
                 "id": { "type": "string", "description": "Stable question id for answer correlation." },
                 "question": { "type": "string", "description": "Human-facing question text." },
                 "suggestions": { "type": "array", "items": { "type": "string" }, "description": "Suggested answers in display order." },

@@ -14,7 +14,7 @@
 //! | Form        | Meaning                                             |
 //! |-------------|-----------------------------------------------------|
 //! | `.`         | the focused session (snapshot's `focused_session`)  |
-//! | `=`         | last / most-recently-focused (same as `.` here)     |
+//! | `=`         | unsupported for headless clients (no focus history) |
 //! | `name`      | a session by name                                   |
 //! | `name:N`    | window index `N` of session `name`                  |
 //! | `name:tag`  | window whose name is `tag` in session `name`        |
@@ -36,8 +36,6 @@ use phux_protocol::wire::info::SessionSnapshot;
 pub enum Selector {
     /// `.` — the focused session.
     Current,
-    /// `=` — the last / most-recently-focused session.
-    Last,
     /// `name` — a whole session.
     Session(String),
     /// `name:N` or `name:tag` — one window of a session.
@@ -71,6 +69,8 @@ pub enum ParseError {
     BadPaneIndex(String),
     /// `#` carried no tag (the bare sigil).
     EmptyTag,
+    /// `=` requires an attached client's local focus history.
+    LastUnsupported,
 }
 
 impl std::fmt::Display for ParseError {
@@ -80,6 +80,10 @@ impl std::fmt::Display for ParseError {
             Self::BadTerminalId(s) => write!(f, "invalid terminal id in '@{s}'"),
             Self::BadPaneIndex(s) => write!(f, "invalid pane index '{s}'"),
             Self::EmptyTag => write!(f, "empty tag in '#' selector"),
+            Self::LastUnsupported => write!(
+                f,
+                "'=' requires attached-TUI focus history; use '.' or an explicit target"
+            ),
         }
     }
 }
@@ -100,7 +104,7 @@ pub fn parse(raw: &str) -> Result<Selector, ParseError> {
         return Ok(Selector::Current);
     }
     if raw == "=" {
-        return Ok(Selector::Last);
+        return Err(ParseError::LastUnsupported);
     }
     if let Some(rest) = raw.strip_prefix('@') {
         let id = rest
@@ -172,9 +176,7 @@ pub fn resolve_with_tags(
     tags: &TagIndex,
 ) -> Vec<TerminalId> {
     match selector {
-        Selector::Current | Selector::Last => {
-            terminals_in_session(snapshot, snapshot.focused_session)
-        }
+        Selector::Current => terminals_in_session(snapshot, snapshot.focused_session),
         Selector::Session(name) => session_id_by_name(snapshot, name)
             .map_or_else(Vec::new, |sid| terminals_in_session(snapshot, sid)),
         Selector::Window(name, window) => resolve_window(snapshot, name, window),
@@ -205,9 +207,9 @@ pub fn resolve_with_tags(
 
 /// The name of the whole session this selector targets, if any.
 ///
-/// Returns `Some(name)` for the three selectors that address an entire
-/// session — `Current` / `Last` (resolved against `snapshot.focused_session`)
-/// and `Session(name)` — and `None` for window / pane / terminal-id
+/// Returns `Some(name)` for selectors that address an entire session —
+/// `Current` (resolved against `snapshot.focused_session`) and `Session(name)` —
+/// and `None` for window / pane / terminal-id
 /// selectors, which address a strict subset and must stay per-Terminal.
 ///
 /// This is the seam `phux kill` uses to collapse a whole-session teardown
@@ -218,7 +220,7 @@ pub fn resolve_with_tags(
 #[must_use]
 pub fn whole_session_name(selector: &Selector, snapshot: &SessionSnapshot) -> Option<String> {
     let session_id = match selector {
-        Selector::Current | Selector::Last => snapshot.focused_session,
+        Selector::Current => snapshot.focused_session,
         Selector::Session(name) => session_id_by_name(snapshot, name)?,
         Selector::Window(..) | Selector::Pane(..) | Selector::TerminalId(_) | Selector::Tag(_) => {
             return None;
@@ -312,7 +314,6 @@ mod tests {
     #[test]
     fn parse_session_window_pane_and_terminal_forms() {
         assert_eq!(parse(".").unwrap(), Selector::Current);
-        assert_eq!(parse("=").unwrap(), Selector::Last);
         assert_eq!(parse("work").unwrap(), Selector::Session("work".to_owned()));
         assert_eq!(
             parse("work:1").unwrap(),
@@ -339,6 +340,7 @@ mod tests {
             Err(ParseError::BadPaneIndex(_))
         ));
         assert_eq!(parse("#"), Err(ParseError::EmptyTag));
+        assert_eq!(parse("="), Err(ParseError::LastUnsupported));
     }
 
     #[test]

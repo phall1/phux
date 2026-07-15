@@ -111,6 +111,8 @@ which-key-delay-ms = 600
 # pane-cycle bindings live on o / ; (phux-4li.16).
 "o" = "next-pane"
 ";" = "previous-pane"
+# One-entry, client-local MRU jump-back (repeat to toggle between two panes).
+"=" = "last-pane"
 
 # Zoom: toggle the focused pane to fill the whole window (tmux prefix-z).
 "z" = "toggle-zoom"

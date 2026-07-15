@@ -191,7 +191,7 @@ detach` would have no attached viewport to act on.
 **The target convention.** The verbs that address an existing pane —
 `kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
 **positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
-focused/last session). `attach` likewise takes its `[SESSION]` name
+focused session). `attach` likewise takes its `[SESSION]` name
 positionally. `new` is the exception: because its trailing `[COMMAND...]`
 is a positional var-arg, the *new* session's name is the `-s`/`--session`
 flag instead, keeping the command words unambiguous. So: positional target
@@ -246,7 +246,7 @@ CLI arguments, keybinding actions, and hook arguments.
 | `name:tag`            | session `name`, window whose name is `tag`       |
 | `@N`                  | opaque ID (pane/window/session) — stable for the |
 |                       | server's lifetime                                |
-| `=`                   | last (most recently focused)                     |
+| `=`                   | attached TUI only: previous pane (`C-a =`)       |
 | `#tag`                | every Terminal carrying L3 tag `tag`             |
 
 The `#tag` form (ADR-0027) resolves to the **set** of Terminals tagged
@@ -260,8 +260,17 @@ phux kill #build                   # kill every Terminal tagged 'build'
 phux tag rm @7 ci                  # untag
 ```
 
-One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, `run`, and
-`ask` all accept the same `TARGET` (phux-n95) and resolve it client-side
+Headless CLI and MCP calls have no attached client's focus history, so an
+explicit `=` target is rejected with an unsupported-selector error rather than
+silently aliasing `.`. In the attached TUI, `C-a =` dispatches `last-pane`
+against a one-entry, process-local MRU; repeating it toggles between two panes,
+including panes in different windows. The MRU is neither persisted nor sent on
+the wire, matching ADR-0019's client-local focus rule. The broader focus model
+is owned by ADR-0049 on the sibling focus branch; this change depends on that
+accepted direction without duplicating the ADR here.
+
+All headless commands otherwise share one grammar. `kill`, `snapshot`, `wait`,
+`send-keys`, `run`, and `ask` accept the same `TARGET` (phux-n95) and resolve it client-side
 against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
 selector. A selector that names several panes (a whole session or window)
 resolves to a single **selected pane**: the focused pane if it is among
@@ -270,7 +279,7 @@ targets the pane you are looking at in session `work`, while
 `phux send-keys work:1.0 …` targets exactly window 1, pane 0. `send-keys`
 and `run` route input to that resolved pane by id — no attach, no resize
 (phux-3j3). Omit the target on `snapshot`/`wait` to default to the
-focused/last session.
+focused session.
 
 The CLI infers what kind of selector is expected from the command. When
 ambiguity matters, prefer the most specific form. Example:
@@ -279,7 +288,8 @@ ambiguity matters, prefer the most specific form. Example:
 phux kill work:edit.2         # second pane in window "edit" of session "work"
 phux send-keys @42 "ls" Enter # send to the pane with stable id 42
 phux run work:1.0 "cargo test"# run in window 1, pane 0 of session "work"
-phux kill =                   # kill last-focused (within whatever the command targets)
+phux kill .                   # kill the focused session
+# `phux kill =` errors: headless clients have no focus MRU
 ```
 
 ---
@@ -966,6 +976,7 @@ line of config. The shipped prefix-table bindings:
 | `C-a h/j/k/l` | `focus-direction` left/down/up/right                   |
 | `C-a o`     | `next-pane`                                              |
 | `C-a ;`     | `previous-pane`                                          |
+| `C-a =`     | `last-pane` (jump back; repeat to toggle)                 |
 | `C-a z`     | `toggle-zoom`                                            |
 | `C-a b`     | `toggle-sidebar`                                         |
 | `C-a [`     | `copy-mode`                                              |
@@ -1004,6 +1015,7 @@ test, so this table cannot silently drift):
 | `resize-pane`     | `direction`, `amount`                       |
 | `next-pane`       |                                             |
 | `previous-pane`   |                                             |
+| `last-pane`       | jump to this attached client's previous focus |
 | `toggle-zoom`     |                                             |
 | `toggle-sidebar`  |                                             |
 | `copy-mode`       |                                             |

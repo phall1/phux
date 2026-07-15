@@ -1533,6 +1533,10 @@ async fn main_loop<W: super::RenderSink>(
     let mut panes: HashMap<TerminalId, PaneSlot> = HashMap::new();
     let mut workspace = Workspace::default();
     let mut focused_pane: Option<TerminalId> = None;
+    // phux-oih5.4: one-entry focus MRU, local to this attached client. It is
+    // deliberately outside Workspace so layout metadata never persists or
+    // shares focus history (ADR-0019 decision 6).
+    let mut focus_history = super::focus::FocusHistory::default();
     // ADR-0033: this client's own server-assigned ClientId, captured from
     // ATTACHED. Used to render "you hold the wheel" vs another client in the
     // supervisory badge. `None` until ATTACHED lands.
@@ -2155,6 +2159,7 @@ async fn main_loop<W: super::RenderSink>(
                 let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
+                    focus_history: focus_history.clone(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
@@ -2197,6 +2202,7 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                focus_history = ctx.focus_history;
                 // phux-4h5a: a `toggle-sidebar` in this batch flipped
                 // `sidebar_enabled`. Re-fold it into the reservation so the
                 // reflow + repaint below tile into the NEW content rect this
@@ -2451,6 +2457,7 @@ async fn main_loop<W: super::RenderSink>(
                                     .rects
                                 })
                             });
+                        let focused_before_frame = focused_pane.clone();
                         let outcome = handle_server_frame(
                             out,
                             f,
@@ -2471,6 +2478,8 @@ async fn main_loop<W: super::RenderSink>(
                             overlays.is_active(),
                             defer_paint,
                         )?;
+                        focus_history.observe(focused_before_frame, focused_pane.as_ref());
+                        focus_history.repair(focused_pane.as_ref(), &workspace);
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
                         }
@@ -2630,9 +2639,10 @@ async fn main_loop<W: super::RenderSink>(
                             // restored focus with a warning.
                             if let Some(idx) = pending_window.take() {
                                 if workspace.select(idx) {
-                                    focused_pane = workspace
+                                    let next_focus = workspace
                                         .active_window()
                                         .and_then(|ls| ls.focus.clone());
+                                    focus_history.transition(&mut focused_pane, next_focus);
                                     // phux-jpqd: the pane half of a
                                     // one-step cross-session pane pick — move
                                     // focus onto the target DFS leaf of the
@@ -2650,7 +2660,8 @@ async fn main_loop<W: super::RenderSink>(
                                             {
                                                 ls.focus = Some(leaf.clone());
                                             }
-                                            focused_pane = Some(leaf);
+                                            focus_history
+                                                .transition(&mut focused_pane, Some(leaf));
                                         } else {
                                             tracing::warn!(
                                                 window = idx,
@@ -2918,6 +2929,7 @@ async fn main_loop<W: super::RenderSink>(
                 let sidebar_agent_rows = sidebar_painter.agent_windows();
                 let mut ctx = DispatchCtx {
                     resolver: resolver.as_mut(),
+                    focus_history: focus_history.clone(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
@@ -2960,6 +2972,7 @@ async fn main_loop<W: super::RenderSink>(
                     &mut ctx,
                 )
                 .await?;
+                focus_history = ctx.focus_history;
                 // phux-4h5a: re-fold a `toggle-sidebar` flip into the
                 // reservation, same as the stdin arm, so the same-iteration
                 // repaint tiles into the new content rect.

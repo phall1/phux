@@ -175,6 +175,12 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "last-pane",
+        category: Category::Pane,
+        description: "Jump back to the previously focused pane",
+        args: &[],
+    },
+    ActionSpec {
         name: "toggle-zoom",
         category: Category::Pane,
         description: "Zoom the focused pane to fill the window (toggle)",

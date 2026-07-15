@@ -40,9 +40,9 @@ phux kill TARGET                     # destroy a session/window/pane
 ```
 
 `TARGET` is a selector: a session name (`work`), a window (`work:1` or
-`work:editor`), a pane (`work:1.0`), an opaque id (`@42`), or `.`/`=` for the
-focused / last-focused session. A session-wide target resolves to its
-focused pane; a `:window.pane` target hits exactly that pane. `--socket PATH`
+`work:editor`), a pane (`work:1.0`), an opaque id (`@42`), or `.` for the
+focused session. Headless `=` is unsupported because no attached-client focus
+history exists. A session-wide target resolves to its focused pane; a `:window.pane` target hits exactly that pane. `--socket PATH`
 overrides the UDS. **Flags must precede `send-keys`' trailing keys**
 (`phux send-keys --socket P TARGET ...`), or they get parsed as keys.
 

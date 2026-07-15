@@ -49,8 +49,9 @@ impl From<AttachError> for ToolError {
 /// (`docs/consumers/tui.md` §3), resolved client-side against a `GET_STATE`
 /// snapshot exactly as the CLI resolves it (ADR-0021).
 const TARGET_DESC: &str = "Target selector: session, session:window, \
-    session:window.pane, @paneid, or `.`/`=` for the focused session. Omit \
-    for the focused/last session.";
+    session:window.pane, @paneid, or `.` for the focused session. `=` is \
+    unsupported because MCP has no attached-client focus history. Omit for \
+    the focused session.";
 
 /// The MCP tool catalog: name, description, and JSON-Schema input shape.
 ///
@@ -573,7 +574,7 @@ async fn get_state_on(conn: &mut Connection) -> Result<SessionSnapshot, ToolErro
 }
 
 /// Parse the optional `target` argument into a [`Selector`], defaulting to
-/// the focused/last session when absent. Mirrors the CLI's `parse_selector`
+/// the focused session when absent. Mirrors the CLI's `parse_selector`
 /// front door (phux-n95).
 ///
 /// # Errors
@@ -581,7 +582,7 @@ async fn get_state_on(conn: &mut Connection) -> Result<SessionSnapshot, ToolErro
 /// Returns [`ToolError`] when an explicit `target` is present but malformed
 /// (e.g. `@nope`, `work:1.x`).
 fn parse_target(args: &Value) -> Result<Selector, ToolError> {
-    str_arg(args, "target").map_or(Ok(Selector::Last), |raw| {
+    str_arg(args, "target").map_or(Ok(Selector::Current), |raw| {
         selector::parse(raw).map_err(|err| ToolError::new(format!("invalid target '{raw}': {err}")))
     })
 }
@@ -900,10 +901,10 @@ mod tests {
     }
 
     /// `parse_target` is the optional-selector front door (snapshot/wait):
-    /// absent ⇒ `Last`, every grammar form parses, malformed ⇒ error.
+    /// absent ⇒ `Current`, supported grammar parses, malformed/`=` ⇒ error.
     #[test]
     fn parse_target_defaults_and_accepts_grammar() {
-        assert_eq!(parse_target(&json!({})).unwrap(), Selector::Last);
+        assert_eq!(parse_target(&json!({})).unwrap(), Selector::Current);
         assert_eq!(
             parse_target(&json!({ "target": "." })).unwrap(),
             Selector::Current,
@@ -916,8 +917,10 @@ mod tests {
             parse_target(&json!({ "target": "@100" })).unwrap(),
             Selector::TerminalId(100),
         );
-        // Malformed → error (no server round trip).
+        // Malformed and headless `=` both error before any server round trip.
         assert!(parse_target(&json!({ "target": "@nope" })).is_err());
+        let err = parse_target(&json!({ "target": "=" })).unwrap_err();
+        assert!(err.0.contains("attached-TUI focus history"), "{err:?}");
     }
 
     /// `required_target` (the `send_keys`/`run` front door) rejects a
@@ -949,13 +952,10 @@ mod tests {
         assert_eq!(one("work:1.1").unwrap(), TerminalId::local(102));
         // Opaque terminal id.
         assert_eq!(one("@200").unwrap(), TerminalId::local(200));
-        // `.`/`=` → the focused session's focused pane.
+        // `.` targets the focused session's focused pane; headless `=` is
+        // rejected during parsing because MCP has no attached-client MRU.
         assert_eq!(
             resolve_one(&Selector::Current, &snap).unwrap(),
-            TerminalId::local(100),
-        );
-        assert_eq!(
-            resolve_one(&Selector::Last, &snap).unwrap(),
             TerminalId::local(100),
         );
         // Misses error.

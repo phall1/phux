@@ -2348,6 +2348,8 @@ mod tests {
         let mut panes = panes_for(&[&tid(1)]);
         let mut out: Vec<u8> = Vec::new();
 
+        let mut history = crate::attach::focus::FocusHistory::default();
+        let before = focused.clone();
         let outcome = handle_window_spawned(
             &mut out,
             &mut workspace,
@@ -2363,7 +2365,14 @@ mod tests {
         assert_eq!(workspace.windows.len(), 2);
         assert_eq!(workspace.active, 1, "new window is active");
         assert_eq!(workspace.windows[1].name, "2");
+        history.observe(before, focused.as_ref());
+        history.repair(focused.as_ref(), &workspace);
         assert_eq!(focused, Some(tid(2)), "focus follows the new pane");
+        assert_eq!(
+            history.target(focused.as_ref(), &workspace),
+            Some(tid(1)),
+            "async new-window completion records the pane being left",
+        );
         assert!(panes.contains_key(&tid(2)), "new pane got a slot");
         assert!(outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes);
     }
@@ -2394,6 +2403,8 @@ mod tests {
             },
         );
         let mut pending_windows = HashMap::new();
+        let mut history = crate::attach::focus::FocusHistory::default();
+        let before = focused.clone();
         let outcome = handle_server_frame(
             &mut out,
             FrameKind::TerminalSpawned {
@@ -2418,8 +2429,15 @@ mod tests {
             false,
         )
         .expect("handle_server_frame");
+        history.observe(before, focused.as_ref());
+        history.repair(focused.as_ref(), &workspace);
         assert!(outcome.layout_replaced, "split reply replaces the layout");
         assert_eq!(focused, Some(tid(2)), "focus follows the spawned pane");
+        assert_eq!(
+            history.target(focused.as_ref(), &workspace),
+            Some(tid(1)),
+            "full async split reply records the anchor as MRU",
+        );
         zoomed
     }
 
@@ -2907,6 +2925,27 @@ mod tests {
         assert!(
             outcome.layout_replaced && outcome.emit_set_metadata && outcome.reflow_panes,
             "the fold triggers repaint + sibling broadcast + survivor reflow",
+        );
+    }
+
+    #[test]
+    fn closing_the_mru_pane_clears_stale_history() {
+        let left = tid(1);
+        let right = tid(2);
+        let mut workspace = two_pane_workspace(&left, &right, &left);
+        let mut focused = Some(left.clone());
+        let mut panes = panes_for(&[&left, &right]);
+        let mut history = crate::attach::focus::FocusHistory::with_previous(right.clone());
+
+        let before = focused.clone();
+        let _ = drive_closed(&mut workspace, &mut focused, &mut panes, &right, Some(0));
+        history.observe(before, focused.as_ref());
+        history.repair(focused.as_ref(), &workspace);
+
+        assert_eq!(
+            history.previous(),
+            None,
+            "closed MRU target must be cleared"
         );
     }
 
