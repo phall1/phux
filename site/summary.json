@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T04:39:25Z",
+  "generated_at": "2026-07-15T04:40:59Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/dashboard-first-size-record",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:40:34Z",
+      "duration_s": 16,
+      "runner_s": 12
+    },
     {
       "workflow": "observatory",
       "event": "workflow_dispatch",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T03:30:36Z",
       "duration_s": 19,
       "runner_s": 16
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/ci-observability",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T03:30:36Z",
-      "duration_s": 509,
-      "runner_s": 655
     }
   ],
   "workflows_30d": [
@@ -300,11 +300,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 17,
+      "runs": 18,
       "success_rate": 94,
       "median_s": 16,
       "p95_s": 19,
-      "runner_minutes": 3
+      "runner_minutes": 4
     },
     {
       "workflow": "release-please",
