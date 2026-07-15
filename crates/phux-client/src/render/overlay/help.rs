@@ -4,19 +4,33 @@
 //! (or any key already bound to `show-help`, since "pressing the help
 //! binding while help is up" is the universal "close it" gesture).
 //!
+//! A table taller than the modal is a *scroll viewport*, not a clip
+//! (phux-9adu): arrows / `j` / `k` / `C-n` / `C-p` step a row,
+//! `PageUp` / `PageDown` a screenful, `Home` / `End` jump to the ends,
+//! and the wheel scrolls a detent — mirroring the palette's bindings
+//! (phux-ep9s). An overflowing table paints a scrollbar in the right
+//! border column. Because the body renders with wrapping on, the window
+//! is counted in *wrapped display rows* at the current modal width
+//! ([`Modal::wrapped_row_count`]), not logical lines — a chord row that
+//! folds onto a second row consumes two rows of the window.
+//!
 //! Bindings are snapshotted at construction time — the overlay does not
 //! re-read config while it's up. If the user reloads config while help
 //! is open, they'll see the stale view; dismissing and re-opening picks
 //! up the new bindings. This avoids the overlay holding any reference
 //! into the live config, which keeps `Box<dyn RenderOverlay>` `'static`.
 
+use std::cell::Cell;
+
 use phux_config::keybind::chord_str_matches_event;
 use phux_config::{Action, KeybindingsCfg};
-use phux_protocol::input::key::{KeyEvent, PhysicalKey};
+use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
+use phux_protocol::input::mouse::{MouseAction, MouseButton, MouseEvent};
 use ratatui::buffer::Buffer;
 use ratatui::layout::Rect;
 
-use super::widgets::{ChordRow, ChordSection, KeyChordTable, Modal, centered};
+use super::select_list::WHEEL_SCROLL_ROWS;
+use super::widgets::{ChordRow, ChordSection, KeyChordTable, Modal, centered, paint_scrollbar};
 use super::{OverlayCommand, RenderOverlay};
 use crate::render::Theme;
 
@@ -55,6 +69,19 @@ pub struct HelpOverlay {
     /// Color slots snapshotted from the active [`Theme`] at construction.
     /// Captured (not borrowed) so the overlay stays `'static`.
     theme: Theme,
+    /// First visible body row — the scroll offset, in the *wrapped*
+    /// display-row units the modal's paragraph scrolls by (phux-9adu).
+    ///
+    /// Interior-mutable because the bottom clamp needs the wrapped row
+    /// count and viewport height, both known only at paint time, and
+    /// [`RenderOverlay::render`] takes `&self` — the same bargain the
+    /// [`SelectList`](super::select_list::SelectList) viewport makes.
+    /// Pure view state: render clamps and writes it back every frame.
+    scroll: Cell<usize>,
+    /// Rows the body viewport held at the last paint, recorded so
+    /// `PageUp` / `PageDown` can move by a real screenful. Zero until the
+    /// first render (page keys then fall back to a single row).
+    page: Cell<usize>,
 }
 
 impl HelpOverlay {
@@ -115,6 +142,8 @@ impl HelpOverlay {
             hardcoded_entries,
             show_help_chord,
             theme: *theme,
+            scroll: Cell::new(0),
+            page: Cell::new(0),
         }
     }
 
@@ -147,16 +176,72 @@ impl HelpOverlay {
             |chord| format!("Press {chord} or Esc to close"),
         )
     }
+
+    /// Scroll up by `rows`, saturating at the top.
+    fn scroll_up(&self, rows: usize) {
+        self.scroll.set(self.scroll.get().saturating_sub(rows));
+    }
+
+    /// Scroll down by `rows`. Deliberately unclamped here: the bottom
+    /// clamp needs the wrapped row count, which only the paint path can
+    /// compute — [`RenderOverlay::render`] clamps and writes back every
+    /// frame, so an overshoot never survives a paint.
+    fn scroll_down(&self, rows: usize) {
+        self.scroll.set(self.scroll.get().saturating_add(rows));
+    }
+
+    /// Rows in a page move: the last painted viewport height, or a single
+    /// row before the first paint (no viewport measured yet — better a
+    /// small step than a wild one).
+    fn page_rows(&self) -> usize {
+        self.page.get().max(1)
+    }
+
+    /// The one-column scrollbar track: the modal's right border column,
+    /// spanning the interior rows between the two corners.
+    const fn scrollbar_track(modal_area: Rect) -> Rect {
+        Rect::new(
+            modal_area.x + modal_area.width.saturating_sub(1),
+            modal_area.y.saturating_add(1),
+            1,
+            modal_area.height.saturating_sub(2),
+        )
+    }
 }
 
 impl RenderOverlay for HelpOverlay {
     fn render(&self, area: Rect, buf: &mut Buffer) {
         let modal_area = self.bounds(area).unwrap_or(area);
         let body = self.chord_table().body_lines();
-        Modal::new(&self.theme, "phux help", body)
+        let modal = Modal::new(&self.theme, "phux help", body)
             .footer(self.footer())
-            .wrap(true)
+            .wrap(true);
+
+        // The body renders with wrapping on, so the scroll window must be
+        // measured in *wrapped* display rows at this modal's interior
+        // width — counting logical lines undercounts whenever a chord row
+        // folds onto a second row (phux-9adu). `wrapped_row_count` rides
+        // the same word wrapper the paragraph paints with, so the clamp,
+        // the scrollbar, and the pixels always agree.
+        let inner_width = modal_area.width.saturating_sub(2);
+        let inner_height = usize::from(modal_area.height.saturating_sub(2));
+        let total = modal.wrapped_row_count(inner_width);
+        self.page.set(inner_height);
+        let offset = self.scroll.get().min(total.saturating_sub(inner_height));
+        self.scroll.set(offset);
+
+        modal
+            .scroll(u16::try_from(offset).unwrap_or(u16::MAX))
             .render_into(modal_area, buf);
+        // Over the border the modal just drew; a no-op when the table
+        // fits, so the fits case renders exactly as before (no bar).
+        paint_scrollbar(
+            buf,
+            Self::scrollbar_track(modal_area),
+            &self.theme,
+            total,
+            offset,
+        );
     }
 
     fn bounds(&self, area: Rect) -> Option<Rect> {
@@ -180,6 +265,57 @@ impl RenderOverlay for HelpOverlay {
             && chord_str_matches_event(chord, key)
         {
             return OverlayCommand::Dismiss;
+        }
+
+        // Scroll navigation (phux-9adu), mirroring the SelectList
+        // overlays: arrows / `j` / `k` / `C-n` / `C-p` step a row,
+        // page keys move a screenful, Home/End jump to the ends. Help
+        // has no query line, so `j`/`k` are always free to navigate.
+        // Dismiss checks ran first, so a user who bound `show-help` to
+        // one of these keys still closes the overlay with it. Press
+        // only, like SelectList — a Press/Release pair must not
+        // double-step.
+        if key.action == KeyAction::Press {
+            if key.mods.contains(ModSet::CTRL) {
+                match key.key {
+                    PhysicalKey::N => {
+                        self.scroll_down(1);
+                        return OverlayCommand::Stay;
+                    }
+                    PhysicalKey::P => {
+                        self.scroll_up(1);
+                        return OverlayCommand::Stay;
+                    }
+                    _ => {}
+                }
+            }
+            match key.key {
+                PhysicalKey::ArrowDown | PhysicalKey::J => self.scroll_down(1),
+                PhysicalKey::ArrowUp | PhysicalKey::K => self.scroll_up(1),
+                PhysicalKey::PageDown => self.scroll_down(self.page_rows()),
+                PhysicalKey::PageUp => self.scroll_up(self.page_rows()),
+                PhysicalKey::Home => self.scroll.set(0),
+                // "As far down as possible" — the paint path clamps it to
+                // the real bottom, where the wrapped row count is known.
+                PhysicalKey::End => self.scroll.set(usize::MAX),
+                _ => {}
+            }
+        }
+        OverlayCommand::Stay
+    }
+
+    /// The wheel scrolls the view a detent at a time ([`WHEEL_SCROLL_ROWS`],
+    /// same feel as the palette and copy-mode). Help has no cursor, so
+    /// unlike [`SelectList`](super::select_list::SelectList) the wheel
+    /// moves the window itself.
+    fn handle_mouse(&mut self, mouse: &MouseEvent) -> OverlayCommand {
+        if mouse.action != MouseAction::Press {
+            return OverlayCommand::Stay;
+        }
+        match mouse.button {
+            MouseButton::Four => self.scroll_up(WHEEL_SCROLL_ROWS),
+            MouseButton::Five => self.scroll_down(WHEEL_SCROLL_ROWS),
+            _ => {}
         }
         OverlayCommand::Stay
     }
@@ -526,6 +662,220 @@ mod tests {
             text.contains("Press F1 or Esc to close"),
             "missing dynamic footer:\n{text}"
         );
+    }
+
+    // ---------- phux-9adu: scroll viewport ----------
+
+    /// A config whose global section carries `n` bindings `g00`, `g01`, …
+    /// mapped to `action-00`, `action-01`, … — enough rows to overflow any
+    /// test modal. `BTreeMap` iteration keeps them sorted, so `action-00`
+    /// is always the first table row and `action-(n-1)` the last.
+    fn tall_cfg(n: usize) -> KeybindingsCfg {
+        let mut global = BTreeMap::new();
+        for i in 0..n {
+            global.insert(format!("g{i:02}"), Action::Bare(format!("action-{i:02}")));
+        }
+        KeybindingsCfg {
+            prefix: "C-a".to_owned(),
+            prefix_table: BTreeMap::new(),
+            global,
+            ..KeybindingsCfg::default()
+        }
+    }
+
+    #[test]
+    fn long_table_scrolls_and_clamps_at_both_ends() {
+        // 80x20 viewport -> 56x14 modal -> 12 interior rows; 30 bindings
+        // plus header and footer overflow it several times over.
+        let mut overlay = HelpOverlay::from_config(&tall_cfg(30), &Theme::default());
+        let top = render_to_string(&overlay, 80, 20);
+        assert!(top.contains("action-00"), "head visible at the top:\n{top}");
+        assert!(
+            !top.contains("action-29"),
+            "tail must start beyond the fold:\n{top}"
+        );
+
+        // Down-arrow steps (paint between each, as the driver does) walk
+        // the window to the tail...
+        for _ in 0..100 {
+            overlay.handle_key(&key(PhysicalKey::ArrowDown));
+            render_to_string(&overlay, 80, 20);
+        }
+        let bottom = render_to_string(&overlay, 80, 20);
+        assert!(
+            bottom.contains("action-29"),
+            "the tail must be reachable:\n{bottom}"
+        );
+        assert!(
+            !bottom.contains("action-00"),
+            "the head scrolled out of the window:\n{bottom}"
+        );
+        // ...and the offset clamps flush with the bottom rather than
+        // running past the content.
+        let clamped = overlay.scroll.get();
+        overlay.handle_key(&key(PhysicalKey::ArrowDown));
+        render_to_string(&overlay, 80, 20);
+        assert_eq!(
+            overlay.scroll.get(),
+            clamped,
+            "Down at the bottom must hold still"
+        );
+
+        // Up returns all the way and clamps at zero.
+        for _ in 0..100 {
+            overlay.handle_key(&key(PhysicalKey::ArrowUp));
+        }
+        let text = render_to_string(&overlay, 80, 20);
+        assert_eq!(overlay.scroll.get(), 0, "Up saturates at the top");
+        assert!(text.contains("action-00"), "head visible again:\n{text}");
+    }
+
+    #[test]
+    fn wrapped_rows_count_toward_the_scroll_extent() {
+        // One binding's action label is long enough to fold onto several
+        // display rows at the modal's width. The window must budget for
+        // those extra rows: were the extent counted in logical lines, End
+        // would clamp short and the last rows (and the footer) would stay
+        // beyond reach — the exact phux-9adu failure mode called out in
+        // the bead.
+        let mut c = tall_cfg(12);
+        c.global.insert(
+            "zz".to_owned(),
+            Action::Bare(format!("run-hook({})", "very-long-argument-".repeat(10))),
+        );
+        let mut overlay = HelpOverlay::from_config(&c, &Theme::default());
+
+        overlay.handle_key(&key(PhysicalKey::End));
+        let text = render_to_string(&overlay, 80, 20);
+        // The label's closing paren only exists on its *last* wrapped row.
+        assert!(
+            text.contains("argument-)"),
+            "End must reveal the folded label's tail:\n{text}"
+        );
+        assert!(
+            text.contains("Press Esc to close"),
+            "End must reveal the footer beneath the folded label:\n{text}"
+        );
+        // The offset End clamped to exceeds anything a logical-line count
+        // could produce: the folded label added display rows on top of the
+        // logical extent. 12 is the interior height of the 56x14 modal an
+        // 80x20 viewport centers.
+        let logical_lines = overlay.chord_table().body_lines().len() + 2;
+        assert!(
+            overlay.scroll.get() > logical_lines.saturating_sub(12),
+            "End offset {} must exceed the logical-line extent ({logical_lines} lines - 12 rows) \
+             — wrapped rows were not counted",
+            overlay.scroll.get(),
+        );
+    }
+
+    #[test]
+    fn fitting_content_is_unscrolled_and_barless() {
+        // The small default cfg fits an 80x24 modal comfortably: no
+        // scrollbar thumb, a zero offset, and inert scroll keys — the
+        // rendered bytes must not change at all (phux-9adu's "fits"
+        // regression guard).
+        let mut overlay = HelpOverlay::from_config(&cfg(), &Theme::default());
+        let before = render_to_string(&overlay, 80, 24);
+        assert!(
+            !before.contains('█'),
+            "no scrollbar when content fits:\n{before}"
+        );
+        overlay.handle_key(&key(PhysicalKey::ArrowDown));
+        overlay.handle_key(&key(PhysicalKey::PageDown));
+        overlay.handle_key(&key(PhysicalKey::End));
+        let after = render_to_string(&overlay, 80, 24);
+        assert_eq!(overlay.scroll.get(), 0, "offset clamps to zero on a fit");
+        assert_eq!(after, before, "scroll keys must not move a fitting table");
+    }
+
+    #[test]
+    fn overflowing_table_paints_a_scrollbar() {
+        let overlay = HelpOverlay::from_config(&tall_cfg(30), &Theme::default());
+        let text = render_to_string(&overlay, 80, 20);
+        assert!(
+            text.contains('█'),
+            "an overflowing table must paint a scrollbar thumb:\n{text}"
+        );
+    }
+
+    #[test]
+    fn home_end_and_page_keys_navigate_the_window() {
+        let mut overlay = HelpOverlay::from_config(&tall_cfg(30), &Theme::default());
+        // Before the first paint the viewport height is unknown; a page
+        // key steps a single row rather than guessing.
+        overlay.handle_key(&key(PhysicalKey::PageDown));
+        assert_eq!(overlay.scroll.get(), 1, "unmeasured page = one row");
+        // After a paint, a page is a real screenful (the interior height).
+        render_to_string(&overlay, 80, 20);
+        let page = overlay.page.get();
+        assert!(page > 1, "the paint recorded a viewport height");
+        overlay.handle_key(&key(PhysicalKey::PageDown));
+        render_to_string(&overlay, 80, 20);
+        assert_eq!(overlay.scroll.get(), 1 + page);
+        overlay.handle_key(&key(PhysicalKey::PageUp));
+        render_to_string(&overlay, 80, 20);
+        assert_eq!(overlay.scroll.get(), 1);
+        // End lands flush with the bottom, Home rewinds to the top.
+        overlay.handle_key(&key(PhysicalKey::End));
+        let text = render_to_string(&overlay, 80, 20);
+        assert!(text.contains("action-29"), "End reaches the tail:\n{text}");
+        overlay.handle_key(&key(PhysicalKey::Home));
+        render_to_string(&overlay, 80, 20);
+        assert_eq!(overlay.scroll.get(), 0);
+    }
+
+    #[test]
+    fn vi_and_emacs_style_keys_step_the_window() {
+        let mut overlay = HelpOverlay::from_config(&tall_cfg(30), &Theme::default());
+        render_to_string(&overlay, 80, 20);
+        // j/k are always free to navigate — help has no query line.
+        overlay.handle_key(&key(PhysicalKey::J));
+        assert_eq!(overlay.scroll.get(), 1);
+        overlay.handle_key(&key(PhysicalKey::K));
+        assert_eq!(overlay.scroll.get(), 0);
+        // C-n / C-p, mirroring the palette.
+        let mut ctrl_n = key(PhysicalKey::N);
+        ctrl_n.mods = ModSet::CTRL;
+        overlay.handle_key(&ctrl_n);
+        assert_eq!(overlay.scroll.get(), 1);
+        let mut ctrl_p = key(PhysicalKey::P);
+        ctrl_p.mods = ModSet::CTRL;
+        overlay.handle_key(&ctrl_p);
+        assert_eq!(overlay.scroll.get(), 0);
+        // A key release must not double-step.
+        let mut release = key(PhysicalKey::ArrowDown);
+        release.action = KeyAction::Release;
+        overlay.handle_key(&release);
+        assert_eq!(overlay.scroll.get(), 0, "release events do not scroll");
+    }
+
+    #[test]
+    fn wheel_scrolls_the_view() {
+        fn wheel(button: MouseButton) -> MouseEvent {
+            MouseEvent {
+                action: MouseAction::Press,
+                button,
+                mods: ModSet::empty(),
+                x: 0.0,
+                y: 0.0,
+            }
+        }
+        let mut overlay = HelpOverlay::from_config(&tall_cfg(30), &Theme::default());
+        assert_eq!(
+            overlay.handle_mouse(&wheel(MouseButton::Five)),
+            OverlayCommand::Stay
+        );
+        assert_eq!(
+            overlay.scroll.get(),
+            WHEEL_SCROLL_ROWS,
+            "wheel-down scrolls a detent"
+        );
+        overlay.handle_mouse(&wheel(MouseButton::Four));
+        assert_eq!(overlay.scroll.get(), 0, "wheel-up rewinds it");
+        // Saturates at the top instead of underflowing.
+        overlay.handle_mouse(&wheel(MouseButton::Four));
+        assert_eq!(overlay.scroll.get(), 0);
     }
 
     #[test]

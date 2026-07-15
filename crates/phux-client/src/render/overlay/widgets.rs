@@ -43,6 +43,7 @@ pub struct Modal<'a> {
     body: Vec<Line<'a>>,
     footer: Option<String>,
     wrap: bool,
+    scroll: u16,
 }
 
 impl<'a> Modal<'a> {
@@ -57,6 +58,7 @@ impl<'a> Modal<'a> {
             body,
             footer: None,
             wrap: false,
+            scroll: 0,
         }
     }
 
@@ -72,6 +74,62 @@ impl<'a> Modal<'a> {
     pub const fn wrap(mut self, wrap: bool) -> Self {
         self.wrap = wrap;
         self
+    }
+
+    /// Scroll the body down by `rows` display rows.
+    ///
+    /// With wrapping on ([`Self::wrap`]) the unit is *wrapped* rows —
+    /// ratatui's `Paragraph` composes the wrapped lines and skips the
+    /// first `rows` of them — so it stays in step with
+    /// [`Self::wrapped_row_count`]. The border, title, and footer chrome
+    /// scroll with the body (the footer is a body row); the box itself
+    /// stays put.
+    #[must_use]
+    pub const fn scroll(mut self, rows: u16) -> Self {
+        self.scroll = rows;
+        self
+    }
+
+    /// The full painted line set: body plus the footer spacer + footer
+    /// row when a footer is set. One source of truth for
+    /// [`Self::render_into`] and [`Self::wrapped_row_count`], so the
+    /// scroll math counts exactly what the paint path draws.
+    fn lines(&self) -> Vec<Line<'a>> {
+        let mut lines = self.body.clone();
+        if let Some(footer) = &self.footer {
+            // Blank spacer + dimmed italic footer, matching the help
+            // overlay's prior layout.
+            lines.push(Line::from(""));
+            lines.push(Line::from(Span::styled(
+                footer.clone(),
+                Style::default()
+                    .fg(self.theme.dim)
+                    .add_modifier(Modifier::ITALIC),
+            )));
+        }
+        lines
+    }
+
+    /// Rows the body (footer included) occupies at `width` — counted in
+    /// *wrapped* display rows when wrapping is on, logical lines otherwise.
+    ///
+    /// This is the denominator scrolling needs: a long chord row that
+    /// folds onto a second display row consumes two rows of the window,
+    /// so counting logical lines would undercount the extent (phux-9adu).
+    /// Both this count and [`Self::scroll`] ride ratatui's own word
+    /// wrapper (`Paragraph::line_count`), so they can never disagree
+    /// with what [`Self::render_into`] paints. `width` is the *interior*
+    /// width (the modal rect minus the two border columns).
+    #[must_use]
+    pub fn wrapped_row_count(&self, width: u16) -> usize {
+        let mut para = Paragraph::new(self.lines());
+        if self.wrap {
+            para = para.wrap(Wrap { trim: false });
+        }
+        // No block attached: `line_count` would add a block's vertical
+        // space, but the caller already subtracted the borders from
+        // `width`/height, so we count bare text rows.
+        para.line_count(width)
     }
 
     /// Paint the modal into `buf`, filling `area` (the modal rect — the
@@ -93,22 +151,12 @@ impl<'a> Modal<'a> {
             ))
             .title_alignment(Alignment::Center);
 
-        let mut lines = self.body.clone();
-        if let Some(footer) = &self.footer {
-            // Blank spacer + dimmed italic footer, matching the help
-            // overlay's prior layout.
-            lines.push(Line::from(""));
-            lines.push(Line::from(Span::styled(
-                footer.clone(),
-                Style::default()
-                    .fg(self.theme.dim)
-                    .add_modifier(Modifier::ITALIC),
-            )));
-        }
-
-        let mut para = Paragraph::new(lines).block(block);
+        let mut para = Paragraph::new(self.lines()).block(block);
         if self.wrap {
             para = para.wrap(Wrap { trim: false });
+        }
+        if self.scroll > 0 {
+            para = para.scroll((self.scroll, 0));
         }
         para.render(area, buf);
     }
@@ -395,6 +443,74 @@ mod tests {
         let mut buf = Buffer::empty(area);
         modal.render_into(area, &mut buf);
         insta::assert_snapshot!(buf_to_string(&buf));
+    }
+
+    // ---------- phux-9adu: wrapped-row counting + body scroll ----------
+
+    #[test]
+    fn wrapped_row_count_counts_display_rows_not_logical_lines() {
+        let theme = Theme::default();
+        // One logical line, long enough to fold at a narrow width.
+        let body = vec![Line::from("alpha bravo charlie delta")];
+        let wrapping = Modal::new(&theme, "t", body.clone()).wrap(true);
+        // Wide enough: one display row, same as the logical count.
+        assert_eq!(wrapping.wrapped_row_count(40), 1);
+        // Narrow: the single logical line folds into several display
+        // rows, each of which consumes a row of the scroll window.
+        assert!(
+            wrapping.wrapped_row_count(8) >= 3,
+            "a 25-char line at width 8 must wrap to multiple rows, got {}",
+            wrapping.wrapped_row_count(8),
+        );
+        // Without wrapping the count is the logical line count, however
+        // narrow the box (the paragraph truncates instead of folding).
+        let clipping = Modal::new(&theme, "t", body);
+        assert_eq!(clipping.wrapped_row_count(8), 1);
+    }
+
+    #[test]
+    fn wrapped_row_count_includes_the_footer_rows() {
+        let theme = Theme::default();
+        let plain = Modal::new(&theme, "t", vec![Line::from("body")]).wrap(true);
+        let footed = plain.clone().footer("hint");
+        // Footer adds its spacer + text row to the scroll extent, since
+        // both are painted as body rows.
+        assert_eq!(
+            footed.wrapped_row_count(20),
+            plain.wrapped_row_count(20) + 2,
+        );
+    }
+
+    #[test]
+    fn modal_scroll_hides_leading_body_rows() {
+        let theme = Theme::default();
+        let body = vec![Line::from("first"), Line::from("second")];
+        let modal = Modal::new(&theme, "t", body).wrap(true).scroll(1);
+        // 3-row box: borders + a single interior row, which after a
+        // one-row scroll shows the second line, not the first.
+        let text = render_modal(&modal, 12, 3);
+        assert!(!text.contains("first"), "scrolled-off row painted:\n{text}");
+        assert!(text.contains("second"), "row under scroll missing:\n{text}");
+    }
+
+    #[test]
+    fn modal_scroll_skips_wrapped_rows_not_logical_lines() {
+        let theme = Theme::default();
+        // One logical line that wraps to two display rows at the interior
+        // width. If scroll skipped logical lines, scroll(1) would jump
+        // clean past both halves to "tail"; skipping *display* rows shows
+        // the second half of the wrapped line.
+        let body = vec![Line::from("alpha bravo"), Line::from("tail")];
+        let modal = Modal::new(&theme, "t", body).wrap(true).scroll(1);
+        let text = render_modal(&modal, 9, 3);
+        assert!(
+            text.contains("bravo"),
+            "scroll must move one wrapped row, exposing the fold:\n{text}"
+        );
+        assert!(
+            !text.contains("alpha"),
+            "first wrapped row painted:\n{text}"
+        );
     }
 
     #[test]
