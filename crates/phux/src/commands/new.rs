@@ -11,8 +11,9 @@ use phux_protocol::wire::frame::{
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{
-    DEFAULT_SESSION_NAME, attach::resolved_default_session_name, attach::run_attach_once,
-    cli_runtime, print_attach_error, report_no_server, server::maybe_auto_spawn_server,
+    DEFAULT_SESSION_NAME, attach::client_cwd, attach::resolved_default_session_name,
+    attach::run_attach_once, cli_runtime, print_attach_error, report_no_server,
+    server::maybe_auto_spawn_server,
 };
 
 /// `phux new` — create a *new* session and attach to it.
@@ -98,15 +99,7 @@ pub(crate) fn run_new(
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
 
-    let target = AttachTarget::CreateIfMissing {
-        name: name.clone(),
-        command: if command.is_empty() {
-            None
-        } else {
-            Some(command)
-        },
-        cwd: cwd.map(|p| p.to_string_lossy().into_owned()),
-    };
+    let target = new_session_target(name.clone(), command, cwd);
 
     let predict_cfg = match config_loader::load() {
         Ok(cfg) => PredictiveConfig {
@@ -168,7 +161,11 @@ pub(crate) fn run_new_json(
         eprintln!("phux: auto-spawn skipped ({err}). Start a server manually with `phux server`.");
     }
 
-    let cwd = cwd.map(|p| p.to_string_lossy().into_owned());
+    // phux-0db: like the attaching path, an omitted `--cwd` defaults to
+    // the client's cwd rather than `None` (= the daemon's CWD).
+    let cwd = cwd
+        .map(|p| p.to_string_lossy().into_owned())
+        .or_else(client_cwd);
     let command = if command.is_empty() {
         None
     } else {
@@ -273,6 +270,30 @@ pub(crate) async fn create_session_via_metadata(
         .ok_or_else(not_registered)
 }
 
+/// Build the `CreateIfMissing` target for `phux new` (phux-0db).
+///
+/// An explicit `--cwd` wins; an omitted one defaults to the *client's*
+/// current working directory instead of `None`. `cwd: None` on the wire
+/// makes the seed pane inherit the daemon's CWD (typically `$HOME` for a
+/// long-lived server), which breaks tools whose persistence is keyed by
+/// directory — the `claude --resume` bug. The server validates the path
+/// and falls back to its default spawn directory when it is not an
+/// enterable directory on the server host, so a stale or foreign client
+/// path can never fail the create.
+fn new_session_target(name: String, command: Vec<String>, cwd: Option<PathBuf>) -> AttachTarget {
+    AttachTarget::CreateIfMissing {
+        name,
+        command: if command.is_empty() {
+            None
+        } else {
+            Some(command)
+        },
+        cwd: cwd
+            .map(|p| p.to_string_lossy().into_owned())
+            .or_else(client_cwd),
+    }
+}
+
 /// `base` if it is free, otherwise `base-2`, `base-3`, … — the first
 /// available name. Lets `phux new` (no name given) reuse the configured
 /// session-name-template as its base and still guarantee a distinct
@@ -293,7 +314,43 @@ pub(crate) fn unique_session_name(existing: &[String], base: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::unique_session_name;
+    use super::{AttachTarget, PathBuf, new_session_target, unique_session_name};
+
+    /// phux-0db: `phux new` without `--cwd` seeds the session in the
+    /// *client's* cwd, not `None` (= the daemon's CWD).
+    #[test]
+    fn new_session_target_defaults_cwd_to_client_cwd() {
+        let expected = std::env::current_dir()
+            .expect("test cwd")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            new_session_target("proj".to_owned(), Vec::new(), None),
+            AttachTarget::CreateIfMissing {
+                name: "proj".to_owned(),
+                command: None,
+                cwd: Some(expected),
+            }
+        );
+    }
+
+    /// An explicit `--cwd` wins over the client-cwd default, and a
+    /// non-empty command rides along unchanged.
+    #[test]
+    fn new_session_target_honors_explicit_cwd_and_command() {
+        assert_eq!(
+            new_session_target(
+                "proj".to_owned(),
+                vec!["vim".to_owned(), "notes.txt".to_owned()],
+                Some(PathBuf::from("/somewhere/else")),
+            ),
+            AttachTarget::CreateIfMissing {
+                name: "proj".to_owned(),
+                command: Some(vec!["vim".to_owned(), "notes.txt".to_owned()]),
+                cwd: Some("/somewhere/else".to_owned()),
+            }
+        );
+    }
 
     #[test]
     fn unique_session_name_uses_the_base_then_numeric_suffixes() {
