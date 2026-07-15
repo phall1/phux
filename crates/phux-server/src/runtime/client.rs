@@ -951,7 +951,15 @@ where
                 request_id,
                 command,
             } => {
-                handle_command(&state, client_id, request_id, command, &out_tx).await;
+                handle_command(
+                    &state,
+                    client_id,
+                    request_id,
+                    command,
+                    &out_tx,
+                    input_lane.as_ref(),
+                )
+                .await;
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -981,12 +989,12 @@ fn route_client_input(
     if let Some(lane) = input_lane
         && terminal_id.is_local()
     {
-        lane.route(RoutedInput {
+        lane.route(RoutedInput::attached(
             client_id,
             terminal_id,
             input,
             frame_label,
-        });
+        ));
         return;
     }
     handle_terminal_input(state, client_id, &terminal_id, input, frame_label);
