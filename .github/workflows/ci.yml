@@ -57,6 +57,15 @@
 # job-level draft condition and check/test follow via `needs`). Marking the
 # PR "Ready for review" runs everything — that event is in the trigger
 # types. Rationale and safety analysis on the `changes` job comment.
+#
+# OBSERVABILITY (ADR-0047): each cargo phase runs under scripts/ci/timed.sh,
+# and a trailing `lane signal` step renders the phase timings, cache
+# effectiveness, and slowest tests into the job's step summary, then uploads
+# the same facts as a `ci-metrics-*` artifact. The ci-metrics workflow folds
+# those artifacts — plus the per-step wall times the Actions API already has
+# — into the `ci-metrics` branch (NDJSON + DASHBOARD.md). The instrumentation
+# adds no compilation and only seconds of wall; keep it `if: always()` so a
+# red lane still reports where the time went.
 
 name: ci
 
@@ -160,6 +169,7 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
@@ -167,13 +177,27 @@ jobs:
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           nix develop -c bash -euo pipefail <<'EOF'
-          echo "::group::fmt";    cargo fmt --check;                                                          echo "::endgroup::"
-          echo "::group::clippy"; cargo clippy --workspace --all-targets --all-features -- -D warnings;      echo "::endgroup::"
-          echo "::group::doc";    RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace --all-features; echo "::endgroup::"
-          echo "::group::deny";   cargo deny check;                                                           echo "::endgroup::"
+          source scripts/ci/timed.sh
+          timed fmt    cargo fmt --check
+          timed clippy cargo clippy --workspace --all-targets --all-features -- -D warnings
+          timed doc    env RUSTDOCFLAGS='-D warnings' cargo doc --no-deps --workspace --all-features
+          timed deny   cargo deny check
           EOF
       - name: docs-check
         run: nix develop -c bash scripts/check-docs.sh
+      - name: lane signal
+        if: always()
+        env:
+          PHUX_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          PHUX_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+        run: bash scripts/ci/summarize-job.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ci-metrics-check
+          path: target/ci-metrics/
+          if-no-files-found: ignore
+          retention-days: 30
 
   # Test lane: the default unit pool, then the FAST `#[ignore]`d e2e set
   # (`run_wait_e2e` + `agent_record_e2e` + the perf gates). Both steps use the
@@ -213,13 +237,34 @@ jobs:
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
       - uses: Swatinem/rust-cache@v2
+        id: rust-cache
         with:
           key: ${{ env.CPU_KEY }}-${{ hashFiles('Cargo.lock', 'rust-toolchain.toml', 'flake.lock') }}
           save-if: ${{ github.ref == 'refs/heads/main' }}
+      # NEXTEST_PROFILE=ci on the unit pool only: behavior-identical to the
+      # default profile (see .config/nextest.toml), it just adds the junit
+      # report the `lane signal` step turns into a slowest-tests table. The
+      # e2e step keeps the default profile — its two nextest invocations
+      # would overwrite each other's junit, and its signal is the phase wall.
       - name: tests (unit + e2e)
         if: needs.changes.outputs.docs_only != 'true'
         run: |
           nix develop -c bash -euo pipefail <<'EOF'
-          echo "::group::unit"; cargo nextest run --workspace; echo "::endgroup::"
-          echo "::group::e2e";  just e2e;                       echo "::endgroup::"
+          source scripts/ci/timed.sh
+          timed unit env NEXTEST_PROFILE=ci cargo nextest run --workspace
+          timed e2e  just e2e
           EOF
+      - name: lane signal
+        if: always()
+        env:
+          PHUX_CACHE_HIT: ${{ steps.rust-cache.outputs.cache-hit }}
+          PHUX_DOCS_ONLY: ${{ needs.changes.outputs.docs_only }}
+          PHUX_JUNIT: target/nextest/ci/junit.xml
+        run: bash scripts/ci/summarize-job.sh
+      - uses: actions/upload-artifact@v7
+        if: always()
+        with:
+          name: ci-metrics-test
+          path: target/ci-metrics/
+          if-no-files-found: ignore
+          retention-days: 30

@@ -340,3 +340,18 @@ llvm-lines PKG='phux-protocol' *ARGS:
 # Attribute release binary size by crate (or per-fn with args).
 bloat *ARGS:
     cargo bloat --release --bin phux {{ if ARGS == "" { "--crates" } else { ARGS } }}
+
+# Dependency-graph stats without compiling: locked-package count, duplicate
+# versions (each compiles separately in cold CI), proc-macro and
+# build-script crate counts. The same script feeds the observatory workflow
+# (ADR-0047); locally it prints the markdown and appends the NDJSON record
+# to target/ci-metrics/records.ndjson.
+dep-stats:
+    bash scripts/ci/dep-stats.sh
+
+# Show the recorded CI dashboard (the `ci-metrics` branch, written by the
+# ci-metrics workflow — see ADR-0047). Fetches, then prints DASHBOARD.md;
+# query the raw NDJSON via `git show origin/ci-metrics:runs/<YYYY-MM>.ndjson`.
+ci-report:
+    git fetch --quiet origin ci-metrics
+    git show origin/ci-metrics:DASHBOARD.md
