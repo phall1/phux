@@ -204,7 +204,9 @@ hms() { # seconds (may be float/null) -> "3m42s" / "42s" / "-"
         echo "|---|---:|---:|"
         while IFS=$'\t' read -r name bytes prev; do
             prev_h="-"
-            [ "$prev" != "null" ] && prev_h="$((prev / 1024 / 1024)).$(((prev % 1048576) * 10 / 1048576)) MiB"
+            # @tsv renders a null previous as an EMPTY field, not "null" —
+            # treat both as "no prior record" instead of printing 0.0 MiB.
+            [ -n "$prev" ] && [ "$prev" != "null" ] && prev_h="$((prev / 1024 / 1024)).$(((prev % 1048576) * 10 / 1048576)) MiB"
             echo "| \`${name}\` | $((bytes / 1024 / 1024)).$(((bytes % 1048576) * 10 / 1048576)) MiB | ${prev_h} |"
         done < <(jq -r '.binary_size as $b | $b.latest.bins[] | .name as $n
             | [$n, .bytes, (($b.previous_bins[] | select(.name == $n) | .bytes) // null)] | @tsv' <<<"$summary")
