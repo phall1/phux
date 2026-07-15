@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T10:14:14Z",
+  "generated_at": "2026-07-15T10:14:48Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/opencode-integration",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:14:22Z",
+      "duration_s": 13,
+      "runner_s": 11
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T09:48:23Z",
       "duration_s": 116,
       "runner_s": 147
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "swarm/shared-state-tags",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T09:45:01Z",
-      "duration_s": 224,
-      "runner_s": 433
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 54,
+      "runs": 55,
       "success_rate": 91,
       "median_s": 16,
       "p95_s": 20,
-      "runner_minutes": 10
+      "runner_minutes": 11
     }
   ],
   "ci_jobs_30d": [
