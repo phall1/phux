@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T17:59:19Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T17:59:37Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 16 | 100% | 38s | 52s | 25 |
-| conventional-commits | 88 | 89% | 15s | 19s | 16 |
+| conventional-commits | 89 | 88% | 16s | 19s | 17 |
 
 ## ci jobs, last 30 days
 
@@ -118,6 +118,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-07-15 17:59 | ci | pull_request | feat/phux-pair-qr | skipped | 1s | 0s |
+| 2026-07-15 17:59 | conventional-commits | pull_request | feat/phux-pair-qr | cancelled | 18s | 14s |
 | 2026-07-15 17:46 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 18s | 13s |
 | 2026-07-15 17:38 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 16s | 12s |
 | 2026-07-15 17:38 | ci | pull_request | feat/dialout-connector-adr-spike | cancelled | 8m18s | 12m28s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 11:09 | conventional-commits | pull_request | swarm/input-encode-final | success | 14s | 10s |
 | 2026-07-15 11:09 | ci | pull_request | swarm/input-encode-final | success | 17m10s | 21m25s |
 | 2026-07-15 11:00 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-15 11:00 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
 
 ---
 
