@@ -42,6 +42,12 @@ pub(crate) fn run_naked() -> ExitCode {
     print_banner();
 
     let socket_path = default_socket_path();
+    // phux-iwuc: a socket path over the platform's sockaddr_un limit can
+    // never bind or connect — fail with the limit named, before the
+    // auto-spawn below can turn it into a 2s timeout.
+    if let Err(code) = super::ensure_socket_path_fits(&socket_path) {
+        return code;
+    }
 
     // phux-4li.1: name the auto-created default session from
     // `defaults.session-name-template` (e.g. `phux-${cwd-basename}`)
@@ -305,6 +311,11 @@ async fn wait_until_connectable(dial: &Dial, deadline: Duration) -> bool {
 /// connecting — see [`maybe_auto_spawn_server`].
 pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
+    // phux-iwuc: fail before auto-spawn with the sockaddr_un limit named,
+    // instead of the 2s spawn timeout + a doomed connect.
+    if let Err(code) = super::ensure_socket_path_fits(&socket_path) {
+        return code;
+    }
     // Resolve the session name to pass through to auto-spawn before we
     // move `session` into the AttachTarget. With no explicit name this
     // path behaves like naked `phux`, so it resolves the same
