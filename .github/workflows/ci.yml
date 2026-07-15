@@ -183,6 +183,16 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
+      # Runner disk headroom (phux-a5g7): the restore stack (nix store via
+      # cachix + rust-cache + sccache) sits near the hosted runner's free
+      # space; run 29443995632 died with ENOSPC before its first cargo
+      # step. Dropping the preinstalled toolchains this workflow never
+      # touches (dotnet, Android, GHC) frees ~25 GB for ~30s of rm.
+      - name: runner disk headroom
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h / | tail -1
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v22
@@ -262,6 +272,16 @@ jobs:
       CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
+      # Runner disk headroom (phux-a5g7): the restore stack (nix store via
+      # cachix + rust-cache + sccache) sits near the hosted runner's free
+      # space; run 29443995632 died with ENOSPC before its first cargo
+      # step. Dropping the preinstalled toolchains this workflow never
+      # touches (dotnet, Android, GHC) frees ~25 GB for ~30s of rm.
+      - name: runner disk headroom
+        run: |
+          df -h / | tail -1
+          sudo rm -rf /usr/share/dotnet /usr/local/lib/android /opt/ghc /usr/local/.ghcup
+          df -h / | tail -1
       - name: CPU fingerprint
         run: echo "CPU_KEY=$(grep -E '^(flags|model name|vendor_id)' /proc/cpuinfo | sort -u | sha256sum | cut -c1-16)" >> "$GITHUB_ENV"
       - uses: DeterminateSystems/nix-installer-action@v22
