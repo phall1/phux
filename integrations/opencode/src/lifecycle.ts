@@ -72,7 +72,15 @@ export class OpenCodeLifecycle {
     this.states.clear();
     const sessions = [...this.owned.keys()];
     this.enqueue(async () => {
-      for (const sessionId of sessions) await this.clearSession(sessionId);
+      for (const sessionId of sessions) {
+        try {
+          await this.clearSession(sessionId);
+        } catch (error) {
+          // Teardown is best effort per owned session: one unavailable pane
+          // must not prevent ownership-safe cleanup of the remaining panes.
+          this.onError(error);
+        }
+      }
     });
     await this.tail;
   }
@@ -108,18 +116,26 @@ export class OpenCodeLifecycle {
   private async clearSession(sessionId: string): Promise<void> {
     const binding = this.owned.get(sessionId);
     if (binding === undefined) return;
-    await this.clearOwned(binding);
-    this.owned.delete(sessionId);
+    try {
+      await this.clearOwned(binding);
+    } finally {
+      // A teardown signal consumes this ownership attempt whether its
+      // best-effort remote cleanup succeeds, fails, or finds a replacement.
+      this.owned.delete(sessionId);
+    }
   }
 
   private async clearOwned(binding: OwnedBinding): Promise<void> {
     const projection = await this.cli.agentShow({ target: binding.target, ...this.execution() });
-    const pane = projection.agents.find((candidate) => candidate.terminal === binding.target);
-    const source = pane?.sources.find((candidate) => candidate.kind === "agent_record");
-    if (source === undefined) return;
-    const owner = parseOwner(source.observed);
-    if (owner?.name !== "opencode" || owner.kind !== "opencode" || owner.session !== binding.owner) return;
-    await this.cli.agentClear(binding.target, this.execution());
+    const pane = projection.agents.find((candidate) => candidate.sources.some((source) => {
+      if (source.kind !== "agent_record") return false;
+      const owner = parseOwner(source.observed);
+      return owner?.name === "opencode" && owner.kind === "opencode" && owner.session === binding.owner;
+    }));
+    if (pane === undefined) return;
+    // agent show accepts broad session/window selectors but reports the
+    // resolved pane's canonical selector. Clear exactly that canonical pane.
+    await this.cli.agentClear(pane.terminal, this.execution());
   }
 
   private execution(): Required<Pick<ExecutionOptions, "signal" | "timeoutMs">> {
