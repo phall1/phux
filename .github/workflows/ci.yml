@@ -46,6 +46,18 @@
 # letting every PR save would thrash the store and evict the warm `main` base,
 # whose hot entry is the zig blob. Cachix separately stores the Nix closure.
 #
+#   * Workspace crates — sccache (GHA backend) EXPERIMENT (phux-mmxz child
+#     bead): rust-cache deliberately strips workspace-crate artifacts before
+#     saving (own code changes every commit), so phux's 11 crates recompile
+#     from scratch every run — measured at 8m54s of the test job. sccache
+#     hashes each rustc invocation's inputs, so crates whose source did NOT
+#     change in a given PR hit cache across commits. `CARGO_INCREMENTAL=0`
+#     because sccache cannot cache incremental artifacts (CI never profits
+#     from incremental anyway). sccache writes do count against the same
+#     10 GB LRU as rust-cache; per-object entries are small, but if the
+#     `main` zig-blob entry starts getting evicted, this experiment is the
+#     first thing to revert. Judge hit-rate via the `sccache stats` step.
+#
 # Docs-only fast path: the `changes` gate skips the compile-heavy steps when
 # EVERY changed file is documentation (`docs/`, `ADR/`, or `*.md`). It is
 # deliberately fail-safe — any file outside that set, an empty diff, or a
@@ -158,6 +170,14 @@ jobs:
     name: check
     runs-on: ubuntu-latest
     needs: changes
+    env:
+      # sccache experiment (see the caching header): wrap rustc so unchanged
+      # workspace crates hit the GHA cache across commits. `nix develop` is
+      # impure and inherits these; the sccache binary installed below stays
+      # on the host PATH inside the devshell.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
       - name: CPU fingerprint
@@ -168,6 +188,7 @@ jobs:
           name: phux
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
@@ -185,6 +206,9 @@ jobs:
           EOF
       - name: docs-check
         run: nix develop -c bash scripts/check-docs.sh
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
       - name: lane signal
         if: always()
         env:
@@ -226,6 +250,13 @@ jobs:
     name: test
     runs-on: ubuntu-latest
     needs: changes
+    env:
+      # sccache experiment — same rationale as the check job (see the
+      # caching header). This is the lane where the 8m54s workspace
+      # compile lives.
+      RUSTC_WRAPPER: sccache
+      SCCACHE_GHA_ENABLED: "true"
+      CARGO_INCREMENTAL: "0"
     steps:
       - uses: actions/checkout@v7
       - name: CPU fingerprint
@@ -236,6 +267,7 @@ jobs:
           name: phux
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}
           pushFilter: '(-source$|nixpkgs\.tar\.gz$)'
+      - uses: mozilla-actions/sccache-action@v0.0.9
       - uses: Swatinem/rust-cache@v2
         id: rust-cache
         with:
@@ -254,6 +286,9 @@ jobs:
           timed unit env NEXTEST_PROFILE=ci cargo nextest run --workspace
           timed e2e  just e2e
           EOF
+      - name: sccache stats
+        if: always()
+        run: sccache --show-stats || true
       - name: lane signal
         if: always()
         env:
