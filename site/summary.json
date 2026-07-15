@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T09:41:57Z",
+  "generated_at": "2026-07-15T09:42:08Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T09:41:54Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,23 +271,14 @@
       "created_at": "2026-07-15T08:44:22Z",
       "duration_s": 714,
       "runner_s": 1414
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T08:44:22Z",
-      "duration_s": 1053,
-      "runner_s": 1311
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 49,
-      "success_rate": 65,
-      "median_s": 816,
+      "runs": 50,
+      "success_rate": 64,
+      "median_s": 809,
       "p95_s": 1012,
       "runner_minutes": 657
     },
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 48,
+      "runs": 49,
       "median_queue_s": 2,
       "median_s": 802,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 47,
+      "runs": 48,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 262
     },
     {
       "job": "detect docs-only",
-      "runs": 49,
+      "runs": 50,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -348,14 +348,8 @@
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 185,
-      "n": 18
-    },
-    {
-      "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 22,
-      "n": 19
+      "median_s": 188,
+      "n": 17
     },
     {
       "job": "test",
@@ -365,21 +359,27 @@
     },
     {
       "job": "check",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 20,
+      "n": 18
+    },
+    {
+      "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 18
+      "n": 17
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 20
+      "n": 19
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 19
+      "n": 18
     }
   ],
   "cache": [
