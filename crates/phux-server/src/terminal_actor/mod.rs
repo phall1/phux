@@ -503,6 +503,11 @@ pub struct TerminalActor {
     /// Drives the dirty/idle coalescing — at most one `dirty` per burst,
     /// then one `idle` when a tick observes the grid has settled.
     in_output_burst: bool,
+    /// Whether a PTY output chunk arrived since the preceding idle-check
+    /// tick. Self-owned by dirty/idle bookkeeping so settling a burst does
+    /// not depend on [`Self::tick_emit`] consuming its state-sync mutation
+    /// flag (that emitter is deliberately gated off for raw consumers).
+    output_since_idle_tick: bool,
     /// Event subscribers for this pane. When semantic state changes occur
     /// (command started, grid changed, etc.), broadcast to all subscribers
     /// whose `event_types` filter matches. `Vec` guarded by `RefCell` for
@@ -896,6 +901,7 @@ impl TerminalActor {
             agent_dirty_since_detect: false,
             last_ask: None,
             in_output_burst: false,
+            output_since_idle_tick: false,
             event_subscribers: RefCell::new(Vec::new()),
             last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
             osc133: osc133::Osc133Scanner::new(),
@@ -1567,6 +1573,7 @@ impl TerminalActor {
         if self.event_sink.is_none() && self.event_subscribers.borrow().is_empty() {
             return;
         }
+        self.output_since_idle_tick = true;
         // OSC-133 prompt marks (phux-foz.4). Scanned before the coalesced
         // dirty/title sources below so a command boundary and its dirty
         // burst arrive in stream order.
@@ -1629,13 +1636,13 @@ impl TerminalActor {
     }
 
     /// Emit `idle` when an output burst has settled (phux-y2t), called from
-    /// the tick arm. A burst is "settled" when a tick fires and the grid
-    /// has not been mutated since the previous tick
-    /// (`!terminal_dirty_since_tick`). Idempotent: only the first settled
-    /// tick after a `dirty` emits `idle`; subsequent idle ticks are silent
-    /// until the next burst.
+    /// the tick arm. A burst is "settled" when no PTY output chunk arrived
+    /// since the previous tick. Idempotent: only the first settled tick after
+    /// a `dirty` emits `idle`; subsequent idle ticks are silent until the next
+    /// burst.
     fn maybe_emit_idle(&mut self) {
-        if self.in_output_burst && !self.terminal_dirty_since_tick {
+        let had_output = std::mem::take(&mut self.output_since_idle_tick);
+        if self.in_output_burst && !had_output {
             self.in_output_burst = false;
             self.dirty_event_emitted_this_burst = false;
             self.emit_event(AgentEvent::Idle);
@@ -2864,10 +2871,9 @@ impl TerminalActor {
                 // `synthesize_against_reference` returns non-empty bytes.
                 _ = tick.tick() => {
                     // phux-y2t: close an output burst with an `idle` event
-                    // when the grid has settled since the previous tick.
-                    // MUST run before `tick_emit`, which consumes the
-                    // `terminal_dirty_since_tick` flag `maybe_emit_idle`
-                    // reads. No-op without an event sink.
+                    // when no PTY output arrived since the previous tick.
+                    // This bookkeeping is independent of the state-sync
+                    // emitter gate, so headless watchers settle raw panes too.
                     self.maybe_emit_idle();
                     self.tick_emit();
                 }
@@ -4364,6 +4370,57 @@ mod tests {
             actor.consumer_state(client).expect("state").next_seq,
             1,
             "no emission means the per-consumer seq never advanced",
+        );
+    }
+
+    /// phux-bowo: dirty/idle settling is independent of the state-sync
+    /// emitter gate. A raw-only pane must produce a fresh pair for each
+    /// output burst even though `tick_emit` stays gated and therefore leaves
+    /// `terminal_dirty_since_tick` set.
+    #[test]
+    fn raw_only_consumer_gets_repeatable_dirty_idle_cycles() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let raw_client = ClientId(1);
+        let (outbound, mut output_rx) = dummy_outbound();
+        actor
+            .register_consumer(raw_client, outbound, 11, false)
+            .expect("register raw consumer");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        actor.set_event_sink(event_tx);
+
+        for chunk in [b"first".as_slice(), b"\r\nsecond".as_slice()] {
+            actor.vt_write_for_test(chunk);
+            actor.source_events_from_chunk(chunk);
+            assert!(
+                matches!(event_rx.try_recv(), Ok(AgentEvent::Dirty)),
+                "each output burst must begin with dirty",
+            );
+
+            // The first tick observes output and keeps the burst open. The
+            // gated tick emits no synthesized output and does not consume its
+            // state-sync dirty flag.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert!(event_rx.try_recv().is_err(), "first tick is not idle");
+
+            // A following quiet tick settles independently of that still-set
+            // state-sync flag, re-arming dirty for the next burst.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert!(
+                matches!(event_rx.try_recv(), Ok(AgentEvent::Idle)),
+                "quiet tick must close the burst with idle",
+            );
+        }
+
+        assert!(
+            output_rx.try_recv().is_err(),
+            "raw consumer must remain on the byte-faithful broadcast path",
+        );
+        assert!(
+            actor.terminal_dirty_since_tick,
+            "gated tick must not weaken state-sync dirty bookkeeping",
         );
     }
 

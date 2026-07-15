@@ -30,9 +30,11 @@
 #![allow(clippy::unwrap_used, reason = "tests")]
 #![allow(clippy::panic, reason = "tests")]
 
+use std::io::{BufRead, BufReader};
 use std::path::PathBuf;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicU32, Ordering};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{Duration, Instant};
 
 /// Path to the freshly-built `phux` binary, injected by cargo for
@@ -70,6 +72,43 @@ impl Drop for ServerGuard {
         // Best-effort: the OS reaps it; we just stop it leaking.
         let _ = self.child.kill();
         let _ = self.child.wait();
+    }
+}
+
+/// A headless `phux watch --json` subprocess with its stdout decoded by a
+/// background line reader. Killed on drop so assertion failures cannot leak it.
+struct WatchGuard {
+    child: Child,
+    lines: Receiver<String>,
+}
+
+impl Drop for WatchGuard {
+    fn drop(&mut self) {
+        let _ = self.child.kill();
+        let _ = self.child.wait();
+    }
+}
+
+impl WatchGuard {
+    /// Wait for one ordered dirty -> idle pair, ignoring unrelated events.
+    fn wait_for_dirty_idle(&self) {
+        let deadline = Instant::now() + Duration::from_secs(5);
+        let mut saw_dirty = false;
+        while Instant::now() < deadline {
+            let remaining = deadline.saturating_duration_since(Instant::now());
+            let line = self
+                .lines
+                .recv_timeout(remaining)
+                .unwrap_or_else(|err| panic!("watch did not produce dirty -> idle: {err}"));
+            let event: serde_json::Value = serde_json::from_str(&line)
+                .unwrap_or_else(|err| panic!("watch emitted invalid JSON {line:?}: {err}"));
+            match event["event"].as_str() {
+                Some("dirty") => saw_dirty = true,
+                Some("idle") if saw_dirty => return,
+                _ => {}
+            }
+        }
+        panic!("watch did not produce dirty -> idle within 5s");
     }
 }
 
@@ -136,6 +175,27 @@ impl ServerGuard {
             .stdin(Stdio::null())
             .stderr(Stdio::null());
         c
+    }
+
+    /// Start the real CLI watcher without attaching to the pane. Its only
+    /// server interaction is target resolution followed by event subscription.
+    fn watch_json(&self) -> WatchGuard {
+        let mut child = self
+            .cmd(&["watch", "--json", SESSION])
+            .stdout(Stdio::piped())
+            .spawn()
+            .expect("spawn phux watch --json");
+        let stdout = child.stdout.take().expect("watch stdout pipe");
+        let (tx, lines) = mpsc::channel();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines() {
+                let Ok(line) = line else { break };
+                if tx.send(line).is_err() {
+                    break;
+                }
+            }
+        });
+        WatchGuard { child, lines }
     }
 }
 
@@ -263,6 +323,35 @@ fn wait_until_succeeds_when_marker_appears() {
         0,
         "`phux wait --until` should exit 0 once the marker is visible"
     );
+}
+
+#[test]
+#[ignore = "spawns a real phux server; starves in the full parallel pool. Run via `just e2e`."]
+fn headless_watch_json_receives_repeatable_dirty_idle_cycles() {
+    let server = ServerGuard::start();
+    let watch = server.watch_json();
+
+    // SUBSCRIBE_EVENTS has no acknowledgement, so allow the real watcher to
+    // finish target resolution and install its subscription before output.
+    std::thread::sleep(Duration::from_millis(300));
+
+    assert_eq!(
+        run_status(
+            &server,
+            &["send-keys", SESSION, "printf WATCH_CYCLE_ONE", "Enter"],
+        ),
+        0,
+    );
+    watch.wait_for_dirty_idle();
+
+    assert_eq!(
+        run_status(
+            &server,
+            &["send-keys", SESSION, "printf WATCH_CYCLE_TWO", "Enter"],
+        ),
+        0,
+    );
+    watch.wait_for_dirty_idle();
 }
 
 #[test]
