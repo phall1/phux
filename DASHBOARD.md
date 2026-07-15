@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:56:48Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:57:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 58 | 64% | 13m15s | 16m52s | 727 |
+| ci | 59 | 63% | 13m15s | 16m52s | 727 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
-| release-please | 10 | 100% | 35s | 44s | 21 |
-| conventional-commits | 45 | 91% | 16s | 19s | 8 |
+| release-please | 11 | 100% | 36s | 44s | 22 |
+| conventional-commits | 46 | 91% | 16s | 19s | 9 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 57 | 2s | 13m08s | 16m41s |
-| check | 56 | 2s | 2m37s | 4m23s |
-| detect docs-only | 58 | 2s | 5s | 7s |
+| test | 58 | 2s | 13m04s | 16m41s |
+| check | 57 | 2s | 2m37s | 4m23s |
+| detect docs-only | 59 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -117,10 +117,13 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 09:56 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
+| 2026-07-15 09:56 | conventional-commits | pull_request | fix/client-local-focus | success | 14s | 10s |
 | 2026-07-15 09:56 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 12s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | fix/headless-watch-idle | success | 17s | 12s |
+| 2026-07-15 09:56 | release-please | push | main | success | 41s | 35s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 18s | 15s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | swarm/shared-state-tags | success | 12s | 10s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | fix/client-local-focus | success | 13s | 10s |
@@ -144,9 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:33 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 15s | 11s |
 | 2026-07-15 09:33 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 13m56s | 16m02s |
 | 2026-07-15 09:32 | conventional-commits | pull_request | fix/client-local-focus | success | 15s | 11s |
-| 2026-07-15 09:32 | ci | pull_request | fix/client-local-focus | success | 13m13s | 17m30s |
-| 2026-07-15 09:22 | conventional-commits | pull_request | feat/opencode-integration | success | 13s | 9s |
-| 2026-07-15 09:22 | ci | pull_request | feat/opencode-integration | failure | 10m13s | 14m41s |
 
 ---
 
