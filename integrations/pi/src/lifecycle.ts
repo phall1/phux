@@ -7,7 +7,6 @@ import type {
 
 import { PhuxCli } from "./adapter.js";
 import {
-  parseAgentRecord,
   type AgentRecord,
   type AgentStateList,
   type AgentAttention,
@@ -16,10 +15,15 @@ import type { PhuxTargetSelection, PhuxTargetStore } from "./target-store.js";
 
 export type PiLifecycleState = "idle" | "working";
 
+export interface LifecycleCommandOptions {
+  readonly signal: AbortSignal;
+  readonly timeoutMs: number;
+}
+
 export interface PhuxLifecycleAdapter {
-  agentShow(options: { readonly target: string }): Promise<AgentStateList>;
-  agentSet(target: string, record: AgentRecord): Promise<AgentRecord>;
-  agentClear(target: string): Promise<void>;
+  agentShow(options: LifecycleCommandOptions & { readonly target: string }): Promise<AgentStateList>;
+  agentSet(target: string, record: AgentRecord, options: LifecycleCommandOptions): Promise<AgentRecord>;
+  agentClear(target: string, options: LifecycleCommandOptions): Promise<void>;
 }
 
 export interface LifecycleTimers {
@@ -30,8 +34,18 @@ export interface LifecycleTimers {
 export interface PhuxLifecycleOptions {
   readonly cli?: PhuxLifecycleAdapter;
   readonly debounceMs?: number;
+  /** Local deadline for each CLI command and for draining work during shutdown. */
+  readonly timeoutMs?: number;
   readonly timers?: LifecycleTimers;
+  /** Best-effort failures are reported here; the safe default deliberately does nothing. */
   readonly onError?: (error: unknown) => void;
+}
+
+export class PhuxLifecycleShutdownError extends Error {
+  constructor(readonly timeoutMs: number) {
+    super(`phux lifecycle shutdown exceeded ${String(timeoutMs)}ms`);
+    this.name = "PhuxLifecycleShutdownError";
+  }
 }
 
 interface Binding {
@@ -53,13 +67,16 @@ const systemTimers: LifecycleTimers = {
 export class PhuxLifecycle {
   private readonly cli: PhuxLifecycleAdapter;
   private readonly debounceMs: number;
+  private readonly timeoutMs: number;
   private readonly timers: LifecycleTimers;
   private readonly onError: (error: unknown) => void;
+  private readonly inFlight = new Set<AbortController>();
   private timer: unknown;
   private tail: Promise<void> = Promise.resolve();
   private generation = 0;
   private active = false;
   private preserveOnStop = false;
+  private abandoned = false;
   private owner: string | null = null;
   private target: PhuxTargetSelection | null = null;
   private state: PiLifecycleState = "idle";
@@ -71,8 +88,12 @@ export class PhuxLifecycle {
   constructor(options: PhuxLifecycleOptions = {}) {
     this.cli = options.cli ?? new PhuxCli();
     this.debounceMs = options.debounceMs ?? 25;
+    this.timeoutMs = options.timeoutMs ?? 1_000;
     if (!Number.isSafeInteger(this.debounceMs) || this.debounceMs < 0) {
       throw new RangeError("debounceMs must be a non-negative safe integer");
+    }
+    if (!Number.isSafeInteger(this.timeoutMs) || this.timeoutMs <= 0) {
+      throw new RangeError("timeoutMs must be a positive safe integer");
     }
     this.timers = options.timers ?? systemTimers;
     this.onError = options.onError ?? (() => {});
@@ -81,6 +102,7 @@ export class PhuxLifecycle {
   start(sessionId: string, target: PhuxTargetSelection | null, reload = false): void {
     this.active = true;
     this.preserveOnStop = false;
+    this.abandoned = false;
     this.owner = `pi:${sessionId}`;
     this.target = target;
     this.state = "idle";
@@ -115,11 +137,17 @@ export class PhuxLifecycle {
     this.active = false;
     this.preserveOnStop = reload;
     this.generation += 1;
+    this.abortInFlight();
     if (!reload) {
       this.desired = null;
       this.enqueue();
     }
-    await this.tail;
+    if (!await this.waitForTail()) {
+      this.abandoned = true;
+      this.generation += 1;
+      this.abortInFlight();
+      this.onError(new PhuxLifecycleShutdownError(this.timeoutMs));
+    }
   }
 
   /** Wait for all work that is currently queued (primarily for tests). */
@@ -165,7 +193,7 @@ export class PhuxLifecycle {
 
   private async reconcile(): Promise<void> {
     while (true) {
-      if (!this.active && this.preserveOnStop) return;
+      if (this.abandoned || (!this.active && this.preserveOnStop)) return;
       const generation = this.generation;
       const desired = this.desired;
 
@@ -175,7 +203,7 @@ export class PhuxLifecycle {
         if (!released) return;
         if (this.owned === old) this.owned = null;
         if (this.applied !== null && sameOwnerTarget(this.applied, old)) this.applied = null;
-        if (!this.active && this.preserveOnStop) return;
+        if (this.abandoned || (!this.active && this.preserveOnStop)) return;
         if (generation !== this.generation) continue;
       }
 
@@ -184,13 +212,14 @@ export class PhuxLifecycle {
 
       this.owned = desired;
       try {
-        await this.cli.agentSet(desired.target.selector, lifecycleRecord(desired));
+        await this.runCommand((options) =>
+          this.cli.agentSet(desired.target.selector, lifecycleRecord(desired), options));
       } catch (error) {
         this.onError(error);
         return;
       }
       this.applied = desired;
-      if (!this.active && this.preserveOnStop) return;
+      if (this.abandoned || (!this.active && this.preserveOnStop)) return;
       if (generation !== this.generation) continue;
       return;
     }
@@ -198,22 +227,54 @@ export class PhuxLifecycle {
 
   private async clearOwned(binding: Binding): Promise<boolean> {
     try {
-      const projection = await this.cli.agentShow({ target: binding.target.selector });
+      const projection = await this.runCommand((options) =>
+        this.cli.agentShow({ target: binding.target.selector, ...options }));
       const pane = projection.agents.find((candidate) =>
         candidate.terminal === binding.target.selector &&
         candidate.session === binding.target.session &&
         candidate.window === binding.target.window);
       const source = pane?.sources.find((candidate) => candidate.kind === "agent_record");
       if (source === undefined) return true;
-      const record = parseAgentRecord(JSON.parse(source.observed), "$.sources[].observed");
-      if (record.name !== "pi" || record.kind !== "pi" || record.session !== binding.owner) return true;
-      await this.cli.agentClear(binding.target.selector);
+      const ownership = parseOwnership(source.observed);
+      if (ownership?.name !== "pi" || ownership.kind !== "pi" || ownership.session !== binding.owner) {
+        return true;
+      }
+      await this.runCommand((options) => this.cli.agentClear(binding.target.selector, options));
       return true;
     } catch (error) {
       // Lifecycle reporting must never make Pi startup, transitions, or exit fail.
       this.onError(error);
       return false;
     }
+  }
+
+  private async runCommand<T>(body: (options: LifecycleCommandOptions) => Promise<T>): Promise<T> {
+    const controller = new AbortController();
+    this.inFlight.add(controller);
+    try {
+      return await body({ signal: controller.signal, timeoutMs: this.timeoutMs });
+    } finally {
+      this.inFlight.delete(controller);
+    }
+  }
+
+  private abortInFlight(): void {
+    for (const controller of this.inFlight) controller.abort();
+  }
+
+  private async waitForTail(): Promise<boolean> {
+    return new Promise<boolean>((resolve) => {
+      let done = false;
+      let timeout: unknown;
+      const finish = (completed: boolean): void => {
+        if (done) return;
+        done = true;
+        if (timeout !== undefined) this.timers.clearTimeout(timeout);
+        resolve(completed);
+      };
+      timeout = this.timers.setTimeout(() => finish(false), this.timeoutMs);
+      void this.tail.then(() => finish(true), () => finish(true));
+    });
   }
 }
 
@@ -246,6 +307,27 @@ export function registerPhuxLifecycle(
   });
 
   return { lifecycle };
+}
+
+interface OwnershipFields {
+  readonly name?: string;
+  readonly kind?: string;
+  readonly session?: string;
+}
+
+function parseOwnership(observed: string): OwnershipFields | null {
+  try {
+    const value: unknown = JSON.parse(observed);
+    if (value === null || typeof value !== "object" || Array.isArray(value)) return null;
+    const row = value as Record<string, unknown>;
+    return {
+      ...(typeof row.name === "string" ? { name: row.name } : {}),
+      ...(typeof row.kind === "string" ? { kind: row.kind } : {}),
+      ...(typeof row.session === "string" ? { session: row.session } : {}),
+    };
+  } catch {
+    return null;
+  }
 }
 
 function lifecycleRecord(binding: Binding): AgentRecord {

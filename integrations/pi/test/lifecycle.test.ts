@@ -6,6 +6,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import {
   PhuxLifecycle,
   registerPhuxLifecycle,
+  PhuxLifecycleShutdownError,
+  type LifecycleCommandOptions,
   type LifecycleTimers,
   type PhuxLifecycleAdapter,
 } from "../src/lifecycle.js";
@@ -18,6 +20,14 @@ const target: PhuxTargetSelection = {
   session: "work",
   window: "window-0",
   display: "work:window-0 @3",
+};
+
+const targetB: PhuxTargetSelection = {
+  version: 1,
+  selector: "@4",
+  session: "other",
+  window: "window-1",
+  display: "other:window-1 @4",
 };
 
 class FakeTimers implements LifecycleTimers {
@@ -45,22 +55,32 @@ class FakeAdapter implements PhuxLifecycleAdapter {
   readonly sets: Array<{ target: string; record: AgentRecord }> = [];
   readonly shows: string[] = [];
   readonly clears: string[] = [];
+  readonly commandOptions: LifecycleCommandOptions[] = [];
   record: AgentRecord | null = null;
   failSet = false;
 
-  async agentSet(selector: string, record: AgentRecord): Promise<AgentRecord> {
+  async agentSet(
+    selector: string,
+    record: AgentRecord,
+    options: LifecycleCommandOptions,
+  ): Promise<AgentRecord> {
+    this.commandOptions.push(options);
     this.sets.push({ target: selector, record });
     if (this.failSet) throw new Error("phux absent");
     this.record = record;
     return record;
   }
 
-  async agentShow(options: { readonly target: string }): Promise<AgentStateList> {
+  async agentShow(
+    options: LifecycleCommandOptions & { readonly target: string },
+  ): Promise<AgentStateList> {
+    this.commandOptions.push(options);
     this.shows.push(options.target);
     return projection(this.record);
   }
 
-  async agentClear(selector: string): Promise<void> {
+  async agentClear(selector: string, options: LifecycleCommandOptions): Promise<void> {
+    this.commandOptions.push(options);
     this.clears.push(selector);
     this.record = null;
   }
@@ -155,6 +175,93 @@ test("phux failures stay best-effort and a later transition retries", async () =
   assert.equal(adapter.record?.state, "working");
 });
 
+test("every lifecycle CLI command receives the configured local timeout and signal", async () => {
+  const timers = new FakeTimers();
+  const adapter = new FakeAdapter();
+  const lifecycle = new PhuxLifecycle({ cli: adapter, timers, timeoutMs: 321 });
+  lifecycle.start("session-1", target);
+  timers.runAll();
+  await lifecycle.settled();
+  await lifecycle.shutdown();
+
+  assert.equal(adapter.commandOptions.length, 3);
+  assert.ok(adapter.commandOptions.every((options) => options.timeoutMs === 321));
+  assert.ok(adapter.commandOptions.every((options) => options.signal instanceof AbortSignal));
+});
+
+test("shutdown aborts a hanging command and returns at its bounded deadline", async () => {
+  const timers = new FakeTimers();
+  const errors: unknown[] = [];
+  let commandSignal: AbortSignal | undefined;
+  const never = new Promise<AgentRecord>(() => {});
+  const adapter: PhuxLifecycleAdapter = {
+    agentShow: async () => projection(null),
+    agentClear: async () => {},
+    agentSet: async (_selector, _record, options) => {
+      commandSignal = options.signal;
+      return never;
+    },
+  };
+  const lifecycle = new PhuxLifecycle({
+    cli: adapter,
+    timers,
+    timeoutMs: 50,
+    onError: (error) => errors.push(error),
+  });
+  lifecycle.start("session-1", target);
+  timers.runAll();
+  await flush();
+
+  const shutdown = lifecycle.shutdown();
+  assert.equal(commandSignal?.aborted, true);
+  timers.runAll();
+  await shutdown;
+
+  assert.ok(errors.some((error) => error instanceof PhuxLifecycleShutdownError));
+});
+
+test("partial foreign provenance is released so a target switch can continue", async () => {
+  const timers = new FakeTimers();
+  const order: string[] = [];
+  const adapter: PhuxLifecycleAdapter = {
+    agentSet: async (selector, record) => {
+      order.push(`set:${selector}`);
+      return record;
+    },
+    agentShow: async () => {
+      order.push("show:@3");
+      const base = projection(null);
+      const pane = base.agents[0];
+      assert.ok(pane !== undefined);
+      return {
+        schema_version: 1,
+        agents: [{
+          ...pane,
+          sources: [{
+            kind: "agent_record",
+            signal: "phux.agent/v1 metadata record",
+            confidence: 0.98,
+            observed: JSON.stringify({ name: "pi", kind: "pi" }),
+          }],
+        }],
+      };
+    },
+    agentClear: async (selector) => {
+      order.push(`clear:${selector}`);
+    },
+  };
+  const lifecycle = new PhuxLifecycle({ cli: adapter, timers });
+  lifecycle.start("session-1", target);
+  timers.runAll();
+  await lifecycle.settled();
+
+  lifecycle.setTarget(targetB);
+  timers.runAll();
+  await lifecycle.settled();
+
+  assert.deepEqual(order, ["set:@3", "show:@3", "set:@4"]);
+});
+
 test("shutdown reads provenance and does not clear another owner's record", async () => {
   const timers = new FakeTimers();
   const adapter = new FakeAdapter();
@@ -218,7 +325,7 @@ test("registration maps agent_start to working and agent_settled to idle, not ag
   const pane = projection(null).agents[0] as AgentPane;
   const store = new PhuxTargetStore({ appendEntry: () => {} }, { agentList: async () => ({ agents: [pane] }) });
   store.select(pane);
-  registerPhuxLifecycle(pi, store, { cli: adapter, timers });
+  const registered = registerPhuxLifecycle(pi, store, { cli: adapter, timers });
   const ctx = {
     sessionManager: { getSessionId: () => "session-1" },
   } as unknown as ExtensionContext;
@@ -234,4 +341,15 @@ test("registration maps agent_start to working and agent_settled to idle, not ag
   timers.runAll();
   await flush();
   assert.equal(adapter.sets.at(-1)?.record.state, "idle");
+
+  const shutdown = handlers.get("session_shutdown")?.(
+    { type: "session_shutdown", reason: "reload" },
+    ctx,
+  );
+  await Promise.resolve(shutdown);
+  const writesAtShutdown = adapter.sets.length;
+  store.select({ ...pane, terminal: "@4", session: "other", window: "window-1" });
+  timers.runAll();
+  await registered.lifecycle.settled();
+  assert.equal(adapter.sets.length, writesAtShutdown, "shutdown unsubscribes from target changes");
 });
