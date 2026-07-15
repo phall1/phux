@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T10:16:12Z",
+  "generated_at": "2026-07-15T10:17:11Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -118,6 +118,15 @@
       "created_at": "2026-07-15T10:03:24Z",
       "duration_s": 20,
       "runner_s": 16
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/overlay-reachability-first-class",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:03:24Z",
+      "duration_s": 817,
+      "runner_s": 1071
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T09:48:24Z",
       "duration_s": 12,
       "runner_s": 10
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/client-local-focus",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:48:24Z",
-      "duration_s": 13,
-      "runner_s": 10
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 67,
+      "runs": 68,
       "success_rate": 63,
       "median_s": 797,
       "p95_s": 1011,
-      "runner_minutes": 826
+      "runner_minutes": 844
     },
     {
       "workflow": "stress",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 66,
+      "runs": 67,
       "median_queue_s": 2,
-      "median_s": 788,
+      "median_s": 799,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 65,
+      "runs": 66,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 263
     },
     {
       "job": "detect docs-only",
-      "runs": 67,
+      "runs": 68,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,7 +342,7 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 770,
+      "median_s": 765,
       "n": 13
     },
     {
@@ -386,14 +386,14 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 29,
-      "hit_rate": 38
+      "samples": 30,
+      "hit_rate": 37
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 27,
-      "hit_rate": 44
+      "samples": 28,
+      "hit_rate": 46
     },
     {
       "workflow": "stress",
@@ -407,43 +407,43 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 119,
-      "n": 24
+      "median_s": 128,
+      "n": 25
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 24
+      "n": 25
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 24
+      "n": 25
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 26
+      "n": 27
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 715,
-      "n": 21
+      "median_s": 711,
+      "n": 22
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 8,
-      "n": 20
+      "n": 21
     },
     {
       "workflow": "observatory",
@@ -468,17 +468,17 @@
     }
   ],
   "slow_tests": {
-    "sha": "ba069d848",
+    "sha": "5f8105962",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 113.869
+        "seconds": 108.577
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 28.633
+        "seconds": 27.803
       },
       {
         "binary": "phux-server::agent_detect",
@@ -511,14 +511,14 @@
         "seconds": 2.514
       },
       {
-        "binary": "phux-server::l2_adversarial",
-        "test": "test_subscribe_events_no_loss",
-        "seconds": 2.015
+        "binary": "phux::bin/phux",
+        "test": "commands::overlay::tests::wedged_tailscale_binary_is_killed_at_the_deadline",
+        "seconds": 2.020
       },
       {
-        "binary": "phux-server::phux_0q8_no_double_emit",
-        "test": "live_output_is_delivered_exactly_once",
-        "seconds": 1.515
+        "binary": "phux-server::l2_adversarial",
+        "test": "test_subscribe_events_no_loss",
+        "seconds": 2.017
       }
     ]
   },
