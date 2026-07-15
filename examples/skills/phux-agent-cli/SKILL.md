@@ -10,9 +10,21 @@ fleet while a human may be attached to the same session. The CLI is the stable
 contract (ADR-0022); `phux-mcp` is a strict JSON-RPC adapter over that same
 surface. There is no separate orchestration service and no client SDK required.
 
-A complete executable example lives at
-[`examples/agents/orchestrate-placed-fleet`](../../agents/orchestrate-placed-fleet).
-Its fake-phux gate is `just agents-fleet-smoke`.
+Complete executable examples live at
+[`orchestrate-placed-fleet`](../../agents/orchestrate-placed-fleet) for CLI and
+[`orchestrate-placed-fleet-mcp.py`](../../agents/orchestrate-placed-fleet-mcp.py)
+for JSON-RPC tool calls. The deterministic fake-phux gate is
+`just agents-fleet-smoke`; real isolated dogfood is `just agents-fleet-live`.
+
+To expose the same surface to Claude Code, install phux so `phux-mcp` is on
+`PATH`, start phux, then register the stdio adapter exactly once:
+
+```sh
+claude mcp add phux -- phux-mcp
+```
+
+Other MCP hosts use the `phux-mcp` executable with stdio transport; registration
+does not start the phux server.
 
 ## Invariants: keep the human and the wire honest
 

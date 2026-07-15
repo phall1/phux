@@ -106,8 +106,9 @@ for script in "$EXAMPLES"/*.sh; do
 done
 
 # The fleet example needs configured agent integrations in normal use. Its
-# hermetic fake-phux smoke proves argv, bounded watcher control flow, ask
-# surfacing, and advisory focus guidance without requiring an agent binary.
+# fake-phux test proves deterministic argv/control flow; the live test uses the
+# already-built binary with an isolated real server and ordinary shell panes.
+# Neither requires an external agent binary.
 for test_script in "$EXAMPLES"/tests/*.sh; do
     run_example "tests/$(basename "$test_script")" bash "$test_script"
 done

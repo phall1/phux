@@ -800,6 +800,7 @@ Exit codes are not uniform across verbs:
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
+| `rename` | `0` renamed; `1` no server or transport failure; `2` unknown source session or destination name already exists. |
 | `launch` / `spawn` | `0` spawned/resolved/listed; `1` invalid integration, placement, server, or spawn failure. |
 | `watch` | streams until Ctrl-C, EOF, or caller termination; use a subprocess bound rather than treating its eventual signal status as agent outcome. |
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |

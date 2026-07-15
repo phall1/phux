@@ -173,6 +173,14 @@ examples-smoke:
 agents-fleet-smoke:
     bash examples/agents/tests/placed-fleet-smoke.sh
 
+# Real isolated server dogfood for placement/layout/watch/ask with shell panes;
+# no external agent binary is needed. Set PHUX_DOGFOOD_REAL_AGENTS=1 to also
+# spawn installed claude/codex binaries on the private server.
+agents-fleet-live:
+    cargo build -p phux
+    PHUX="{{justfile_directory()}}/target/debug/phux" \
+      bash examples/agents/tests/placed-fleet-live.sh
+
 # Run the checked-in plugin package through the same discover/validate/run
 # sequence documented in examples/plugins/agent-tools/README.md.
 plugin-demo:
