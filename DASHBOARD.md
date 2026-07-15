@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:41:55Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:42:27Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 79 | 61% | 13m17s | 16m51s | 981 |
+| ci | 80 | 61% | 13m17s | 16m51s | 996 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 13 | 100% | 37s | 48s | 23 |
@@ -19,32 +19,32 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 78 | 2s | 13m08s | 16m41s |
-| check | 77 | 2s | 2m36s | 4m23s |
-| detect docs-only | 79 | 2s | 5s | 7s |
+| test | 79 | 2s | 13m19s | 16m41s |
+| check | 78 | 2s | 2m36s | 4m23s |
+| detect docs-only | 80 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 12m50s | 11 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m35s | 16 |
-| test | Run Swatinem/rust-cache@v2 | 24s | 20 |
+| test | tests (unit + e2e) | 12m45s | 12 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m35s | 17 |
+| test | Run Swatinem/rust-cache@v2 | 26s | 21 |
 | check | Run Swatinem/rust-cache@v2 | 22s | 20 |
-| check | docs-check | 9s | 18 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 20 |
+| check | docs-check | 9s | 19 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 21 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 20 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m47s | 34 |
-| ci / check | doc | 14s | 34 |
-| ci / check | deny | 3s | 34 |
-| ci / check | fmt | 1s | 36 |
-| ci / test | unit | 11m56s | 27 |
-| ci / test | e2e | 8s | 26 |
+| ci / check | clippy | 1m47s | 35 |
+| ci / check | doc | 14s | 35 |
+| ci / check | deny | 3s | 35 |
+| ci / check | fmt | 1s | 37 |
+| ci / test | unit | 11m55s | 28 |
+| ci / test | e2e | 8s | 27 |
 | observatory / timings | build-dev | 10m39s | 2 |
 | observatory / timings | build-release | 4m55s | 2 |
 | stress / stress | stress | 20m31s | 1 |
@@ -53,8 +53,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 41% | 39 |
-| ci / test | 57% | 37 |
+| ci / check | 43% | 40 |
+| ci / test | 58% | 38 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -98,20 +98,20 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 - duplicate versions: **32** (previous: 32)
 - proc-macro crates: 33; build-script crates: 67
 
-## Slowest tests (latest instrumented run, `1aa849bea`)
+## Slowest tests (latest instrumented run, `d55e2ce4f`)
 
 | test | wall |
 |---|---:|
-| `phux-server::perf_bursty_output::synthesize_against_reference_alloc_bounded_under_full_churn` | 113.528s |
-| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 27.805s |
-| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 6.018s |
-| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 3.817s |
+| `phux-server::perf_bursty_output::synthesize_against_reference_alloc_bounded_under_full_churn` | 107.740s |
+| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 27.894s |
+| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 6.015s |
+| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 3.815s |
 | `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 3.815s |
 | `phux-server::agent_detect::detector_publishes_blocked_from_a_live_prompt_box` | 3.516s |
-| `phux-server::agent_events::unattached_subscriber_receives_events` | 3.015s |
-| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 2.515s |
-| `phux-server::l2_adversarial::test_subscribe_events_no_loss` | 2.017s |
-| `phux-server::phux_0q8_no_double_emit::live_output_is_delivered_exactly_once` | 1.516s |
+| `phux-server::agent_events::unattached_subscriber_receives_events` | 3.014s |
+| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 2.514s |
+| `phux-server::l2_adversarial::test_subscribe_events_no_loss` | 2.015s |
+| `phux-server::phux_0q8_no_double_emit::live_output_is_delivered_exactly_once` | 1.514s |
 
 ## Recent runs
 
@@ -124,6 +124,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:28 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
 | 2026-07-15 10:28 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
 | 2026-07-15 10:28 | release-please | push | main | success | 38s | 33s |
+| 2026-07-15 10:28 | ci | push | main | success | 13m38s | 15m46s |
 | 2026-07-15 10:27 | conventional-commits | pull_request | swarm/spawn-placement | success | 16s | 12s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/foundation-train | success | 15s | 12s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/layout-cli | success | 16s | 13s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:14 | conventional-commits | pull_request | swarm/mru-selector | success | 19s | 16s |
 | 2026-07-15 10:14 | conventional-commits | pull_request | feat/opencode-integration | success | 13s | 11s |
 | 2026-07-15 10:14 | ci | pull_request | feat/opencode-integration | success | 14m12s | 16m27s |
-| 2026-07-15 10:11 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
