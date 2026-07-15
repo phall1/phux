@@ -1,17 +1,17 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-10
+last-reviewed: 2026-07-15
 ---
 
 # The phux agent CLI
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
-`phux ls / snapshot / send-keys / run / wait / watch / ask`, existing-pane
-spatial edits, plus `new` to create a session, `plugin` to manage configured
-plugin manifests, `config run`
-to invoke configured plugin actions, `workspace` to map git worktrees before
-spawning agent panes, and `satellite` to manage hub-side federation entries.
+create with `new`, place configured agents or explicit argv with `launch` /
+`spawn`, reshape exact existing panes with `insert-pane` / `move-pane` /
+`swap-pane`, act through `run` or `send-keys`, observe through bounded `wait` /
+`watch`, and raise advisory human attention with `ask`. Plugin, workspace, and
+satellite verbs provide the surrounding configuration and inventory surfaces.
 This file is the agent contract. Per ADR-0030, the structured agent state —
 cells, command results, semantic events — is a local projection over the shared
 engine, and the CLI plus its versioned JSON schemas are what an agent depends
@@ -78,12 +78,11 @@ decision rationale lives in
 [ADR-0022](../../ADR/0022-tool-for-agents.md); client-side selector resolution
 in [ADR-0021](../../ADR/0021-control-plane-commands.md).
 
-**Side-effect-free against a live pane.** `snapshot`, `run`, `send-keys`, and
-`wait` neither attach nor resize the target pane: the reads issue the
-`GET_SCREEN` control command (the server walks its own grid), and input rides
-`ROUTE_INPUT` (events route to a pane by id). An agent can drive — or just
-watch — a pane a human is also attached to, without disturbing that human's
-view.
+**Viewport-safe against a live pane.** `snapshot`, `run`, `send-keys`, and
+`wait` neither attach nor resize the target pane: reads issue `GET_SCREEN`, and
+input rides `ROUTE_INPUT` to a pane id. `snapshot`/`wait` are side-effect-free;
+`run`/`send-keys` deliberately mutate the live PTY. None changes an attached
+human's local focus or viewport.
 
 ## 2. The structured CLI surface (verb catalog)
 
@@ -148,7 +147,10 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   reported `{ event, terminal, id, question, suggestions, elapsed_seconds }`
   object after the server accepts the payload. Empty questions, empty
   suggestions, excessive suggestion counts, and unknown panes fail without
-  emitting an event.
+  emitting an event. The reference TUI presents that event as advisory
+  attention: `C-a q` cycles asking panes and `C-a Q` returns to the saved local
+  origin. A headless agent reports the ask and prints that guidance; it does not
+  move focus.
 - **`phux agent <list|show|explain> [TARGET] [--json] [--socket P]`** —
   project public agent state. A pane carrying a declared `phux.agent/v1`
   record (ADR-0040; see `agent set` below) reports straight from it with
@@ -184,10 +186,17 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
   Shape in §4.4.
+- **`phux launch INTEGRATION [--list|--print] [--target TARGET
+  [--split horizontal|vertical] [--ratio R]] [-c CWD] [--json] [--socket P]
+  [-- ARGS...]`** — resolve an enabled plugin integration and spawn it through
+  its identity wrapper. `--list` inventories integrations; `--print`/`--dry-run`
+  resolves argv without a server; `--target` places the launched pane beside an
+  exact local pane. Successful `--json` launch shape is in §4.13.
 - **`phux spawn [--satellite NAME] [--target TARGET [--split horizontal|vertical]
   [--ratio R]] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** — spawn a
   terminal without attaching (`SPAWN_TERMINAL`). With `--target`, the new pane
-  is owned by the target's exact local window and inserted beside it; `R` is
+  is owned by the target's exact local window and inserted beside it; `vertical`
+  means side-by-side and `horizontal` means stacked; `R` is
   finite and strictly between 0 and 1. Without placement flags, the pane joins
   the server's most recently active session (legacy behavior). The new terminal
   id prints on success. `--satellite NAME` routes the spawn
@@ -247,6 +256,12 @@ pane that already exists and performs no implicit spawn. Spawn-and-place remains
 a separate operation. `detach` is still an interactive TUI action. The shipped
 verbs are listed in [`tui.md`](./tui.md) §1.
 
+**Destructive boundary.** An agent must resolve and display the exact target,
+snapshot relevant state, explain what will be lost, and obtain affirmative human
+confirmation before `kill` or a destructive signal. The MCP signal adapter also
+requires `confirm: true` for interrupt/terminate/kill. A watcher ending is not
+proof of completion; verify inventory or terminal state under a finite bound.
+
 **How `new` decomposes on the wire.** Session create is no longer an L1
 session verb. Per
 [ADR-0030](../../ADR/0030-engine-delegated-wire-and-projection-consumers.md) §5,
@@ -265,8 +280,9 @@ then the `PHUX_SOCKET` environment variable, then the daemon default:
 
 ## 3. Targeting: the selector grammar
 
-One grammar, every targeted command — `kill`, `snapshot`, `wait`, `send-keys`,
-`run`, `ask`, `insert-pane`, `move-pane`, and `swap-pane` all share `TARGET`.
+One grammar, every targeted command — `kill`, `snapshot`, `wait`, `watch`,
+`send-keys`, `run`, `ask`, launch/spawn placement, and the three spatial verbs
+all share `TARGET`.
 It is resolved client-side against a server snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
 never parses a selector.
 
@@ -278,10 +294,11 @@ unsupported for headless commands because they have no attached-client MRU.
 A selector that names several panes (a whole session or window) narrows to a
 single pane: the focused pane when it is among the matches, else the first in
 snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
-Optionality differs per verb: `snapshot` and `wait` default `TARGET` to the
-focused session; `send-keys`, `run`, `ask`, and every spatial verb require it.
-Spatial verbs are stricter than the selected-pane tiebreak: each selector must
-match exactly one local pane.
+Optionality differs per verb: `snapshot`, `wait`, and `watch` may omit a target;
+`send-keys`, `run`, `ask`, and every spatial verb require it. `launch`/`spawn`
+use an optional target only for explicit local placement. Spatial and placement
+targets are stricter than the selected-pane tiebreak: each must resolve to one
+exact local pane.
 
 ## 4. JSON contracts (the per-verb machine shapes)
 
@@ -713,13 +730,35 @@ Stable codes include `invalid_selector`, `selector_miss`,
 `selector_not_single`, `satellite_target`, `cross_session`, `invalid_ratio`,
 `layout_missing`, `pane_not_in_layout`, and `pane_already_in_layout`.
 
+### 4.13 `phux launch --json`
+
+A successful launch returns the resolved integration identity, final argv, and
+new local terminal id:
+
+```json
+{
+  "schema_version": 1,
+  "terminal_id": 11,
+  "integration": "codex",
+  "plugin": "com.phux.agent-tools",
+  "argv": ["phux-agent-wrap.sh", "codex"]
+}
+```
+
+`phux launch --list --json` instead returns
+`{ "schema_version": 1, "integrations": [...] }`; `--print --json` returns the
+resolved `cwd`, `working_directory`, and `argv` without spawning. Placement does
+not add a second result shape: `--target`, `--split`, and `--ratio` affect the
+persisted topology while the launch JSON remains the object above.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
 
-The canonical agent pattern is read → act → wait → read: snapshot the pane,
-send input or run a command, wait for the result to land, snapshot again. A
-worked example in `sh`:
+The single-pane pattern is read → act → wait → read: snapshot the pane, send
+input or run a command, wait for the result to land, snapshot again. Every wait
+must carry a finite timeout; a CLI `watch` is an unbounded stream and must run
+under a child-process deadline. A worked example in `sh`:
 
 ```sh
 phux send-keys build "cargo test" Enter
@@ -740,6 +779,13 @@ driving an interactive or long-lived program." Because `run` mirrors the
 child's code (§5.2), `phux run ... && next` composes like a shell
 ([ADR-0022](../../ADR/0022-tool-for-agents.md) §3).
 
+The fleet extension is discover → create → place → shape → act → observe →
+surface asks → verify. See the executable
+[`examples/agents/orchestrate-placed-fleet`](../../examples/agents/orchestrate-placed-fleet):
+it launches/spawns with explicit placement, serializes topology edits, watches
+agent panes concurrently under hard bounds, and prints `C-a q` / `C-a Q` human
+guidance without changing focus.
+
 ### 5.2 Exit-code mirroring
 
 Exit codes are not uniform across verbs:
@@ -754,6 +800,8 @@ Exit codes are not uniform across verbs:
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
 | `wait` | `0` condition met; `124` on `--timeout`; `1` no server / parse / read error. |
 | `new` | `0` ok; `1` duplicate `-s` name / failure. |
+| `launch` / `spawn` | `0` spawned/resolved/listed; `1` invalid integration, placement, server, or spawn failure. |
+| `watch` | streams until Ctrl-C, EOF, or caller termination; use a subprocess bound rather than treating its eventual signal status as agent outcome. |
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
 | `workspace` | `0` ok; `1` missing git repo, invalid git output, no server for save/restore, invalid archive, or JSON render failure. |
 | `satellite` | `0` ok; `1` invalid name/endpoint, duplicate configured name, invalid config, refused registry write, or unknown satellite name. |
@@ -772,9 +820,10 @@ timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
 
 The CLI verbs here are the stable contract. The
 [OpenCode integration](./opencode.md) and [Pi integration](./pi.md) each select
-a six-tool subset and add host-specific target and lifecycle behavior; their
-guides link here instead of redefining CLI syntax. The [MCP adapter](./mcp.md)
-exposes the CLI surface over JSON-RPC stdio and documents its own divergences.
+a host-specific six-tool subset. The [MCP adapter](./mcp.md) exposes 21 strict
+tools, including launch/spawn, bounded watch, ask, spatial edits, agent state,
+and workspace parity, over JSON-RPC stdio. Adapter guides link here instead of
+redefining CLI syntax.
 [`sdk.md`](./sdk.md) documents `phux-client`, the library crate those surfaces
 are built from. These adapters are unprivileged consumers
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); the wire

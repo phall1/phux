@@ -105,6 +105,13 @@ for script in "$EXAMPLES"/*.sh; do
     run_example "$(basename "$script")" bash "$script"
 done
 
+# The fleet example needs configured agent integrations in normal use. Its
+# hermetic fake-phux smoke proves argv, bounded watcher control flow, ask
+# surfacing, and advisory focus guidance without requiring an agent binary.
+for test_script in "$EXAMPLES"/tests/*.sh; do
+    run_example "tests/$(basename "$test_script")" bash "$test_script"
+done
+
 if command -v python3 >/dev/null 2>&1; then
     run_example "agent_loop.py" python3 "$EXAMPLES/agent_loop.py"
 else

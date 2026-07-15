@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-07-11
+last-reviewed: 2026-07-15
 ---
 
 # The phux reference TUI
@@ -153,9 +153,9 @@ phux --version                # print version
 phux help [COMMAND]
 ```
 
-The agent-facing verbs — `ls`, `snapshot`, `send-keys`, `run`, `wait`,
-`watch`, `ask`, the spatial verbs above (and `new`'s create-only `--json`
-mode) — have their JSON
+The agent-facing verbs — `new`, placed `launch`/`spawn`, `ls`, `snapshot`,
+`send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial verbs above — have
+their JSON
 contracts and exit-code semantics documented in [`agents.md`](./agents.md);
 this file does not restate them.
 
@@ -203,9 +203,11 @@ calling client's attachment.
 > `config edit` is design intent.
 
 **The target convention.** The verbs that address an existing pane —
-`kill`, `snapshot`, `send-keys`, `run`, `wait`, `ask` — take the selector as a
+`kill`, `snapshot`, `send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial
+verbs — take selectors as
 **positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
-focused session). `attach` likewise takes its `[SESSION]` name
+focused session, or on `watch` for server-wide events). `attach` likewise takes
+its `[SESSION]` name
 positionally. `new` is the exception: because its trailing `[COMMAND...]`
 is a positional var-arg, the *new* session's name is the `-s`/`--session`
 flag instead, keeping the command words unambiguous. So: positional target
@@ -220,9 +222,10 @@ words. Each command's `--help` calls this out.
 **Output hygiene (for scripts and agents).** One-shot verbs print no
 banner and keep stdout clean. With `--json`, stdout carries ONLY the JSON
 document; diagnostics go to stderr with a nonzero exit, never interleaved
-into the JSON. The verbs that emit `--json` are `ls`, `snapshot`, `wait`,
-`run`, `new`, `spawn`, `config show`, `config plugins`, `config agents`,
-`config run`, `plugin`, and `satellite`. Their
+into the JSON. The agent-relevant JSON surfaces are `new`, `launch`, `spawn`,
+`ls`, `snapshot`, `run`, `wait`, JSONL `watch`, `ask`, `agent`, the three
+spatial verbs, `tag`, `config show/plugins/agents/run`, `plugin`, `workspace`,
+and `satellite`. Their
 per-verb JSON shapes and the stable exit-code semantics are owned by
 [`agents.md`](./agents.md) §3–§4 — this file does not restate them.
 
@@ -279,12 +282,12 @@ explicit `=` target is rejected with an unsupported-selector error rather than
 silently aliasing `.`. In the attached TUI, `C-a =` dispatches `last-pane`
 against a one-entry, process-local MRU; repeating it toggles between two panes,
 including panes in different windows. The MRU is neither persisted nor sent on
-the wire, matching ADR-0019's client-local focus rule. The broader focus model
-is owned by ADR-0049 on the sibling focus branch; this change depends on that
-accepted direction without duplicating the ADR here.
+the wire, matching ADR-0019's client-local focus rule and accepted ADR-0049.
+Shared topology writers never acquire focus authority.
 
 All headless commands otherwise share one grammar. `kill`, `snapshot`, `wait`,
-`send-keys`, `run`, and `ask` accept the same `TARGET` (phux-n95) and resolve it client-side
+`watch`, `send-keys`, `run`, `ask`, launch/spawn placement, and the three
+spatial verbs accept the same `TARGET` (phux-n95) and resolve it client-side
 against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
 selector. A selector that names several panes (a whole session or window)
 resolves to a single **selected pane**: the focused pane if it is among
@@ -1001,6 +1004,8 @@ line of config. The shipped prefix-table bindings:
 | `C-a w`     | `window-picker` (grouped: sessions, windows nested)      |
 | `C-a s`     | `session-picker` (`C-a a` is a kept alias)               |
 | `C-a A`     | `agent-fleet` (fleet dashboard — §5.6)                   |
+| `C-a q`     | `next-attention` (cycle asking panes, window + DFS order) |
+| `C-a Q`     | `return-from-attention` (consume the saved local origin)  |
 | `C-a C`     | `new-session`                                            |
 | `C-a ,`     | `rename-window` (interactive prompt)                     |
 | `C-a $`     | `rename-session` (interactive prompt)                    |
@@ -1031,6 +1036,8 @@ test, so this table cannot silently drift):
 | `next-pane`       |                                             |
 | `previous-pane`   |                                             |
 | `last-pane`       | jump to this attached client's previous focus |
+| `next-attention`  | cycle asking panes in deterministic window + DFS order |
+| `return-from-attention` | return once to the client-local saved origin |
 | `toggle-zoom`     |                                             |
 | `toggle-sidebar`  |                                             |
 | `copy-mode`       |                                             |

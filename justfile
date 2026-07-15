@@ -168,6 +168,11 @@ trace-attach session="default" level="phux=debug":
 examples-smoke:
     bash scripts/examples-smoke.sh
 
+# Hermetic argv/control-flow gate for the placed-fleet worked example. Uses a
+# fake phux binary, so it needs neither a server nor installed agent CLIs.
+agents-fleet-smoke:
+    bash examples/agents/tests/placed-fleet-smoke.sh
+
 # Run the checked-in plugin package through the same discover/validate/run
 # sequence documented in examples/plugins/agent-tools/README.md.
 plugin-demo:
@@ -196,7 +201,9 @@ parity-gate *SCENARIOS:
 # (sourced libs shellcheck can't follow, single-quoted heredoc-ish
 # program strings) that are correct as written. On-demand, not in `ci`.
 shellcheck:
-    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh examples/plugins/*/scripts/*.sh
+    shellcheck --severity=warning scripts/*.sh examples/agents/*.sh \
+      examples/agents/orchestrate-placed-fleet examples/agents/tests/*.sh \
+      examples/plugins/*/scripts/*.sh
 
 # Stable-cargo test for environments without nextest.
 test-cargo:

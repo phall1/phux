@@ -1,7 +1,7 @@
 ---
 audience: consumers, contributors, agents
 stability: evolving
-last-reviewed: 2026-06-06
+last-reviewed: 2026-07-15
 ---
 
 # The phux MCP adapter
@@ -12,7 +12,9 @@ agent identity, existing-pane layout, and bounded plugin/workspace operations;
 the stdio transport and lifecycle; target resolution; and the `tools/call`
 envelope.
 The structured shapes the tools return and the selector grammar are the
-shared agent surface and live in their owning docs; this file links them.
+shared agent surface and live in their owning docs; this file links them. The
+canonical orchestration loop and safety boundaries live in
+[`phux-agent-cli/SKILL.md`](../../examples/skills/phux-agent-cli/SKILL.md).
 
 ---
 
@@ -78,7 +80,7 @@ exposed through the CLI and its versioned JSON schema, not a wire service
 Two things this file does not restate, by the "one fact, one home" rule:
 
 - The structured return shapes — `ScreenState`, `RunResult`,
-  `SessionListJson` — are owned by [`agents.md`](./agents.md) §3. Each
+  `SessionListJson` — are owned by [`agents.md`](./agents.md) §4. Each
   tool below names the shape and links there.
 - The selector grammar is owned by [`tui.md`](./tui.md) §3. §2 below
   links it.
@@ -126,7 +128,8 @@ takes a `target` selector string in the **same grammar as the CLI's
 `TARGET`**, whose table and examples live in
 [`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
 (last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
-(pane), and `@N` (opaque id).
+(pane), `@N` (local opaque id), `host/@N` (satellite terminal), and `#tag`
+(tag set, where the tool permits a set).
 
 Resolution is **client-side**, exactly as the CLI resolves it
 ([ADR-0021](../../ADR/0021-control-plane-commands.md)): the adapter
@@ -140,10 +143,12 @@ attached-client focus history; callers must use `.` or an explicit target.
 `target` optionality differs per tool:
 
 - `phux_snapshot` and `phux_wait` make `target` **optional**; when absent
-  it defaults to the focused/last session (`Selector::Last`).
-- `phux_send_keys`, `phux_run`, `phux_signal`, `phux_tag`, and the spatial
-  tools require `target`. Spatial selectors must each resolve to exactly one
-  local same-session pane rather than applying the focused-pane tiebreak.
+  they default to the focused/last session (`Selector::Last`). `phux_watch`
+  also permits omission to collect server-wide events.
+- `phux_send_keys`, `phux_run`, `phux_ask`, `phux_kill`, `phux_signal`,
+  `phux_tag`, and the spatial tools require explicit targets. Spatial selectors
+  must each resolve to exactly one local same-session pane rather than applying
+  the focused-pane tiebreak.
 - `phux_launch` and `phux_spawn` use optional `target` only for explicit local
   placement. `phux_agent` uses it for pane-specific actions.
 
@@ -161,7 +166,7 @@ the literal `default`).
 Twenty-one tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all. The return shapes are the
-shared agent shapes owned by [`agents.md`](./agents.md) §3; each tool
+shared agent shapes owned by [`agents.md`](./agents.md) §4; each tool
 names its shape and links there.
 
 ### 3.1 `phux_ls`
@@ -196,7 +201,7 @@ attach or resize.
 Result: a serialized `ScreenState` — the same struct `phux snapshot`
 emits, with `cells` populated only when `cells` is true. The field
 catalog (schema version, `cursor`, `lines`, `scrollback`, the sparse
-`cells` array) is owned by [`agents.md`](./agents.md) §3.2.
+`cells` array) is owned by [`agents.md`](./agents.md) §4.2.
 
 ### 3.3 `phux_send_keys`
 
@@ -228,7 +233,7 @@ POSIX shell.
 
 Result on completion: a serialized `RunResult`
 (`{ command, exit_code, output, duration_ms, truncated }`), shape owned
-by [`agents.md`](./agents.md) §3.3.
+by [`agents.md`](./agents.md) §4.3.
 
 MCP executes the canonical `phux run --json` command. Completion returns the
 same `RunResult`; timeout emits no JSON and becomes an MCP tool error from the
@@ -244,7 +249,7 @@ Polls the resolved pane until a condition holds.
 | `target` | string | no | Selector (see §2). Defaults to focused. |
 | `until` | string | no | Succeed once a visible line contains this substring. |
 | `idle_ms` | number | no | Succeed once the screen holds still this long. |
-| `timeout_secs` | number | no | Give up after this many seconds. Default: wait forever. |
+| `timeout_secs` | number | no | Give up after this many seconds. The API default is unbounded; orchestration callers must provide a finite value. |
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Condition precedence: `until` wins when present (succeed on a substring
@@ -296,7 +301,7 @@ shells out to `phux watch --json`.
 |---|---|---|---|
 | `target` | string | no | Pane selector to watch. Omit for server-wide events. |
 | `max_events` | number | no | Return after collecting this many events. |
-| `timeout_secs` | number | no | Return after this many seconds. **Recommended** — without it (and without `max_events`) the call blocks until the server exits. |
+| `timeout_secs` | number | no | Return after this many seconds. Canonical orchestration always supplies this and/or `max_events`; without either the call blocks until the server exits. |
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Result: `{ events: [ { event, terminal?, ...payload } ], count: N }`, the
@@ -340,7 +345,10 @@ the target PTY.
 | `socket` | string | no | Override the UDS path (see §2). |
 
 Result: `{ event: "asked", terminal: "@N", id, question, suggestions,
-elapsed_seconds }`, matching the CLI's `phux ask --json` projection.
+elapsed_seconds }`, matching the CLI's `phux ask --json` projection. This is
+advisory attention, not focus authority: present the payload to the human and
+point them to TUI `C-a q` (next ask) / `C-a Q` (return); do not synthesize those
+keys from MCP.
 
 ### 3.11 `phux_plugin_workspace`
 
@@ -382,13 +390,26 @@ KiB, and kill the child on cancellation or deadline.
 | `phux_workspace` | `phux workspace` | `inspect`, `save`, or `restore`; bounded local paths and canonical JSON where the CLI provides it. |
 
 Every schema in this parity table sets `additionalProperties: false`, and
-handlers enforce that again before side effects. There are deliberately no MCP `take`/`give` tools:
+handlers enforce that again before side effects. Before `phux_kill`, a caller
+must display the resolved target and obtain explicit human confirmation; the
+tool does not add an implicit confirmation protocol. `phux_signal` enforces
+`confirm: true` for interrupt/terminate/kill in addition to that human step.
+There are deliberately no MCP `take`/`give` tools:
 the CLI lease belongs to the short-lived subprocess connection, so advertising
 a persistent lease would be dishonest. There is no headless focus tool because
 focus is client-local. `attach`, `server`, `stdio-bridge`, and `upgrade` are
 interactive/daemon/operator lifecycles; `pair` and satellite registry mutation
 handle credentials; plugin installation and config editing mutate local trust
 configuration. Those remain intentionally outside the model-facing tool set.
+
+### Composing the tools safely
+
+The canonical sequence is `phux_ls` → `phux_new` → placed `phux_launch` or
+`phux_spawn` → optional exact spatial edits → `phux_run`/`phux_send_keys` →
+bounded `phux_wait` plus bounded `phux_watch` → surface `phux_ask` events →
+re-read state. Serialize topology writes because layout metadata is
+last-write-wins. No tool in this sequence moves a human's local focus, stores
+remote credentials, grants a persistent input lease, or schedules future work.
 
 ---
 

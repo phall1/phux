@@ -3,13 +3,15 @@
 Runnable, self-documenting scripts that show an agent operating phux
 **purely through the `phux` binary** — no client library, no TTY, no
 tmux. The CLI *is* the agent surface (ADR-0022); anything that can spawn
-a process and read JSON can drive a real terminal this way.
+a process and read JSON can drive a real terminal this way. The placed-fleet
+example extends the single-pane loop into launch, topology, concurrent bounded
+watching, and advisory human attention.
 
-Each script stands up its own throwaway server on a private socket (see
-[`lib.sh`](./lib.sh)) so running one never touches the user's real
-one-per-user server. **A production agent skips all of that** and just
-runs `phux <verb>` against the user's existing server, with no
-`--socket`.
+The introductory `01`–`04` scripts and `agent_loop.py` stand up their own
+throwaway server on a private socket (see [`lib.sh`](./lib.sh)). The fleet
+example is intentionally production-shaped: it uses the caller's normal socket,
+creates a named session, and leaves that fleet running. Set `PHUX_SOCKET` to a
+private server when experimenting.
 
 ## The loop these examples teach
 
@@ -34,12 +36,15 @@ backgrounded work where there is no single "command done" moment.
 | [`03-send-keys-and-wait.sh`](./03-send-keys-and-wait.sh) | `send-keys`, `wait --until`, `wait --idle`, `--timeout` | Structured input; blocking on a condition; driving a REPL. |
 | [`04-read-act-wait-loop.sh`](./04-read-act-wait-loop.sh) | all of the above | The full read+act+wait loop against an interactive prompt. |
 | [`agent_loop.py`](./agent_loop.py) | all of the above | The same loop as code: subprocess calls + JSON parsing, no phux library. |
+| [`orchestrate-placed-fleet`](./orchestrate-placed-fleet) | `new`, placed `launch`/`spawn`, `move-pane`, `swap-pane`, concurrent `watch` | A small placed fleet; bounded event subprocesses; blocked-ask surfacing; human `C-a q` / `C-a Q` guidance without moving focus. |
 
 ## Running them
 
 ```sh
 bash examples/agents/01-ls-and-snapshot.sh
 python3 examples/agents/agent_loop.py
+PHUX_BUILDER_INTEGRATION=codex PHUX_REVIEWER_INTEGRATION=claude \
+  examples/agents/orchestrate-placed-fleet
 ```
 
 They locate a `phux` binary in this order: `$PHUX`, then a `phux` on
@@ -49,7 +54,18 @@ libghostty-vt needs). The first build can be slow; subsequent runs reuse
 it.
 
 Only the bash scripts depend on `bash` + `python3` (used purely to parse
-JSON in the output-extraction snippets). `phux` itself needs neither.
+JSON in the output-extraction snippets). `phux` itself needs neither. The fleet
+script expects two integration ids from `phux launch --list`; override them with
+`PHUX_BUILDER_INTEGRATION` and `PHUX_REVIEWER_INTEGRATION`.
+
+Its hermetic gate needs no server or agents:
+
+```sh
+just agents-fleet-smoke
+```
+
+That gate substitutes a fake `phux` and asserts the complete argv/control flow,
+watch bounds, ask rendering, and absence of focus/input-authority commands.
 
 ## Two gotchas the scripts bake in
 
