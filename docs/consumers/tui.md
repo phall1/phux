@@ -1236,7 +1236,7 @@ Selection modes — a two-corner rectangle interpreted as one of:
   first and last rows.
 - **Line**: whole lines.
 - **Rect**: rectangular (block/columnar) selection — the column band on every
-  row in the span. The mode-cycle keybind rotates Char → Line → Rect. The
+  row in the span. **Tab** (in copy-mode) rotates Char → Line → Rect. The
   on-screen highlight and the extracted text are computed from the same
   `SelectionRect`, so a block selection copies exactly the band it highlights.
 

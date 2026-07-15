@@ -317,6 +317,24 @@ mod tests {
     }
 
     #[test]
+    fn extract_block_normalizes_inverted_column_corners() {
+        // Down-and-left block drag: anchor (row 0, col 5) to cursor (row 3,
+        // col 2). `CellRange::from_points` orders corners lexicographically by
+        // (row, col), so the CopyRequest arrives with start_col=5 > end_col=2.
+        // The highlight side normalizes the band to [2, 5] per row
+        // (`contains_block_normalizes_inverted_column_corners` in
+        // `selection.rs`); the extraction side relies on libghostty's own
+        // per-axis column normalization for rectangular selections. This test
+        // pins the two sides to the same rectangle: the copied text must be
+        // exactly the [2, 5] column band on rows 0..=3, matching the cells
+        // the overlay highlighted.
+        let mut t = fresh(20, 4);
+        t.vt_write(b"0123456789\r\nabcdefghij\r\nABCDEFGHIJ\r\nqrstuvwxyz");
+        let text = extract_selection_text(&t, block_req(0, 5, 3, 2)).expect("inverted block text");
+        assert_eq!(text, "2345\ncdef\nCDEF\nstuv");
+    }
+
+    #[test]
     fn resolve_and_copy_emits_osc52_for_a_selection() {
         let mut t = fresh(20, 3);
         t.vt_write(b"hi");
