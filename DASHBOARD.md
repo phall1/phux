@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:42:20Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:45:29Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 10 | 100% | 35s | 44s | 21 |
-| conventional-commits | 35 | 91% | 16s | 19s | 7 |
+| conventional-commits | 38 | 92% | 16s | 19s | 7 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 09:44 | conventional-commits | pull_request | swarm/mcp-registration | success | 16s | 12s |
+| 2026-07-15 09:44 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 17s | 11s |
+| 2026-07-15 09:44 | conventional-commits | pull_request | swarm/shared-state-tags | success | 15s | 11s |
 | 2026-07-15 09:41 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 09:41 | conventional-commits | pull_request | release-please--branches--main-- | success | 13s | 11s |
 | 2026-07-15 09:41 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -144,9 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:02 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 15s | 11s |
 | 2026-07-15 09:02 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 13m15s | 17m16s |
 | 2026-07-15 08:59 | conventional-commits | pull_request | feat/pi-extension | success | 21s | 16s |
-| 2026-07-15 08:59 | ci | pull_request | feat/pi-extension | success | 16m52s | 21m07s |
-| 2026-07-15 08:44 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-15 08:44 | release-please | push | main | success | 7m03s | 17m10s |
 
 ---
 
