@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T10:11:46Z",
+  "generated_at": "2026-07-15T10:14:14Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -91,6 +91,15 @@
       "created_at": "2026-07-15T10:00:09Z",
       "duration_s": 24,
       "runner_s": 22
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/opencode-integration",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:00:09Z",
+      "duration_s": 831,
+      "runner_s": 1099
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T09:45:01Z",
       "duration_s": 224,
       "runner_s": 433
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "swarm/mcp-registration",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:44:59Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 66,
-      "success_rate": 62,
-      "median_s": 795,
+      "runs": 67,
+      "success_rate": 63,
+      "median_s": 797,
       "p95_s": 1011,
-      "runner_minutes": 808
+      "runner_minutes": 826
     },
     {
       "workflow": "stress",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 65,
+      "runs": 66,
       "median_queue_s": 2,
       "median_s": 788,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 64,
+      "runs": 65,
       "median_queue_s": 2,
-      "median_s": 156,
-      "p95_s": 262
+      "median_s": 157,
+      "p95_s": 263
     },
     {
       "job": "detect docs-only",
-      "runs": 66,
+      "runs": 67,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,7 +342,7 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 775,
+      "median_s": 770,
       "n": 13
     },
     {
@@ -354,7 +354,7 @@
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 20,
+      "median_s": 21,
       "n": 19
     },
     {
@@ -386,14 +386,14 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 28,
-      "hit_rate": 39
+      "samples": 29,
+      "hit_rate": 38
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 26,
-      "hit_rate": 42
+      "samples": 27,
+      "hit_rate": 44
     },
     {
       "workflow": "stress",
@@ -408,42 +408,42 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 119,
-      "n": 23
+      "n": 24
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 23
+      "n": 24
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 23
+      "n": 24
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 25
+      "n": 26
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 715,
-      "n": 20
+      "n": 21
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 8,
-      "n": 19
+      "n": 20
     },
     {
       "workflow": "observatory",
@@ -468,17 +468,17 @@
     }
   ],
   "slow_tests": {
-    "sha": "184ecf529",
+    "sha": "ba069d848",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 108.074
+        "seconds": 113.869
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 28.857
+        "seconds": 28.633
       },
       {
         "binary": "phux-server::agent_detect",
@@ -498,7 +498,7 @@
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.515
+        "seconds": 3.516
       },
       {
         "binary": "phux-server::agent_events",
