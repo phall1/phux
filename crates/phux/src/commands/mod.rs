@@ -66,6 +66,7 @@ pub(crate) mod ls;
 pub(crate) mod new;
 pub(crate) mod overlay;
 pub(crate) mod pair;
+pub(crate) mod paste;
 pub(crate) mod plugin;
 pub(crate) mod rename;
 pub(crate) mod run;
@@ -636,6 +637,47 @@ pub(crate) enum Command {
         /// Keys to send: named keys and/or literal strings, in order.
         #[arg(trailing_var_arg = true, required = true)]
         keys: Vec<String>,
+
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Paste text into a pane.
+    ///
+    /// Delivers the payload as ONE paste event to the resolved pane
+    /// (`ROUTE_INPUT`), so the live pane is neither attached nor resized.
+    /// When the pane's program has bracketed paste (DEC mode 2004) switched
+    /// on, the server wraps the payload in paste markers and the program
+    /// receives it as a single block — auto-indent stays off and multiline
+    /// text arrives intact, unlike `send-keys`, which types character by
+    /// character. Without the mode, the raw bytes are delivered as if typed.
+    ///
+    /// A paste INSERTS; it does not SUBMIT. Paste-aware shells and REPLs
+    /// buffer the block until a real Enter — follow with
+    /// `phux send-keys TARGET Enter` to run what you pasted.
+    ///
+    /// TEXT is the payload; omit it to read the payload from stdin.
+    /// Payloads are trusted by default (you vouch for content you
+    /// composed); `--untrusted` opts into the server's safety gate.
+    ///
+    ///   phux paste demo 'SELECT count(*) FROM users;'
+    ///   git diff | phux paste review
+    #[command(about = "Paste text into a pane (bracketed when the pane asks for it)")]
+    Paste {
+        /// Target selector: session, session:window, session:window.pane,
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
+        target: String,
+
+        /// Text to paste. Omit to read the payload from stdin.
+        text: Option<String>,
+
+        /// Mark the payload untrusted: the server classifies it and the
+        /// pane's untrusted-paste policy (reject by default) may silently
+        /// drop an unsafe payload — e.g. anything multiline. Without this
+        /// flag the paste is trusted and forwarded verbatim.
+        #[arg(long)]
+        untrusted: bool,
 
         /// Override the UDS path.
         #[arg(long)]

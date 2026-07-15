@@ -137,6 +137,7 @@ phux rename SESSION NEW-NAME  # rename a session
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)
 phux snapshot --rendered      # dump the client's composited multi-pane view
 phux send-keys TARGET KEYS... # send keys to a pane (scripting)
+phux paste TARGET [TEXT]      # paste text into a pane (TEXT or stdin)
 phux run TARGET CMD...        # run a command in a pane, capture $?
 phux wait [TARGET]            # poll a pane until a condition holds
 phux watch [TARGET]           # stream a pane's live events
@@ -154,7 +155,7 @@ phux help [COMMAND]
 ```
 
 The agent-facing verbs — `new`, placed `launch`/`spawn`, `ls`, `snapshot`,
-`send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial verbs above — have
+`send-keys`, `paste`, `run`, `wait`, `watch`, `ask`, and the spatial verbs above — have
 their JSON
 contracts and exit-code semantics documented in [`agents.md`](./agents.md);
 this file does not restate them.
@@ -203,8 +204,8 @@ calling client's attachment.
 > `config edit` is design intent.
 
 **The target convention.** The verbs that address an existing pane —
-`kill`, `snapshot`, `send-keys`, `run`, `wait`, `watch`, `ask`, and the spatial
-verbs — take selectors as
+`kill`, `snapshot`, `send-keys`, `paste`, `run`, `wait`, `watch`, `ask`, and the
+spatial verbs — take selectors as
 **positional** `TARGET` (omitted on `snapshot`/`wait` to mean the
 focused session, or on `watch` for server-wide events). `attach` likewise takes
 its `[SESSION]` name
@@ -286,7 +287,7 @@ the wire, matching ADR-0019's client-local focus rule and accepted ADR-0049.
 Shared topology writers never acquire focus authority.
 
 All headless commands otherwise share one grammar. `kill`, `snapshot`, `wait`,
-`watch`, `send-keys`, `run`, `ask`, launch/spawn placement, and the three
+`watch`, `send-keys`, `paste`, `run`, `ask`, launch/spawn placement, and the three
 spatial verbs accept the same `TARGET` (phux-n95) and resolve it client-side
 against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
 selector. A selector that names several panes (a whole session or window)

@@ -72,6 +72,7 @@ mod help_inventory;
           swap-pane  Swap two existing pane leaves\n  \
           rename     Rename a session\n  \
           send-keys  Send keys to a pane\n  \
+          paste      Paste text into a pane (bracketed when the pane asks)\n  \
           run        Run a command in a pane and capture its exit code\n  \
           wait       Block until a pane meets a condition\n  \
           ask        Report an agent ask event for a pane\n\n\
@@ -360,6 +361,12 @@ fn main() -> ExitCode {
             keys,
             socket,
         }) => commands::send_keys::run_send_keys(&target, &keys, socket),
+        Some(Command::Paste {
+            target,
+            text,
+            untrusted,
+            socket,
+        }) => commands::paste::run_paste(&target, text, untrusted, socket),
         Some(Command::Wait {
             session,
             until,
@@ -496,6 +503,64 @@ mod tests {
             ])
             .is_ok()
         );
+    }
+
+    /// `phux paste TARGET [TEXT]`: TEXT is optional (omitted ⇒ stdin),
+    /// trust defaults to trusted, and `--untrusted`/`--socket` are flags
+    /// that must precede nothing in particular (no trailing var-arg).
+    #[test]
+    fn paste_parses_text_arg_stdin_form_and_untrusted_flag() {
+        // Explicit TEXT argument.
+        let cli = Cli::try_parse_from(["phux", "paste", "work", "hello world"])
+            .expect("`phux paste work TEXT` parses");
+        let Some(Command::Paste {
+            target,
+            text,
+            untrusted,
+            socket,
+        }) = cli.command
+        else {
+            panic!("expected Paste");
+        };
+        assert_eq!(target, "work");
+        assert_eq!(text.as_deref(), Some("hello world"));
+        assert!(!untrusted, "trusted is the default");
+        assert_eq!(socket, None);
+
+        // TEXT omitted ⇒ the payload comes from stdin.
+        let cli = Cli::try_parse_from(["phux", "paste", "work:1.0"])
+            .expect("`phux paste TARGET` (stdin form) parses");
+        let Some(Command::Paste { target, text, .. }) = cli.command else {
+            panic!("expected Paste");
+        };
+        assert_eq!(target, "work:1.0");
+        assert_eq!(text, None, "omitted TEXT means stdin");
+
+        // `--untrusted` and `--socket` parse alongside both forms.
+        let cli = Cli::try_parse_from([
+            "phux",
+            "paste",
+            "--untrusted",
+            "--socket",
+            "/tmp/phux.sock",
+            "@3",
+            "payload",
+        ])
+        .expect("flags parse");
+        let Some(Command::Paste {
+            untrusted, socket, ..
+        }) = cli.command
+        else {
+            panic!("expected Paste");
+        };
+        assert!(untrusted);
+        assert_eq!(
+            socket.as_deref(),
+            Some(std::path::Path::new("/tmp/phux.sock"))
+        );
+
+        // A target is required.
+        assert!(Cli::try_parse_from(["phux", "paste"]).is_err());
     }
 
     #[test]

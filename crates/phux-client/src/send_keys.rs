@@ -19,6 +19,7 @@ use std::path::Path;
 
 use phux_protocol::TerminalId;
 use phux_protocol::input::InputEvent;
+use phux_protocol::input::paste::{PasteEvent, PasteTrust};
 use phux_protocol::wire::frame::{AttachTarget, Command, CommandResult, CommandValue, StateScope};
 use phux_protocol::wire::info::SessionSnapshot;
 
@@ -182,6 +183,53 @@ pub async fn send(
 pub async fn send_to(socket: &Path, pane: TerminalId, keys: &[String]) -> Result<(), AttachError> {
     let mut conn = Connection::connect(socket).await?;
     route_keys(&mut conn, &pane, keys).await
+}
+
+/// Paste a payload into a pre-resolved `pane` via the side-effect-free
+/// `ROUTE_INPUT` route.
+///
+/// The paste sibling of [`send_to`]: exactly one [`InputEvent::Paste`]
+/// carrying `data` and `trust` rides `ROUTE_INPUT`, so nothing attaches,
+/// nothing subscribes, and the live pane keeps its dimensions. The server
+/// owns the encoding: when the pane's program has bracketed paste (DEC
+/// mode 2004) switched on, the payload is wrapped in `ESC[200~`/`ESC[201~`
+/// markers; otherwise the bytes are delivered raw (`docs/spec/input.md`
+/// §5).
+///
+/// Trust is the caller's claim about the payload: a
+/// [`PasteTrust::Trusted`] paste is forwarded verbatim, while a
+/// [`PasteTrust::Untrusted`] one is classified server-side and the pane's
+/// untrusted-paste policy (reject by default) may drop it silently — the
+/// `ROUTE_INPUT` still acks `Ok`.
+///
+/// # Errors
+///
+/// Propagates [`AttachError`] from the connection or the `ROUTE_INPUT`
+/// ack; an unknown pane id surfaces as [`AttachError::Refused`] from the
+/// server.
+pub async fn paste_to(
+    socket: &Path,
+    pane: TerminalId,
+    data: Vec<u8>,
+    trust: PasteTrust,
+) -> Result<(), AttachError> {
+    let mut conn = Connection::connect(socket).await?;
+    match command(
+        &mut conn,
+        1,
+        Command::RouteInput {
+            terminal_id: pane,
+            event: InputEvent::Paste(PasteEvent { trust, data }),
+        },
+    )
+    .await?
+    {
+        CommandResult::Ok => Ok(()),
+        CommandResult::Error { message, .. } => Err(AttachError::Refused(message)),
+        other => Err(AttachError::Protocol(format!(
+            "unexpected ROUTE_INPUT result: {other:?}"
+        ))),
+    }
 }
 
 /// Deliver each built [`InputEvent`] to `pane` over `conn` via `ROUTE_INPUT`.
