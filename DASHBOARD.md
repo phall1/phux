@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:15:31Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:16:12Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 12 | 100% | 36s | 48s | 22 |
-| conventional-commits | 57 | 91% | 16s | 20s | 11 |
+| conventional-commits | 58 | 91% | 16s | 20s | 11 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 10:15 | conventional-commits | pull_request | swarm/layout-cli | success | 14s | 12s |
 | 2026-07-15 10:15 | conventional-commits | pull_request | swarm/spawn-placement | success | 18s | 13s |
 | 2026-07-15 10:14 | conventional-commits | pull_request | swarm/mru-selector | success | 19s | 16s |
 | 2026-07-15 10:14 | conventional-commits | pull_request | feat/opencode-integration | success | 13s | 11s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:48 | ci | pull_request | swarm/remove-agent-facade | success | 16m07s | 18m11s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | swarm/shared-state-tags | success | 12s | 10s |
 | 2026-07-15 09:48 | conventional-commits | pull_request | fix/client-local-focus | success | 13s | 10s |
-| 2026-07-15 09:48 | ci | pull_request | fix/client-local-focus | cancelled | 8m35s | 12m27s |
 
 ---
 
