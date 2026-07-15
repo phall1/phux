@@ -534,6 +534,10 @@ impl ServerRuntime {
         // wire `command` (or fall back to `default_shell_command`), not
         // inherit naked-`phux`'s launcher. So the override stays `None`.
         state.with_mut(|s| s.set_attach_create_pty(seed_with_pty, None));
+        // Mirror the listening socket path into shared state so every pane
+        // spawn site injects it as `PHUX_SOCKET` (phux-cufw) — an in-pane
+        // `phux` then targets this server even off the default socket path.
+        state.with_mut(|s| s.set_server_socket_path(socket_path.clone()));
         // Mirror `defaults.history-limit` into shared state so the
         // attach-time creation path (`CreateIfMissing`) and
         // `SPAWN_TERMINAL` build their panes with the configured cap.

@@ -153,8 +153,12 @@ pub fn apply_term(cmd: &mut CommandBuilder, term: &str) {
 }
 
 /// Inject `PHUX_TERMINAL_ID` (phux-w7mj) — the spawned pane's own local
-/// wire id — into `cmd`'s environment so a process running inside the
-/// pane can self-target on the phux wire with zero configuration.
+/// wire id — into `cmd`'s environment.
+///
+/// A process running inside the pane uses it to name itself on the phux
+/// wire. The id names WHICH pane but not WHICH server; zero-config
+/// self-targeting needs the pair, so every spawn site applies
+/// [`apply_server_socket`] alongside this (phux-cufw).
 ///
 /// The agent-record wrapper (`examples/plugins/agent-tools`) reads this
 /// var as an `@N` selector to attribute its records to the pane it runs
@@ -173,6 +177,23 @@ pub fn apply_terminal_id(
 ) {
     if let Some(id) = wire_terminal_id.local_id() {
         cmd.env("PHUX_TERMINAL_ID", id.to_string());
+    }
+}
+
+/// Inject `PHUX_SOCKET` (phux-cufw) — the UDS path the spawning server
+/// listens on — so an in-pane `phux` verb resolves the pane's own server.
+///
+/// Without it, a server bound to a non-default socket spawns panes whose
+/// bare `phux` invocations silently resolve the default socket path and
+/// talk to a different server: `PHUX_TERMINAL_ID` names WHICH pane, this
+/// names WHICH server, and only the pair identifies a pane.
+///
+/// `None` (state built without the runtime mirror, e.g. state-only
+/// tests) leaves the child environment untouched, preserving whatever
+/// `PHUX_SOCKET` the daemon itself inherited.
+pub fn apply_server_socket(cmd: &mut CommandBuilder, socket_path: Option<&std::path::Path>) {
+    if let Some(path) = socket_path {
+        cmd.env("PHUX_SOCKET", path.as_os_str());
     }
 }
 
