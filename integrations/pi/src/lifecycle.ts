@@ -294,7 +294,7 @@ export function registerPhuxLifecycle(
   pi.on("session_start", (event: SessionStartEvent, ctx: ExtensionContext) => {
     lifecycle.start(
       ctx.sessionManager.getSessionId(),
-      store.snapshot.selection,
+      store.snapshot.availability === "available" ? store.snapshot.selection : null,
       event.reason === "reload",
     );
   });

@@ -113,6 +113,26 @@ test("reused pane ids with different ownership are stale", async () => {
   );
 });
 
+test("listeners receive only ownership-validated available targets", async () => {
+  let inventory: readonly AgentPane[] = [pane];
+  const store = new PhuxTargetStore(
+    { appendEntry: () => {} },
+    { agentList: async () => ({ agents: inventory }) },
+  );
+  const published: Array<PhuxTargetSelection | null> = [];
+  store.subscribe((selection) => published.push(selection));
+
+  store.restoreFromBranch([{ type: "custom", customType: PHUX_TARGET_ENTRY, data: saved }]);
+  assert.deepEqual(published, []);
+  await store.refresh();
+  assert.deepEqual(published, [saved]);
+
+  inventory = [{ ...pane, session: "foreign" }];
+  await store.refresh();
+  assert.deepEqual(published, [saved, null]);
+  assert.equal(store.snapshot.availability, "stale");
+});
+
 test("inventory failures preserve the target and expose unavailable state", async () => {
   const store = new PhuxTargetStore(
     { appendEntry: () => {} },

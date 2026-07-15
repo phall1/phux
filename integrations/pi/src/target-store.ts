@@ -42,6 +42,7 @@ export class PhuxTargetStore {
   private snapshotValue: PhuxTargetSnapshot = { selection: null, availability: "unselected" };
   private panesValue: readonly AgentPane[] = [];
   private readonly listeners = new Set<PhuxTargetListener>();
+  private publishedSelection: PhuxTargetSelection | null = null;
 
   constructor(
     private readonly persistence: TargetPersistence,
@@ -62,7 +63,6 @@ export class PhuxTargetStore {
   }
 
   restoreFromBranch(entries: readonly BranchEntry[]): void {
-    const previous = this.snapshotValue.selection;
     let restored: PhuxTargetSelection | null = null;
     for (let index = entries.length - 1; index >= 0; index--) {
       const entry = entries[index];
@@ -74,7 +74,7 @@ export class PhuxTargetStore {
     this.snapshotValue = restored === null
       ? { selection: null, availability: "unselected" }
       : { selection: restored, availability: "unavailable", reason: "target has not been checked yet" };
-    if (!sameSelection(previous, restored)) this.notifySelection(restored);
+    this.publishAvailableSelection();
   }
 
   async refresh(signal?: AbortSignal): Promise<PhuxTargetSnapshot> {
@@ -110,6 +110,7 @@ export class PhuxTargetStore {
         reason: error instanceof Error ? error.message : String(error),
       };
     }
+    this.publishAvailableSelection();
     return this.snapshotValue;
   }
 
@@ -137,13 +138,17 @@ export class PhuxTargetStore {
 
   private persist(selection: PhuxTargetSelection): PhuxTargetSelection {
     this.persistence.appendEntry(PHUX_TARGET_ENTRY, selection);
-    const changed = !sameSelection(this.snapshotValue.selection, selection);
     this.snapshotValue = { selection, availability: "available" };
-    if (changed) this.notifySelection(selection);
+    this.publishAvailableSelection();
     return selection;
   }
 
-  private notifySelection(selection: PhuxTargetSelection | null): void {
+  private publishAvailableSelection(): void {
+    const selection = this.snapshotValue.availability === "available"
+      ? this.snapshotValue.selection
+      : null;
+    if (sameSelection(this.publishedSelection, selection)) return;
+    this.publishedSelection = selection;
     for (const listener of this.listeners) listener(selection);
   }
 }
