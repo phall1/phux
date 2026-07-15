@@ -1,7 +1,43 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T09:48:02Z",
+  "generated_at": "2026-07-15T09:48:50Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "swarm/remove-agent-facade",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:48:25Z",
+      "duration_s": 18,
+      "runner_s": 15
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "swarm/shared-state-tags",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:48:24Z",
+      "duration_s": 12,
+      "runner_s": 10
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/client-local-focus",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:48:24Z",
+      "duration_s": 13,
+      "runner_s": 10
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "swarm/mcp-registration",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:48:23Z",
+      "duration_s": 14,
+      "runner_s": 11
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -235,42 +271,6 @@
       "created_at": "2026-07-15T09:16:43Z",
       "duration_s": 43,
       "runner_s": 38
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:16:42Z",
-      "duration_s": 1011,
-      "runner_s": 1261
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/watch-dirty-idle-starvation",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:16:04Z",
-      "duration_s": 19,
-      "runner_s": 16
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "fix/watch-dirty-idle-starvation",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:16:04Z",
-      "duration_s": 1009,
-      "runner_s": 1252
-    },
-    {
-      "workflow": "stress",
-      "event": "schedule",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:14:25Z",
-      "duration_s": 1335,
-      "runner_s": 1331
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 38,
-      "success_rate": 92,
+      "runs": 42,
+      "success_rate": 93,
       "median_s": 16,
       "p95_s": 19,
-      "runner_minutes": 7
+      "runner_minutes": 8
     }
   ],
   "ci_jobs_30d": [

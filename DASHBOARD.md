@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:48:02Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:48:50Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 10 | 100% | 35s | 44s | 21 |
-| conventional-commits | 38 | 92% | 16s | 19s | 7 |
+| conventional-commits | 42 | 93% | 16s | 19s | 8 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 09:48 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 18s | 15s |
+| 2026-07-15 09:48 | conventional-commits | pull_request | swarm/shared-state-tags | success | 12s | 10s |
+| 2026-07-15 09:48 | conventional-commits | pull_request | fix/client-local-focus | success | 13s | 10s |
+| 2026-07-15 09:48 | conventional-commits | pull_request | swarm/mcp-registration | success | 14s | 11s |
 | 2026-07-15 09:44 | conventional-commits | pull_request | swarm/mcp-registration | success | 16s | 12s |
 | 2026-07-15 09:44 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 17s | 11s |
 | 2026-07-15 09:44 | conventional-commits | pull_request | swarm/shared-state-tags | success | 15s | 11s |
@@ -143,10 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:17 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
 | 2026-07-15 09:17 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 17s |
 | 2026-07-15 09:16 | release-please | push | main | success | 43s | 38s |
-| 2026-07-15 09:16 | ci | push | main | success | 16m51s | 21m01s |
-| 2026-07-15 09:16 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 19s | 16s |
-| 2026-07-15 09:16 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 16m49s | 20m52s |
-| 2026-07-15 09:14 | stress | schedule | main | success | 22m15s | 22m11s |
 
 ---
 
