@@ -377,42 +377,150 @@ pub(crate) fn run_attach(session: Option<String>, socket: Option<PathBuf>) -> Ex
     }
 }
 
+/// Stderr hint appended when a non-loopback dial got no answer at all —
+/// the failure mode of an overlay network (Tailscale/WireGuard) that is
+/// down on either end. Six-space continuation indent matches the `phux:`
+/// multi-line hint convention above.
+const OVERLAY_REACHABILITY_HINT: &str = "      The server did not answer or its name could not be resolved; credentials were never checked.\n      If the host lives on an overlay network (Tailscale/WireGuard), confirm the overlay is up on both ends.";
+
+/// Decide whether a failed attach earns [`OVERLAY_REACHABILITY_HINT`]:
+/// only a reachability failure ([`AttachError::Unreachable`]) on a
+/// non-loopback target. Pin and auth failures ([`AttachError::Connect`])
+/// mean a host answered, so the hint would mislead; loopback never
+/// involves an overlay.
+fn reachability_hint(err: &AttachError, loopback: bool) -> Option<&'static str> {
+    (!loopback && matches!(err, AttachError::Unreachable(_))).then_some(OVERLAY_REACHABILITY_HINT)
+}
+
+/// Split a `--quic` `HOST:PORT` dial target into host and port. HOST may be
+/// a DNS name, an IPv4 literal, or a bracketed IPv6 literal (`[::1]:8788`);
+/// brackets stay on the host half for the caller to trim.
+fn split_host_port(target: &str) -> Result<(&str, u16), String> {
+    let (host, port) = target.rsplit_once(':').ok_or_else(|| {
+        format!("--quic target '{target}' is missing a port (expected HOST:PORT)")
+    })?;
+    if host.is_empty() {
+        return Err(format!(
+            "--quic target '{target}' is missing a host (expected HOST:PORT)"
+        ));
+    }
+    let port = port
+        .parse::<u16>()
+        .map_err(|err| format!("--quic target '{target}' has an invalid port: {err}"))?;
+    Ok((host, port))
+}
+
+/// Split and resolve a `--quic` `HOST:PORT` target to its first address,
+/// alongside the default TLS server name for the dial. Prints the failure —
+/// plus [`OVERLAY_REACHABILITY_HINT`] when a DNS name failed to resolve, the
+/// `MagicDNS`-down shape of an overlay outage — and returns the failure exit
+/// code on error.
+///
+/// Resolution happens before the trust decision on purpose: the
+/// loopback-vs-routable choice keys on the **resolved** address.
+/// Multi-address fallback is out of scope — the first resolved address wins.
+fn resolve_quic_target(
+    rt: &tokio::runtime::Runtime,
+    target: &str,
+) -> Result<(std::net::SocketAddr, String), ExitCode> {
+    let (host, port) = match split_host_port(target) {
+        Ok(parts) => parts,
+        Err(err) => {
+            eprintln!("phux: {err}");
+            return Err(ExitCode::FAILURE);
+        }
+    };
+    let bare_host = host.trim_matches(['[', ']']);
+    let host_is_ip_literal = bare_host.parse::<std::net::IpAddr>().is_ok();
+
+    let resolved = rt
+        .block_on(tokio::net::lookup_host((bare_host, port)))
+        .map(|mut addrs| addrs.next());
+    let failure = match resolved {
+        Ok(Some(addr)) => {
+            // The TLS server name defaults to the dialed hostname when one
+            // was given (conventional SNI); an IP-literal target keeps the
+            // historical `localhost` default, matching the server's
+            // self-signed SANs.
+            let server_name = if host_is_ip_literal {
+                "localhost".to_owned()
+            } else {
+                bare_host.to_owned()
+            };
+            return Ok((addr, server_name));
+        }
+        Ok(None) => "name resolution returned no addresses".to_owned(),
+        Err(err) => format!("name resolution failed: {err}"),
+    };
+    eprintln!("phux: QUIC attach to {target} failed: {failure}");
+    // Only a DNS name reaches here (an IP literal resolves without touching
+    // DNS), and a name that fails to resolve is the overlay-down
+    // reachability failure — MagicDNS unreachable when Tailscale is stopped
+    // on this end — so it earns the same hint an unanswered dial does.
+    if !host_is_ip_literal {
+        eprintln!("{OVERLAY_REACHABILITY_HINT}");
+    }
+    Err(ExitCode::FAILURE)
+}
+
 /// Attach over QUIC (`phux-y8v6`, ADR-0007) to a `phux server --quic`
-/// listener at `addr`.
+/// listener at `target` (`HOST:PORT`; a DNS name — e.g. a Tailscale `MagicDNS`
+/// name — resolves before dialing, mirroring the hub's satellite dialer).
 ///
 /// Unlike the UDS path there is no auto-spawn — the server lives on another
 /// host (or another address) and the user points at it explicitly. TLS trust is
-/// resolved up front:
+/// resolved up front, keyed on the **resolved** address:
 ///
 /// * an explicit `--cert-fingerprint` pins the server's leaf certificate (the
 ///   value `phux pair` prints), the trust anchor for any routable host;
-/// * a **loopback** `addr` with no fingerprint falls back to skip-verify (local
-///   dev — TLS still runs, but there is no untrusted network path to MITM);
-/// * a **routable** `addr` with no fingerprint is refused, rather than silently
-///   trusting whatever certificate answers.
+/// * a target resolving to **loopback** with no fingerprint falls back to
+///   skip-verify (local dev — TLS still runs, but there is no untrusted
+///   network path to MITM);
+/// * a target resolving to a **routable** address with no fingerprint is
+///   refused, rather than silently trusting whatever certificate answers.
 ///
 /// With no session name this runs the same `Last` → `CreateIfMissing` cascade
 /// the naked path does; an explicit name attaches to that session only.
+#[allow(
+    clippy::needless_pass_by_value,
+    reason = "clap hands over the owned HOST:PORT value; a &str signature would only push the borrow into main.rs's dispatch"
+)]
 pub(crate) fn run_attach_quic(
     session: Option<String>,
-    addr: std::net::SocketAddr,
+    target: String,
     token: Option<String>,
     cert_fingerprint: Option<String>,
     server_name: Option<String>,
 ) -> ExitCode {
     print_banner();
 
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(err) => {
+            eprintln!("failed to build runtime: {err}");
+            return ExitCode::FAILURE;
+        }
+    };
+
+    let (addr, default_server_name) = match resolve_quic_target(&rt, &target) {
+        Ok(resolved) => resolved,
+        Err(code) => return code,
+    };
+
     let trust = match cert_fingerprint {
         Some(fingerprint) => CertTrust::Pinned(fingerprint),
         None if addr.ip().is_loopback() => CertTrust::SkipVerify,
         None => {
             eprintln!(
-                "phux: refusing to dial non-loopback QUIC server {addr} without --cert-fingerprint."
+                "phux: refusing to dial non-loopback QUIC server {target} without --cert-fingerprint."
             );
             eprintln!(
                 "      Run `phux pair` on the server host to print its certificate fingerprint,"
             );
-            eprintln!("      then pass it: phux attach --quic {addr} --cert-fingerprint <FP>");
+            eprintln!("      then pass it: phux attach --quic {target} --cert-fingerprint <FP>");
             return ExitCode::FAILURE;
         }
     };
@@ -430,21 +538,10 @@ pub(crate) fn run_attach_quic(
 
     let dial = Dial::Quic(QuicDial {
         addr,
-        server_name: server_name.unwrap_or_else(|| "localhost".to_owned()),
+        server_name: server_name.unwrap_or(default_server_name),
         token,
         trust,
     });
-
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
-        Ok(rt) => rt,
-        Err(err) => {
-            eprintln!("failed to build runtime: {err}");
-            return ExitCode::FAILURE;
-        }
-    };
 
     let predict_cfg = match config_loader::load() {
         Ok(cfg) => PredictiveConfig {
@@ -457,15 +554,23 @@ pub(crate) fn run_attach_quic(
     };
 
     let default_name = resolved_default_session_name();
-    let (target, default) = session.map_or_else(
+    let (attach_target, default) = session.map_or_else(
         || (AttachTarget::Last, Some(default_name.as_str())),
         |name| (AttachTarget::ByName(name), None),
     );
 
-    match rt.block_on(attach_with_reconnect(&dial, target, predict_cfg, default)) {
+    match rt.block_on(attach_with_reconnect(
+        &dial,
+        attach_target,
+        predict_cfg,
+        default,
+    )) {
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
-            eprintln!("phux: QUIC attach to {addr} failed: {err}");
+            eprintln!("phux: QUIC attach to {target} failed: {err}");
+            if let Some(hint) = reachability_hint(&err, addr.ip().is_loopback()) {
+                eprintln!("{hint}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -506,6 +611,10 @@ pub(crate) fn run_attach_ws(
         eprintln!("      Run `phux pair` on the server host and pass the printed token once.");
         return ExitCode::FAILURE;
     }
+
+    // Captured before `target` is shadowed by the AttachTarget below; the
+    // failure hint needs to know whether the dial left the machine.
+    let loopback = target.is_loopback();
 
     let token = match token {
         Some(token) => match attach::quic::parse_token_hex(&token) {
@@ -557,6 +666,9 @@ pub(crate) fn run_attach_ws(
         Ok(()) => ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("phux: WebSocket attach failed: {err}");
+            if let Some(hint) = reachability_hint(&err, loopback) {
+                eprintln!("{hint}");
+            }
             ExitCode::FAILURE
         }
     }
@@ -602,5 +714,64 @@ mod tests {
         // A bound listener: connectable.
         let _listener = tokio::net::UnixListener::bind(&path).expect("bind");
         assert!(wait_until_connectable(&Dial::uds(&path), Duration::from_secs(2)).await);
+    }
+
+    /// The overlay hint fires only for a reachability failure on a
+    /// non-loopback target — never for pin/auth failures (a host that
+    /// answered) and never for loopback (no overlay involved).
+    #[test]
+    fn reachability_hint_gates_on_variant_and_loopback() {
+        let unreachable = AttachError::Unreachable("x".to_owned());
+        assert_eq!(
+            reachability_hint(&unreachable, false),
+            Some(OVERLAY_REACHABILITY_HINT)
+        );
+        assert_eq!(reachability_hint(&unreachable, true), None);
+
+        let pin_mismatch = AttachError::Connect(
+            "server certificate fingerprint mismatch (pinned AA, got BB)".to_owned(),
+        );
+        assert_eq!(reachability_hint(&pin_mismatch, false), None);
+
+        let io = AttachError::Io(std::io::Error::from(std::io::ErrorKind::BrokenPipe));
+        assert_eq!(reachability_hint(&io, false), None);
+    }
+
+    /// `--quic` targets split on the last `:`, so IPv4 literals, bracketed
+    /// IPv6 literals, and DNS names all parse; a missing or malformed port
+    /// is rejected up front with a usage error.
+    #[test]
+    fn split_host_port_accepts_documented_target_shapes() {
+        assert_eq!(
+            split_host_port("127.0.0.1:8788"),
+            Ok(("127.0.0.1", 8788_u16))
+        );
+        assert_eq!(split_host_port("[::1]:1"), Ok(("[::1]", 1_u16)));
+        assert_eq!(
+            split_host_port("myhost.tailnet-name.ts.net:8788"),
+            Ok(("myhost.tailnet-name.ts.net", 8788_u16))
+        );
+
+        let missing_port = split_host_port("myhost.tailnet-name.ts.net");
+        assert!(
+            missing_port
+                .as_ref()
+                .is_err_and(|err| err.contains("missing a port")),
+            "got {missing_port:?}"
+        );
+        let bad_port = split_host_port("myhost:notaport");
+        assert!(
+            bad_port
+                .as_ref()
+                .is_err_and(|err| err.contains("invalid port")),
+            "got {bad_port:?}"
+        );
+        let missing_host = split_host_port(":8788");
+        assert!(
+            missing_host
+                .as_ref()
+                .is_err_and(|err| err.contains("missing a host")),
+            "got {missing_host:?}"
+        );
     }
 }

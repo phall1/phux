@@ -1,12 +1,7 @@
-use std::path::Path;
-
 use phux_client::ask::AskedPayload;
-use phux_client::attach::connection::Connection;
 use phux_client::selector::{self, Selector};
+use phux_client::state;
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
-};
 use phux_protocol::wire::info::SessionSnapshot;
 use serde_json::{Value, json};
 
@@ -18,8 +13,8 @@ pub(crate) async fn call(args: &Value) -> Result<Value, ToolError> {
     let target = required_str(args, "target")?;
     let selector = selector::parse(target)
         .map_err(|err| ToolError::new(format!("invalid target '{target}': {err}")))?;
-    let snapshot = get_state(&socket).await?;
-    let pane = resolve_one(&selector, &snapshot)?;
+    let snapshot = state::get_state(&socket).await?;
+    let pane = resolve_one(&socket, &selector, &snapshot).await?;
     let payload = AskedPayload {
         id: required_str(args, "id")?.to_owned(),
         question: required_str(args, "question")?.to_owned(),
@@ -28,14 +23,7 @@ pub(crate) async fn call(args: &Value) -> Result<Value, ToolError> {
     };
 
     phux_client::ask::report(&socket, pane.clone(), payload.clone()).await?;
-    Ok(json!({
-        "event": "asked",
-        "terminal": format!("@{}", pane.local_id().unwrap_or(0)),
-        "id": payload.id,
-        "question": payload.question,
-        "suggestions": payload.suggestions,
-        "elapsed_seconds": payload.elapsed_seconds,
-    }))
+    Ok(success_value(&pane, &payload))
 }
 
 pub(crate) fn schema() -> Value {
@@ -45,7 +33,7 @@ pub(crate) fn schema() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, or `.`/`=` for the focused session." },
+                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, host/@paneid, or `.` for the focused session. `=` is unsupported because MCP has no attached-client focus history." },
                 "id": { "type": "string", "description": "Stable question id for answer correlation." },
                 "question": { "type": "string", "description": "Human-facing question text." },
                 "suggestions": { "type": "array", "items": { "type": "string" }, "description": "Suggested answers in display order." },
@@ -57,34 +45,23 @@ pub(crate) fn schema() -> Value {
     })
 }
 
-async fn get_state(socket: &Path) -> Result<SessionSnapshot, ToolError> {
-    let mut conn = Connection::connect(socket).await?;
-    conn.send(&FrameKind::Command {
-        request_id: 1,
-        command: WireCommand::GetState {
-            scope: StateScope::Server,
-        },
+fn success_value(pane: &TerminalId, payload: &AskedPayload) -> Value {
+    json!({
+        "event": "asked",
+        "terminal": selector::format_terminal_id(pane),
+        "id": payload.id,
+        "question": payload.question,
+        "suggestions": payload.suggestions,
+        "elapsed_seconds": payload.elapsed_seconds,
     })
-    .await?;
-    loop {
-        if let FrameKind::CommandResult {
-            request_id: 1,
-            result,
-        } = conn.recv().await?
-        {
-            return match result {
-                CommandResult::OkWith(CommandValue::State(snap)) => Ok(snap),
-                CommandResult::Error { message, .. } => Err(ToolError::new(message)),
-                other => Err(ToolError::new(format!(
-                    "unexpected GET_STATE result: {other:?}"
-                ))),
-            };
-        }
-    }
 }
 
-fn resolve_one(selector: &Selector, snapshot: &SessionSnapshot) -> Result<TerminalId, ToolError> {
-    let candidates = selector::resolve(selector, snapshot);
+async fn resolve_one(
+    socket: &std::path::Path,
+    selector: &Selector,
+    snapshot: &SessionSnapshot,
+) -> Result<TerminalId, ToolError> {
+    let candidates = state::resolve_targets(socket, selector, snapshot).await;
     selector::pick_target_pane(&candidates, &snapshot.focused_pane)
         .ok_or_else(|| ToolError::new("no such target"))
 }
@@ -134,6 +111,25 @@ mod tests {
             schema["inputSchema"]["properties"]["suggestions"]["items"]["type"],
             json!("string")
         );
+        assert!(
+            schema["inputSchema"]["properties"]["target"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("host/@paneid"))
+        );
+    }
+
+    #[test]
+    fn satellite_success_output_uses_canonical_selector() {
+        let payload = AskedPayload {
+            id: "q1".to_owned(),
+            question: "Continue?".to_owned(),
+            suggestions: vec!["yes".to_owned()],
+            elapsed_seconds: Some(5),
+        };
+        let value = success_value(&TerminalId::satellite("region/@build", 7), &payload);
+        assert_eq!(value["terminal"], json!("region/@build/@7"));
+        assert_eq!(value["event"], json!("asked"));
+        assert_eq!(value["id"], json!("q1"));
     }
 
     #[test]

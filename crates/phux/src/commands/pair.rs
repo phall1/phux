@@ -57,6 +57,18 @@ pub(crate) fn run_pair(tokens: Option<PathBuf>, cert: Option<PathBuf>) -> ExitCo
         }
     }
 
+    // Best-effort (ADR-0037): `detect` is infallible by construction — it
+    // returns an empty vec when nothing is detected — so this block can
+    // never affect the exit code.
+    let overlay = super::overlay::detect();
+    if !overlay.is_empty() {
+        println!("Overlay network addresses (dial one of these from the device):");
+        for addr in &overlay {
+            println!("  {addr}");
+        }
+        println!();
+    }
+
     println!("Token written to {}", tokens.display());
     ExitCode::SUCCESS
 }

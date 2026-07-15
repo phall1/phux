@@ -78,8 +78,9 @@ pub fn parse_token_hex(token: &str) -> Result<Vec<u8>, DialError> {
 ///
 /// # Errors
 ///
-/// Returns [`DialError::Connect`] on any bind, handshake, certificate, or
-/// preamble failure.
+/// Returns [`DialError::Unreachable`] when the handshake times out (nothing
+/// answered) and [`DialError::Connect`] on any other bind, handshake,
+/// certificate, or preamble failure.
 pub async fn dial(
     d: &QuicDial,
 ) -> Result<
@@ -106,7 +107,7 @@ pub async fn dial(
         .connect(d.addr, &d.server_name)
         .map_err(|err| DialError::Connect(format!("dial {}: {err}", d.addr)))?
         .await
-        .map_err(|err| DialError::Connect(format!("QUIC handshake with {}: {err}", d.addr)))?;
+        .map_err(|err| handshake_error(d.addr, &err))?;
 
     let (mut send, recv) = conn
         .open_bi()
@@ -118,6 +119,17 @@ pub async fn dial(
     }
 
     Ok((endpoint, conn, send, recv))
+}
+
+/// Classify a failed QUIC handshake: `TimedOut` is the UDP analogue of
+/// refused/no-route (nothing answered), everything else — including TLS
+/// alerts from a certificate-pin mismatch — stays `Connect`.
+fn handshake_error(addr: SocketAddr, err: &quinn::ConnectionError) -> DialError {
+    let msg = format!("QUIC handshake with {addr}: {err}");
+    match err {
+        quinn::ConnectionError::TimedOut => DialError::Unreachable(msg),
+        _ => DialError::Connect(msg),
+    }
 }
 
 /// Write the auth preamble: `len: u32 BE` + raw token bytes (ADR-0031 parity
@@ -168,5 +180,23 @@ mod tests {
             raw
         );
         assert!(parse_token_hex("nothex!!").is_err());
+    }
+
+    #[test]
+    fn handshake_timeout_classifies_unreachable() {
+        let addr: SocketAddr = "127.0.0.1:4433".parse().expect("addr");
+        let err = handshake_error(addr, &quinn::ConnectionError::TimedOut);
+        assert!(matches!(err, DialError::Unreachable(_)), "got {err:?}");
+        assert_eq!(
+            err.to_string(),
+            "transport connect error: QUIC handshake with 127.0.0.1:4433: timed out"
+        );
+    }
+
+    #[test]
+    fn handshake_non_timeout_stays_connect() {
+        let addr: SocketAddr = "127.0.0.1:4433".parse().expect("addr");
+        let err = handshake_error(addr, &quinn::ConnectionError::VersionMismatch);
+        assert!(matches!(err, DialError::Connect(_)), "got {err:?}");
     }
 }

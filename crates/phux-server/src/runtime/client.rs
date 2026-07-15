@@ -922,6 +922,7 @@ where
                 env,
                 term,
                 satellite,
+                owner_terminal,
             } => {
                 handle_spawn_terminal(
                     &state,
@@ -934,6 +935,7 @@ where
                         env,
                         term,
                         satellite,
+                        owner_terminal,
                     },
                     &out_tx,
                     &root_token,
@@ -951,7 +953,15 @@ where
                 request_id,
                 command,
             } => {
-                handle_command(&state, client_id, request_id, command, &out_tx).await;
+                handle_command(
+                    &state,
+                    client_id,
+                    request_id,
+                    command,
+                    &out_tx,
+                    input_lane.as_ref(),
+                )
+                .await;
             }
             other => {
                 debug!(kind = ?other, "unhandled message type (INPUT_* / etc.)");
@@ -964,12 +974,12 @@ where
 /// (phux-51n6.2, ADR-0044).
 ///
 /// A **local** pane id with a live lane is handed to the lane thread, which
-/// runs the lease/subscription gating and mailbox delivery off the main
-/// runtime. Everything else falls back to the inline
+/// runs lease/subscription gating, snapshot-driven encode, and bounded
+/// encoded-byte delivery off the main runtime. Everything else falls back to the inline
 /// [`handle_terminal_input`]: satellite-tagged ids (their delivery is a
 /// hub-link relay, not a mailbox `try_send`, so it stays on the main thread)
-/// and the no-lane path used by direct-drive tests. Both call the same routing
-/// function, so lease and subscription semantics are identical either way.
+/// and the no-lane path used by direct-drive tests. Both share the same
+/// destination-resolution gates, so lease and subscription semantics match.
 fn route_client_input(
     state: &SharedState,
     input_lane: Option<&InputLaneHandle>,
@@ -981,12 +991,12 @@ fn route_client_input(
     if let Some(lane) = input_lane
         && terminal_id.is_local()
     {
-        lane.route(RoutedInput {
+        lane.route(RoutedInput::attached(
             client_id,
             terminal_id,
             input,
             frame_label,
-        });
+        ));
         return;
     }
     handle_terminal_input(state, client_id, &terminal_id, input, frame_label);

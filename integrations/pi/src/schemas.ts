@@ -5,8 +5,10 @@ export interface SessionSummary {
 }
 
 export interface SessionList {
-  readonly schema_version: 1;
+  readonly schema_version: 1 | 2;
   readonly sessions: readonly SessionSummary[];
+  /** Canonical selectors for every addressable terminal (v2; empty for v1). */
+  readonly terminals: readonly string[];
 }
 
 export interface CursorState {
@@ -63,6 +65,56 @@ export interface RunResult {
 export interface CreateResult {
   readonly session: string;
   readonly terminal_id: number;
+}
+
+export interface SpawnResult {
+  readonly terminal_id: number;
+  readonly satellite: string | null;
+}
+
+export interface LaunchResult {
+  readonly schema_version: 1;
+  readonly terminal_id: number;
+  readonly integration: string;
+  readonly plugin: string;
+  /** Validated because it is part of the CLI response, but never rendered to the model. */
+  readonly argv: readonly string[];
+}
+
+export interface AskedEvent {
+  readonly event: "asked";
+  readonly terminal: string;
+  readonly id: string;
+  readonly question: string;
+  readonly suggestions: readonly string[];
+  readonly elapsed_seconds: number | null;
+}
+
+export type WatchEvent =
+  | { readonly event: "title_changed"; readonly terminal?: string; readonly title: string }
+  | { readonly event: "command_started" | "bell" | "pane_spawned" | "dirty" | "idle"; readonly terminal?: string }
+  | { readonly event: "command_finished"; readonly terminal?: string; readonly exit_code: number | null }
+  | { readonly event: "pane_closed"; readonly terminal?: string; readonly exit_status: number | null }
+  | ({ readonly event: "asked"; readonly terminal?: string } & Omit<AskedEvent, "event" | "terminal">)
+  | { readonly event: "unknown"; readonly terminal?: string; readonly tag: number };
+
+export interface RenderedCell {
+  readonly grapheme: string;
+  readonly style: CellStyle;
+}
+
+export interface RenderedFrame {
+  readonly schema_version: 1;
+  readonly cols: number;
+  readonly rows: number;
+  readonly cursor: CursorState | null;
+  readonly cells: readonly RenderedCell[];
+}
+
+export interface TagRow {
+  readonly terminal: string;
+  /** Opaque human confirmation text; the current CLI has no tag JSON shape. */
+  readonly tagsText: string;
 }
 
 export type AgentKind = "codex" | "claude" | "plugin" | "declared" | "unknown";
@@ -169,9 +221,10 @@ function strings(value: unknown, path: string): string[] {
 
 export function parseSessionList(value: unknown): SessionList {
   const root = record(value, "$ (phux ls --json CLI shape)");
-  if (root.schema_version !== 1) {
-    throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  if (root.schema_version !== 1 && root.schema_version !== 2) {
+    throw new SchemaValidationError("$.schema_version", "a supported value (1 or 2)");
   }
+  const schema = root.schema_version;
   if (!Array.isArray(root.sessions)) {
     throw new SchemaValidationError("$.sessions", "an array");
   }
@@ -185,7 +238,10 @@ export function parseSessionList(value: unknown): SessionList {
       attached: boolean(row.attached, `$.sessions[${index}].attached`),
     };
   });
-  return { schema_version: 1, sessions };
+  const terminals = schema === 1 && root.terminals === undefined
+    ? []
+    : strings(root.terminals, "$.terminals");
+  return { schema_version: schema, sessions, terminals };
 }
 
 function parseColor(value: unknown, path: string): CellColor {
@@ -291,6 +347,114 @@ export function parseCreateResult(value: unknown): CreateResult {
     session,
     terminal_id: integer(root.terminal_id, "$.terminal_id", 0, 4_294_967_295),
   };
+}
+
+export function parseSpawnResult(value: unknown): SpawnResult {
+  const root = record(value, "$ (phux spawn --json CLI shape)");
+  const satellite = nullableString(root.satellite, "$.satellite");
+  if (satellite !== null && satellite.trim().length === 0) {
+    throw new SchemaValidationError("$.satellite", "null or non-empty");
+  }
+  return {
+    terminal_id: integer(root.terminal_id, "$.terminal_id", 0, 4_294_967_295),
+    satellite,
+  };
+}
+
+export function parseLaunchResult(value: unknown): LaunchResult {
+  const root = record(value, "$ (phux launch --json CLI shape)");
+  if (root.schema_version !== 1) {
+    throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  }
+  const integration = string(root.integration, "$.integration");
+  const plugin = string(root.plugin, "$.plugin");
+  if (integration.trim().length === 0) throw new SchemaValidationError("$.integration", "non-empty");
+  if (plugin.trim().length === 0) throw new SchemaValidationError("$.plugin", "non-empty");
+  const argv = strings(root.argv, "$.argv");
+  if (argv.length === 0) throw new SchemaValidationError("$.argv", "a non-empty array of strings");
+  return {
+    schema_version: 1,
+    terminal_id: integer(root.terminal_id, "$.terminal_id", 0, 4_294_967_295),
+    integration,
+    plugin,
+    argv,
+  };
+}
+
+export function parseAskedEvent(value: unknown): AskedEvent {
+  const root = record(value, "$ (phux ask --json CLI shape)");
+  if (root.event !== "asked") throw new SchemaValidationError("$.event", '"asked"');
+  const terminal = string(root.terminal, "$.terminal");
+  if (!PANE_SELECTOR.test(terminal)) throw new SchemaValidationError("$.terminal", "a canonical pane selector");
+  const elapsed = root.elapsed_seconds === null
+    ? null
+    : integer(root.elapsed_seconds, "$.elapsed_seconds", 0);
+  return {
+    event: "asked",
+    terminal,
+    id: string(root.id, "$.id"),
+    question: string(root.question, "$.question"),
+    suggestions: strings(root.suggestions, "$.suggestions"),
+    elapsed_seconds: elapsed,
+  };
+}
+
+export function parseWatchEvent(value: unknown, path = "$ (phux watch --json line)"): WatchEvent {
+  const root = record(value, path);
+  const event = oneOf(root.event, `${path}.event`, [
+    "title_changed", "command_started", "command_finished", "bell", "pane_spawned",
+    "pane_closed", "dirty", "idle", "asked", "unknown",
+  ] as const);
+  const terminal = root.terminal === undefined ? undefined : string(root.terminal, `${path}.terminal`);
+  if (terminal !== undefined && !PANE_SELECTOR.test(terminal)) {
+    throw new SchemaValidationError(`${path}.terminal`, "a canonical pane selector");
+  }
+  const base = terminal === undefined ? {} : { terminal };
+  switch (event) {
+    case "title_changed": return { event, ...base, title: string(root.title, `${path}.title`) };
+    case "command_finished": return {
+      event, ...base,
+      exit_code: root.exit_code === null ? null : integer(root.exit_code, `${path}.exit_code`, -2_147_483_648, 2_147_483_647),
+    };
+    case "pane_closed": return {
+      event, ...base,
+      exit_status: root.exit_status === null ? null : integer(root.exit_status, `${path}.exit_status`, -2_147_483_648, 2_147_483_647),
+    };
+    case "asked": return {
+      event, ...base,
+      id: string(root.id, `${path}.id`),
+      question: string(root.question, `${path}.question`),
+      suggestions: strings(root.suggestions, `${path}.suggestions`),
+      elapsed_seconds: root.elapsed_seconds === null ? null : integer(root.elapsed_seconds, `${path}.elapsed_seconds`, 0),
+    };
+    case "unknown": return { event, ...base, tag: integer(root.tag, `${path}.tag`, 0) };
+    default: return { event, ...base };
+  }
+}
+
+export function parseRenderedFrame(value: unknown): RenderedFrame {
+  const root = record(value, "$ (phux snapshot --rendered --json CLI shape)");
+  if (root.schema_version !== 1) throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  const cols = integer(root.cols, "$.cols", 1, 65_535);
+  const rows = integer(root.rows, "$.rows", 1, 65_535);
+  if (!Array.isArray(root.cells)) throw new SchemaValidationError("$.cells", "an array");
+  const expected = cols * rows;
+  if (root.cells.length !== expected) throw new SchemaValidationError("$.cells", `an array with exactly ${expected} entries`);
+  const cells = root.cells.map((value, index): RenderedCell => {
+    const path = `$.cells[${index}]`;
+    const cell = record(value, path);
+    return { grapheme: string(cell.grapheme, `${path}.grapheme`), style: parseStyle(cell.style, `${path}.style`) };
+  });
+  let cursor: CursorState | null = null;
+  if (root.cursor !== null) {
+    const raw = record(root.cursor, "$.cursor");
+    cursor = {
+      x: integer(raw.x, "$.cursor.x", 0, cols - 1),
+      y: integer(raw.y, "$.cursor.y", 0, rows - 1),
+      visible: boolean(raw.visible, "$.cursor.visible"),
+    };
+  }
+  return { schema_version: 1, cols, rows, cursor, cells };
 }
 
 export function parseRunResult(value: unknown): RunResult {

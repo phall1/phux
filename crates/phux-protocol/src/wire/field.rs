@@ -253,6 +253,9 @@ pub mod spawn_terminal {
     /// Federation-hub addressing per `docs/spec/L1.md` §3.1 / §9.1
     /// (phux-v45.6, ADR-0007).
     pub const SATELLITE: u32 = 7;
+    /// Optional existing Terminal whose owning window must host the spawn.
+    /// Absent preserves the server's legacy placement policy.
+    pub const OWNER_TERMINAL: u32 = 8;
 }
 
 /// `TERMINAL_SPAWNED` body fields (`docs/spec/L1.md` §10.1).

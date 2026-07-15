@@ -212,6 +212,37 @@ fn shipped_default_resolves_s_w_and_a_navigation() {
 }
 
 #[test]
+fn shipped_default_resolves_attention_navigation_and_preserves_fleet() {
+    let cfg = phux_config::parse_with_defaults("", std::path::Path::new("<embedded default.toml>"))
+        .expect("default config parses");
+    let prefix = chord(ModSet::CTRL, PhysicalKey::A);
+    let resolve = |key: PhysicalKey, mods: ModSet| {
+        let mut resolver = Resolver::new(&cfg.keybindings).expect("resolver builds");
+        assert_eq!(resolver.feed(prefix), Feed::Partial);
+        match resolver.feed(chord(mods, key)) {
+            Feed::Resolved(action) => action.action,
+            other => panic!("expected Resolved, got {other:?}"),
+        }
+    };
+
+    assert_eq!(
+        resolve(PhysicalKey::Q, ModSet::empty()),
+        "next-attention",
+        "C-a q"
+    );
+    assert_eq!(
+        resolve(PhysicalKey::Q, ModSet::SHIFT),
+        "return-from-attention",
+        "C-a Q",
+    );
+    assert_eq!(
+        resolve(PhysicalKey::A, ModSet::SHIFT),
+        "agent-fleet",
+        "C-a A remains the fleet dashboard",
+    );
+}
+
+#[test]
 fn resolver_rejects_ambiguous_prefix_binding() {
     // A global "C-b" binding plus a prefix table makes the prefix chord
     // ambiguous: feeding "C-b" would both resolve the global AND open the

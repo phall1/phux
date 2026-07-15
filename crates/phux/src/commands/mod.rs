@@ -5,7 +5,7 @@ use clap::{Subcommand, ValueEnum};
 use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
 use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope, TerminalSignal,
+    Command as WireCommand, CommandResult, FrameKind, TerminalSignal,
 };
 
 /// CLI signal names for `phux signal TARGET SIGNAL` (ADR-0033), mapped to the
@@ -22,6 +22,25 @@ pub(crate) enum SignalArg {
     Terminate,
     /// SIGKILL — force termination.
     Kill,
+}
+
+/// Split axis for explicit `spawn` / `launch` placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SpawnSplit {
+    Horizontal,
+    Vertical,
+}
+
+/// Validates a split ratio as finite and strictly between zero and one.
+fn parse_spawn_ratio(value: &str) -> Result<f32, String> {
+    let ratio: f32 = value
+        .parse()
+        .map_err(|_| "ratio must be a number".to_owned())?;
+    if ratio.is_finite() && ratio > 0.0 && ratio < 1.0 {
+        Ok(ratio)
+    } else {
+        Err("ratio must be finite and strictly between 0 and 1".to_owned())
+    }
 }
 
 impl From<SignalArg> for TerminalSignal {
@@ -45,6 +64,7 @@ pub(crate) mod kill;
 pub(crate) mod launch;
 pub(crate) mod ls;
 pub(crate) mod new;
+pub(crate) mod overlay;
 pub(crate) mod pair;
 pub(crate) mod plugin;
 pub(crate) mod rename;
@@ -53,6 +73,7 @@ pub(crate) mod satellite;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod spatial;
 pub(crate) mod spawn;
 pub(crate) mod stdio_bridge;
 pub(crate) mod supervise;
@@ -88,13 +109,14 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
 
         /// Attach over QUIC to a remote `phux server --quic` listener at this
-        /// `HOST:PORT` instead of the local Unix socket. QUIC is always TLS
-        /// 1.3-encrypted. A loopback address
-        /// trusts the server's self-signed cert for local dev; any routable
-        /// address requires `--cert-fingerprint` (the value `phux pair`
-        /// prints on the server host).
+        /// `HOST:PORT` instead of the local Unix socket. HOST may be an IP
+        /// literal or a DNS name (e.g. a Tailscale `MagicDNS` name), resolved
+        /// before dialing. QUIC is always TLS 1.3-encrypted. A target
+        /// resolving to loopback trusts the server's self-signed cert for
+        /// local dev; any routable address requires `--cert-fingerprint`
+        /// (the value `phux pair` prints on the server host).
         #[arg(long, value_name = "HOST:PORT", conflicts_with = "socket")]
-        quic: Option<std::net::SocketAddr>,
+        quic: Option<String>,
 
         /// Attach over WebSocket to a `phux server --listen` endpoint. Use
         /// `ws://HOST:PORT` for loopback dev, or `wss://HOST:PORT` with
@@ -266,7 +288,8 @@ pub(crate) enum Command {
 
     /// Spawn a Terminal without attaching (`SPAWN_TERMINAL`).
     ///
-    /// The pane joins the server's most recently active session; the new
+    /// With `--target`, the pane is inserted beside an exact local owner;
+    /// otherwise it joins the server's most recently active session. The new
     /// Terminal's id prints to stdout. With `--satellite NAME` on a
     /// federation hub (`phux server --hub`), the spawn is routed over
     /// the hub's link to that satellite and the returned id is
@@ -277,6 +300,18 @@ pub(crate) enum Command {
         /// from `phux satellite list`, on a server running `--hub`).
         #[arg(long, value_name = "NAME")]
         satellite: Option<String>,
+
+        /// Existing local pane beside which to place the new pane.
+        #[arg(long, value_name = "TARGET", conflicts_with = "satellite")]
+        target: Option<String>,
+
+        /// Split axis for explicit placement (requires `--target`).
+        #[arg(long, value_enum, default_value = "horizontal", requires = "target")]
+        split: SpawnSplit,
+
+        /// Fraction of the split retained by TARGET (requires `--target`).
+        #[arg(long, default_value_t = 0.5, requires = "target", value_parser = parse_spawn_ratio)]
+        ratio: f32,
 
         /// Working directory for the new pane.
         #[arg(short = 'c', long = "cwd")]
@@ -328,6 +363,18 @@ pub(crate) enum Command {
         #[arg(long)]
         json: bool,
 
+        /// Existing local pane beside which to place the launched pane.
+        #[arg(long, value_name = "TARGET", conflicts_with_all = ["list", "print"])]
+        target: Option<String>,
+
+        /// Split axis for explicit placement (requires `--target`).
+        #[arg(long, value_enum, default_value = "horizontal", requires = "target")]
+        split: SpawnSplit,
+
+        /// Fraction of the split retained by TARGET (requires `--target`).
+        #[arg(long, default_value_t = 0.5, requires = "target", value_parser = parse_spawn_ratio)]
+        ratio: f32,
+
         /// Working directory for a `working_directory = "workspace"`
         /// template. Defaults to the current directory.
         #[arg(short = 'c', long = "cwd", value_name = "DIR")]
@@ -352,6 +399,79 @@ pub(crate) enum Command {
         /// What to kill (selector).
         target: String,
 
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Insert an already-created pane into a session layout.
+    ///
+    /// Both selectors must each resolve to exactly one local pane in the same
+    /// session. This command does not spawn: create `NEW_PANE` first with
+    /// `phux spawn`, then insert it. Omitted direction defaults horizontal.
+    #[command(name = "insert-pane")]
+    InsertPane {
+        /// Existing layout leaf beside which `NEW_PANE` is inserted.
+        target: String,
+        /// Already-created pane to insert; no implicit spawn occurs.
+        new_pane: String,
+        /// Use a horizontal split (stacked panes; the default).
+        #[arg(long, conflicts_with = "vertical")]
+        horizontal: bool,
+        /// Use a vertical split (side-by-side panes).
+        #[arg(long, conflicts_with = "horizontal")]
+        vertical: bool,
+        /// Fraction assigned to TARGET; must be strictly between 0 and 1.
+        #[arg(long, default_value_t = 0.5)]
+        ratio: f32,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Move one existing pane beside another in the same session.
+    ///
+    /// SOURCE is collapsed out of its current tree position and inserted
+    /// beside TARGET. Both selectors must resolve to exactly one local pane.
+    #[command(name = "move-pane")]
+    MovePane {
+        /// Pane to relocate.
+        source: String,
+        /// Existing destination pane.
+        target: String,
+        /// Use a horizontal destination split (the default).
+        #[arg(long, conflicts_with = "vertical")]
+        horizontal: bool,
+        /// Use a vertical destination split.
+        #[arg(long, conflicts_with = "horizontal")]
+        vertical: bool,
+        /// Fraction assigned to TARGET; must be strictly between 0 and 1.
+        #[arg(long, default_value_t = 0.5)]
+        ratio: f32,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Swap two existing pane leaves in the same session layout.
+    ///
+    /// Both selectors must each resolve to exactly one local pane. Split
+    /// geometry is preserved and attached clients retain their local focus.
+    #[command(name = "swap-pane")]
+    SwapPane {
+        /// First pane selector.
+        first: String,
+        /// Second pane selector.
+        second: String,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,
@@ -510,7 +630,7 @@ pub(crate) enum Command {
     #[command(name = "send-keys", about = "Send keys to a pane")]
     SendKeys {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// Keys to send: named keys and/or literal strings, in order.
@@ -609,7 +729,7 @@ pub(crate) enum Command {
     #[command(about = "Report an agent ask event for a pane")]
     Ask {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// Stable question id for answer correlation.
@@ -664,7 +784,7 @@ pub(crate) enum Command {
     #[command(about = "Run a command in a pane and capture its exit code")]
     Run {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, or `.` (focused). `=` is unsupported by headless commands.
         target: String,
 
         /// The command line: all trailing args, joined with spaces.
@@ -767,7 +887,9 @@ pub(crate) enum Command {
     /// server certificate's SHA-256 fingerprint. Pair both into the device:
     /// the token is the credential, and verifying the fingerprint on first
     /// connect defeats a man-in-the-middle. Revoke a device by deleting its
-    /// line from the token file.
+    /// line from the token file. When an overlay network address
+    /// (Tailscale/WireGuard) is detected, it is printed alongside the
+    /// credentials.
     ///
     /// This never contacts a running server — it only writes the token file.
     Pair {
@@ -1083,11 +1205,11 @@ pub(crate) fn report_no_server(err: &AttachError, socket_path: &Path, verb: &str
 }
 
 /// Parse an optional target string into a [`crate::selector::Selector`],
-/// defaulting to the focused/last session when absent. On a parse error,
+/// defaulting to the focused session when absent. On a parse error,
 /// prints a diagnostic and returns the failure exit code for the caller to
 /// bubble.
 pub(crate) fn parse_selector(session: Option<&str>) -> Result<crate::selector::Selector, ExitCode> {
-    session.map_or(Ok(crate::selector::Selector::Last), |target| {
+    session.map_or(Ok(crate::selector::Selector::Current), |target| {
         crate::selector::parse(target).map_err(|err| {
             eprintln!("phux: invalid target '{target}': {err}");
             ExitCode::FAILURE
@@ -1104,21 +1226,9 @@ pub(crate) async fn resolve_target(
     selector: &crate::selector::Selector,
     verb: &str,
 ) -> Result<phux_protocol::ids::TerminalId, ExitCode> {
-    let snapshot = match request_command(
-        socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    {
-        Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            return Err(ExitCode::FAILURE);
-        }
-        Err(err) => return Err(report_no_server(&err, socket_path, verb)),
-    };
+    let snapshot = phux_client::state::get_state(socket_path)
+        .await
+        .map_err(|err| report_no_server(&err, socket_path, verb))?;
     let candidates = resolve_targets(socket_path, selector, &snapshot).await;
     crate::selector::pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
         eprintln!("phux: no such target");
@@ -1138,14 +1248,7 @@ pub(crate) async fn resolve_targets(
     selector: &crate::selector::Selector,
     snapshot: &phux_protocol::wire::info::SessionSnapshot,
 ) -> Vec<phux_protocol::ids::TerminalId> {
-    if !matches!(selector, crate::selector::Selector::Tag(_)) {
-        return crate::selector::resolve(selector, snapshot);
-    }
-    let tags = match Connection::connect(socket_path).await {
-        Ok(mut conn) => tag::fetch_tag_index(&mut conn, snapshot).await,
-        Err(_) => crate::selector::TagIndex::new(),
-    };
-    crate::selector::resolve_with_tags(selector, snapshot, &tags)
+    phux_client::state::resolve_targets(socket_path, selector, snapshot).await
 }
 
 /// Print an `AttachError` as a one-line, actionable message on stderr.
@@ -1186,14 +1289,15 @@ mod tests {
 
     /// The full `TARGET` grammar now feeds run/send-keys/snapshot/wait/kill
     /// alike (phux-n95). `parse_selector` is the shared CLI front door:
-    /// `None` defaults to the focused/last session, and every documented
+    /// `None` defaults to the focused session, and every documented
     /// form parses to its [`Selector`] variant.
     #[test]
     fn parse_selector_accepts_every_grammar_form() {
-        // Absent target defaults to the last/focused session.
-        assert_eq!(parse_selector(None).unwrap(), Selector::Last);
+        // Absent target defaults to the focused session. Headless callers
+        // have no client-local MRU, so `=` is an explicit error.
+        assert_eq!(parse_selector(None).unwrap(), Selector::Current);
         assert_eq!(parse_selector(Some(".")).unwrap(), Selector::Current);
-        assert_eq!(parse_selector(Some("=")).unwrap(), Selector::Last);
+        assert!(parse_selector(Some("=")).is_err());
         assert_eq!(
             parse_selector(Some("work")).unwrap(),
             Selector::Session("work".to_owned()),
@@ -1217,6 +1321,13 @@ mod tests {
         assert_eq!(
             parse_selector(Some("@42")).unwrap(),
             Selector::TerminalId(42),
+        );
+        assert_eq!(
+            parse_selector(Some("devbox/@42")).unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 42,
+            },
         );
     }
 

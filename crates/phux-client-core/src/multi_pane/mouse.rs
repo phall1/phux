@@ -25,7 +25,7 @@ use super::layout::compute_layout_in;
 ///
 /// A click on a divider cell returns [`RouteDecision::Divider`] carrying
 /// the controlling split's node path + axis, so the driver's drag machine
-/// can adjust that split's ratio (ADR-0035). A click that falls outside
+/// can adjust that split's ratio (ADR-0048). A click that falls outside
 /// every pane rect *and* every divider cell (reserved chrome, degenerate
 /// viewport) returns [`RouteDecision::Miss`] and is dropped.
 #[derive(Debug, Clone, PartialEq)]
@@ -51,7 +51,7 @@ pub enum RouteDecision {
     /// drag against the addressed split: `node_path` names the
     /// [`crate::layout::LayoutNode::Split`] whose `ratio` the drag tunes,
     /// and `axis` says whether the pointer's x (`Horizontal`) or y
-    /// (`Vertical`) drives the ratio (ADR-0035).
+    /// (`Vertical`) drives the ratio (ADR-0048).
     Divider {
         /// Path from the layout root to the controlling split.
         node_path: NodePath,

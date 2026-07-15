@@ -873,6 +873,7 @@ impl<'a> Decoder<'a> {
                 let mut env: Option<Vec<(String, String)>> = None;
                 let mut term: Option<String> = None;
                 let mut satellite: Option<crate::ids::SatelliteHost> = None;
+                let mut owner_terminal: Option<crate::ids::TerminalId> = None;
                 while let Some((id, value)) = self.read_field()? {
                     match id {
                         field::spawn_terminal::REQUEST_ID => {
@@ -906,6 +907,9 @@ impl<'a> Decoder<'a> {
                                     .map_err(|_| DecodeError::InvalidUtf8)?,
                             ));
                         }
+                        field::spawn_terminal::OWNER_TERMINAL => {
+                            owner_terminal = Some(sub!(value, decode_terminal_id));
+                        }
                         _ => {}
                     }
                 }
@@ -917,6 +921,7 @@ impl<'a> Decoder<'a> {
                     env,
                     term,
                     satellite,
+                    owner_terminal,
                 }
             }
             TYPE_TERMINAL_SPAWNED => {

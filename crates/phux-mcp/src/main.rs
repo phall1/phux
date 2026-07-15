@@ -35,16 +35,30 @@
 )]
 
 mod ask_tool;
+mod cli_adapter;
+mod cli_tools;
 mod jsonrpc;
 mod plugin_action;
 mod plugin_workspace;
 mod socket;
 mod tools;
 
-use serde_json::{Value, json};
-use tokio::io::{AsyncBufReadExt, BufReader};
+use std::collections::HashMap;
+use std::future::Future;
+use std::pin::Pin;
+use std::sync::Arc;
 
-use jsonrpc::{INTERNAL_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, Request};
+use serde_json::{Value, json};
+use tokio::io::{AsyncBufRead, AsyncBufReadExt, AsyncWrite, AsyncWriteExt, BufReader, BufWriter};
+use tokio::task::{AbortHandle, JoinSet};
+
+use jsonrpc::{
+    INTERNAL_ERROR, INVALID_REQUEST, METHOD_NOT_FOUND, PARSE_ERROR, REQUEST_CANCELLED, Request,
+};
+
+type DispatchFuture =
+    Pin<Box<dyn Future<Output = Result<Value, tools::ToolError>> + Send + 'static>>;
+type Dispatcher = Arc<dyn Fn(String, Value) -> DispatchFuture + Send + Sync>;
 
 /// The MCP protocol version this adapter implements.
 ///
@@ -83,21 +97,166 @@ fn main() -> std::process::ExitCode {
 /// per-message parse/dispatch failures are turned into JSON-RPC error
 /// responses, not propagated.
 async fn serve() -> std::io::Result<()> {
-    let mut lines = BufReader::new(tokio::io::stdin()).lines();
-    while let Some(line) = lines.next_line().await? {
-        let trimmed = line.trim();
-        if trimmed.is_empty() {
-            continue;
-        }
-        if let Some(response) = handle_line(trimmed).await {
-            emit(&response);
+    serve_io(
+        BufReader::new(tokio::io::stdin()),
+        BufWriter::new(tokio::io::stdout()),
+        default_dispatcher(),
+    )
+    .await
+}
+
+fn default_dispatcher() -> Dispatcher {
+    Arc::new(|name, args| Box::pin(async move { tools::dispatch(&name, &args).await }))
+}
+
+/// Drive the stdio protocol while tool calls remain cancellable.
+///
+/// Tool futures run as independently abortable runtime tasks. Only this loop
+/// writes replies, keeping output framing serialized while allowing replies to
+/// complete out of request order with the original JSON-RPC id intact.
+async fn serve_io<R, W>(mut reader: R, mut writer: W, dispatcher: Dispatcher) -> std::io::Result<()>
+where
+    R: AsyncBufRead + Unpin + Send,
+    W: AsyncWrite + Unpin + Send,
+{
+    let mut line = String::new();
+    let mut tasks = JoinSet::<(String, Value)>::new();
+    let mut pending = HashMap::<String, (Value, AbortHandle)>::new();
+
+    loop {
+        tokio::select! {
+            read = reader.read_line(&mut line) => {
+                match read {
+                    Ok(0) => {
+                        abort_pending(&mut tasks, &mut pending).await;
+                        return Ok(());
+                    }
+                    Err(err) => {
+                        abort_pending(&mut tasks, &mut pending).await;
+                        return Err(err);
+                    }
+                    Ok(_) => {}
+                }
+
+                let message = line.trim();
+                if !message.is_empty() {
+                    let request: Request = match serde_json::from_str(message) {
+                        Ok(request) => request,
+                        Err(err) => {
+                            let response = jsonrpc::error(
+                                Value::Null,
+                                PARSE_ERROR,
+                                format!("parse error: {err}"),
+                            );
+                            write_response(&mut writer, &response).await?;
+                            line.clear();
+                            continue;
+                        }
+                    };
+
+                    if request.method == "notifications/cancelled" {
+                        if let Some(cancelled_id) = request
+                            .params
+                            .as_ref()
+                            .and_then(|params| params.get("requestId"))
+                        {
+                            let key = request_key(cancelled_id);
+                            if let Some((id, task)) = pending.remove(&key) {
+                                task.abort();
+                                let response = jsonrpc::error(
+                                    id,
+                                    REQUEST_CANCELLED,
+                                    "request cancelled",
+                                );
+                                write_response(&mut writer, &response).await?;
+                            }
+                        }
+                    } else if request.method == "tools/call" && !request.is_notification() {
+                        let id = request.id.clone().unwrap_or(Value::Null);
+                        let key = request_key(&id);
+                        if let std::collections::hash_map::Entry::Vacant(entry) =
+                            pending.entry(key.clone())
+                        {
+                            let params = request.params;
+                            let dispatcher = Arc::clone(&dispatcher);
+                            let task_id = id.clone();
+                            let abort = tasks.spawn(async move {
+                                let response = handle_tools_call_with(
+                                    task_id,
+                                    params.as_ref(),
+                                    dispatcher.as_ref(),
+                                )
+                                .await;
+                                (key, response)
+                            });
+                            entry.insert((id, abort));
+                        } else {
+                            let response = jsonrpc::error(
+                                id,
+                                INVALID_REQUEST,
+                                "duplicate in-flight request id",
+                            );
+                            write_response(&mut writer, &response).await?;
+                        }
+                    } else if let Some(response) = handle_request(request).await {
+                        write_response(&mut writer, &response).await?;
+                    }
+                }
+                line.clear();
+            }
+            joined = tasks.join_next(), if !tasks.is_empty() => {
+                if let Some(Ok((key, response))) = joined
+                    && pending.remove(&key).is_some()
+                {
+                    write_response(&mut writer, &response).await?;
+                }
+            }
         }
     }
-    Ok(())
+}
+
+async fn abort_pending(
+    tasks: &mut JoinSet<(String, Value)>,
+    pending: &mut HashMap<String, (Value, AbortHandle)>,
+) {
+    for (_, task) in pending.drain().map(|(_, value)| value) {
+        task.abort();
+    }
+    tasks.abort_all();
+    while tasks.join_next().await.is_some() {}
+}
+
+fn request_key(id: &Value) -> String {
+    serde_json::to_string(id).unwrap_or_else(|_| "null".to_owned())
+}
+
+async fn write_response(
+    writer: &mut (impl AsyncWrite + Unpin),
+    response: &Value,
+) -> std::io::Result<()> {
+    let line = response_line(response);
+    writer.write_all(line.as_bytes()).await?;
+    writer.write_all(b"\n").await?;
+    writer.flush().await
+}
+
+fn response_line(response: &Value) -> String {
+    serde_json::to_string(response).unwrap_or_else(|err| {
+        serde_json::to_string(&jsonrpc::error(
+            Value::Null,
+            INTERNAL_ERROR,
+            format!("failed to serialize response: {err}"),
+        ))
+        .unwrap_or_else(|_| {
+            r#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"serialization failed"}}"#
+                .to_owned()
+        })
+    })
 }
 
 /// Handle one line of input, returning the JSON-RPC response to emit, or
 /// `None` for a notification (which gets no reply).
+#[cfg(test)]
 async fn handle_line(line: &str) -> Option<Value> {
     // Parse the envelope. A malformed line is a JSON-RPC parse error with a
     // null id (we cannot recover the request id from unparseable JSON).
@@ -123,8 +282,9 @@ async fn handle_request(request: Request) -> Option<Value> {
 
     match request.method.as_str() {
         "initialize" => Some(jsonrpc::success(id, initialize_result())),
-        "notifications/initialized" => None,
+        "notifications/initialized" | "notifications/cancelled" => None,
         "tools/list" => Some(jsonrpc::success(id, json!({ "tools": tools::catalog() }))),
+        "tools/call" if is_notification => None,
         "tools/call" => Some(handle_tools_call(id, request.params.as_ref()).await),
         // `ping` is a common MCP keepalive; reply with an empty result.
         "ping" => Some(jsonrpc::success(id, json!({}))),
@@ -162,6 +322,15 @@ fn initialize_result() -> Value {
 /// *successful* JSON-RPC response carrying `isError: true` — not a
 /// JSON-RPC error and never a crash.
 async fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
+    let dispatcher = default_dispatcher();
+    handle_tools_call_with(id, params, dispatcher.as_ref()).await
+}
+
+async fn handle_tools_call_with(
+    id: Value,
+    params: Option<&Value>,
+    dispatcher: &(dyn Fn(String, Value) -> DispatchFuture + Send + Sync),
+) -> Value {
     let Some(params) = params else {
         return jsonrpc::error(id, INVALID_REQUEST, "tools/call requires params");
     };
@@ -175,7 +344,7 @@ async fn handle_tools_call(id: Value, params: Option<&Value>) -> Value {
         .cloned()
         .unwrap_or_else(|| json!({}));
 
-    match tools::dispatch(name, &args).await {
+    match dispatcher(name.to_owned(), args).await {
         Ok(value) => jsonrpc::success(id, tool_content(&value, false)),
         Err(tools::ToolError(message)) => {
             jsonrpc::success(id, tool_content(&Value::String(message), true))
@@ -199,30 +368,84 @@ fn tool_content(value: &Value, is_error: bool) -> Value {
     })
 }
 
-/// Write one JSON-RPC response to stdout as a single newline-terminated
-/// line (the MCP stdio framing).
-fn emit(response: &Value) {
-    match serde_json::to_string(response) {
-        Ok(line) => println!("{line}"),
-        Err(err) => {
-            // Last-resort: a response we built ourselves should always
-            // serialize; if it somehow doesn't, emit a minimal internal
-            // error rather than dropping the turn silently.
-            let fallback = jsonrpc::error(
-                Value::Null,
-                INTERNAL_ERROR,
-                format!("failed to serialize response: {err}"),
-            );
-            if let Ok(line) = serde_json::to_string(&fallback) {
-                println!("{line}");
-            }
-        }
-    }
-}
-
 #[cfg(test)]
 mod tests {
+    use std::fs;
+    use std::os::unix::fs::PermissionsExt;
+    use std::path::{Path, PathBuf};
+    use std::time::Duration;
+
+    use tempfile::TempDir;
+    use tokio::io::{AsyncWriteExt, BufReader};
+
     use super::*;
+
+    fn sleeping_cli() -> (TempDir, PathBuf, PathBuf) {
+        let temp = tempfile::tempdir().unwrap();
+        let pid_file = temp.path().join("pid");
+        let executable = temp.path().join("phux");
+        fs::write(
+            &executable,
+            format!(
+                "#!/bin/sh\nprintf '%s\\n' \"$$\" > '{}'\nexec sleep 60\n",
+                pid_file.display()
+            ),
+        )
+        .unwrap();
+        let mut permissions = fs::metadata(&executable).unwrap().permissions();
+        permissions.set_mode(0o755);
+        fs::set_permissions(&executable, permissions).unwrap();
+        (temp, executable, pid_file)
+    }
+
+    fn sleeping_dispatcher(executable: PathBuf) -> Dispatcher {
+        Arc::new(move |name, _args| {
+            if name == "fast" {
+                return Box::pin(async { Ok(json!({ "completed": true })) });
+            }
+            let adapter = cli_adapter::CliAdapter::new(executable.clone());
+            Box::pin(async move {
+                adapter
+                    .run(std::iter::empty::<&str>(), Duration::from_secs(60))
+                    .await
+                    .map(|_| json!({ "completed": true }))
+            })
+        })
+    }
+
+    async fn wait_for_pid(path: &Path) -> u32 {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            loop {
+                if let Ok(contents) = fs::read_to_string(path)
+                    && let Ok(pid) = contents.trim().parse()
+                {
+                    break pid;
+                }
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("fake CLI wrote its pid")
+    }
+
+    fn process_exists(pid: u32) -> bool {
+        std::process::Command::new("kill")
+            .args(["-0", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .is_ok_and(|status| status.success())
+    }
+
+    async fn wait_for_exit(pid: u32) {
+        tokio::time::timeout(Duration::from_secs(2), async {
+            while process_exists(pid) {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .expect("cancelled fake CLI exited");
+    }
 
     #[tokio::test]
     async fn initialize_returns_protocol_and_server_info() {
@@ -259,12 +482,16 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":7,"method":"tools/list"}"#).unwrap();
         let resp = handle_request(req).await.expect("tools/list replies");
         let tools = resp["result"]["tools"].as_array().expect("tools array");
-        assert_eq!(tools.len(), 11);
+        assert_eq!(tools.len(), 21);
         assert!(tools.iter().any(|t| t["name"] == json!("phux_ls")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_new")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_kill")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_watch")));
         assert!(tools.iter().any(|t| t["name"] == json!("phux_ask")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_launch")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_spawn")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_agent")));
+        assert!(tools.iter().any(|t| t["name"] == json!("phux_insert_pane")));
         assert!(
             tools
                 .iter()
@@ -296,5 +523,94 @@ mod tests {
             serde_json::from_str(r#"{"jsonrpc":"2.0","id":5,"method":"tools/call"}"#).unwrap();
         let resp = handle_request(req).await.expect("error reply");
         assert_eq!(resp["error"]["code"], json!(INVALID_REQUEST));
+    }
+
+    #[tokio::test]
+    async fn cancellation_keeps_reading_and_terminates_the_cli_child() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_temp, executable, pid_file) = sleeping_cli();
+                let (mut input, server_input) = tokio::io::duplex(4096);
+                let (server_output, output) = tokio::io::duplex(4096);
+                let server = tokio::task::spawn_local(serve_io(
+                    BufReader::new(server_input),
+                    server_output,
+                    sleeping_dispatcher(executable),
+                ));
+                input
+                    .write_all(
+                        br#"{"jsonrpc":"2.0","id":"slow","method":"tools/call","params":{"name":"fake","arguments":{}}}
+{"jsonrpc":"2.0","id":2,"method":"tools/call","params":{"name":"fast","arguments":{}}}
+"#,
+                    )
+                    .await
+                    .unwrap();
+
+                let mut replies = BufReader::new(output).lines();
+                let fast = tokio::time::timeout(Duration::from_secs(1), replies.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let fast: Value = serde_json::from_str(&fast).unwrap();
+                assert_eq!(fast["id"], 2);
+                assert_eq!(fast["result"]["isError"], false);
+
+                let pid = wait_for_pid(&pid_file).await;
+                assert!(process_exists(pid));
+                input
+                    .write_all(
+                        br#"{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":"slow","reason":"test"}}
+"#,
+                    )
+                    .await
+                    .unwrap();
+                let cancelled = tokio::time::timeout(Duration::from_secs(1), replies.next_line())
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                let cancelled: Value = serde_json::from_str(&cancelled).unwrap();
+                assert_eq!(cancelled["id"], "slow");
+                assert_eq!(cancelled["error"]["code"], REQUEST_CANCELLED);
+                wait_for_exit(pid).await;
+
+                drop(input);
+                server.await.unwrap().unwrap();
+            })
+            .await;
+    }
+
+    #[tokio::test]
+    async fn stdin_eof_aborts_pending_tools_and_terminates_the_cli_child() {
+        tokio::task::LocalSet::new()
+            .run_until(async {
+                let (_temp, executable, pid_file) = sleeping_cli();
+                let (mut input, server_input) = tokio::io::duplex(4096);
+                let (server_output, _output) = tokio::io::duplex(4096);
+                let server = tokio::task::spawn_local(serve_io(
+                    BufReader::new(server_input),
+                    server_output,
+                    sleeping_dispatcher(executable),
+                ));
+                input
+                    .write_all(
+                        br#"{"jsonrpc":"2.0","id":9,"method":"tools/call","params":{"name":"fake","arguments":{}}}
+"#,
+                    )
+                    .await
+                    .unwrap();
+                let pid = wait_for_pid(&pid_file).await;
+                assert!(process_exists(pid));
+
+                drop(input);
+                tokio::time::timeout(Duration::from_secs(1), server)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .unwrap();
+                wait_for_exit(pid).await;
+            })
+            .await;
     }
 }

@@ -43,7 +43,7 @@ use phux_protocol::wire::frame::{
     AgentEvent, ControlAction, FrameKind, TerminalEventType, TerminalLifecycle, TerminalSignal,
 };
 use portable_pty::{CommandBuilder, PtySize};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{broadcast, mpsc, oneshot, watch};
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, trace, warn};
 
@@ -51,7 +51,7 @@ use crate::agent_detect::{AgentDetectEvent, AgentDetector, DetectOutcome};
 use crate::grid::{ConsumerReference, SnapshotBytes, SnapshotSynthesizer};
 use crate::input::paste::PasteOutcome;
 use crate::input::{
-    PerTerminalFocusEncoder, PerTerminalKeyEncoder, PerTerminalMouseEncoder,
+    InputEncoderSnapshot, PerTerminalFocusEncoder, PerTerminalKeyEncoder, PerTerminalMouseEncoder,
     PerTerminalPasteEncoder,
 };
 use crate::state::{Outbound, TerminalInput};
@@ -343,6 +343,10 @@ pub struct TerminalActor {
     focus_enc: RefCell<PerTerminalFocusEncoder>,
     paste_enc: RefCell<PerTerminalPasteEncoder>,
     input_rx: mpsc::Receiver<TerminalInput>,
+    /// Bounded lane-to-actor handoff of already encoded PTY bytes.
+    encoded_input_rx: mpsc::Receiver<Vec<u8>>,
+    /// Publishes terminal-derived input modes and dimensions to the input lane.
+    input_snapshot_tx: watch::Sender<InputEncoderSnapshot>,
     snapshot_rx: mpsc::Receiver<SnapshotRequest>,
     set_default_colors_rx: mpsc::Receiver<SetDefaultColorsRequest>,
     screen_rx: mpsc::Receiver<ScreenRequest>,
@@ -503,6 +507,11 @@ pub struct TerminalActor {
     /// Drives the dirty/idle coalescing — at most one `dirty` per burst,
     /// then one `idle` when a tick observes the grid has settled.
     in_output_burst: bool,
+    /// Whether a PTY output chunk arrived since the preceding idle-check
+    /// tick. Self-owned by dirty/idle bookkeeping so settling a burst does
+    /// not depend on [`Self::tick_emit`] consuming its state-sync mutation
+    /// flag (that emitter is deliberately gated off for raw consumers).
+    output_since_idle_tick: bool,
     /// Event subscribers for this pane. When semantic state changes occur
     /// (command started, grid changed, etc.), broadcast to all subscribers
     /// whose `event_types` filter matches. `Vec` guarded by `RefCell` for
@@ -778,6 +787,7 @@ impl TerminalActor {
             None,
         )?;
         bundle.actor.terminal.borrow_mut().vt_write(seed);
+        bundle.actor.publish_input_snapshot();
         Ok(bundle)
     }
 
@@ -814,7 +824,10 @@ impl TerminalActor {
         let synth = SnapshotSynthesizer::new()?;
         let key_enc = PerTerminalKeyEncoder::new()?;
         let mouse_enc = PerTerminalMouseEncoder::new()?;
+        let initial_input_snapshot = InputEncoderSnapshot::capture(&terminal, DEFAULT_CELL_PX)?;
         let (input_tx, input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (encoded_input_tx, encoded_input_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
+        let (input_snapshot_tx, input_snapshot_rx) = watch::channel(initial_input_snapshot);
         let (snapshot_tx, snapshot_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (set_default_colors_tx, set_default_colors_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
         let (screen_tx, screen_rx) = mpsc::channel(DEFAULT_INPUT_MAILBOX);
@@ -864,6 +877,8 @@ impl TerminalActor {
             focus_enc: RefCell::new(PerTerminalFocusEncoder::new()),
             paste_enc: RefCell::new(PerTerminalPasteEncoder::new()),
             input_rx,
+            encoded_input_rx,
+            input_snapshot_tx,
             snapshot_rx,
             set_default_colors_rx,
             screen_rx,
@@ -896,6 +911,7 @@ impl TerminalActor {
             agent_dirty_since_detect: false,
             last_ask: None,
             in_output_burst: false,
+            output_since_idle_tick: false,
             event_subscribers: RefCell::new(Vec::new()),
             last_known_cwd: RefCell::new(std::env::var("HOME").unwrap_or_default()),
             osc133: osc133::Osc133Scanner::new(),
@@ -912,6 +928,8 @@ impl TerminalActor {
         };
         let handle = TerminalHandle {
             input: input_tx,
+            encoded_input: encoded_input_tx,
+            input_snapshot: input_snapshot_rx,
             snapshot: snapshot_tx,
             set_default_colors: set_default_colors_tx,
             screen: screen_tx,
@@ -1047,6 +1065,7 @@ impl TerminalActor {
     ) -> Result<TerminalActorBundle, TerminalActorError> {
         let bundle = Self::new(cols, rows)?;
         bundle.actor.terminal.borrow_mut().vt_write(bytes);
+        bundle.actor.publish_input_snapshot();
         Ok(bundle)
     }
 
@@ -1567,6 +1586,7 @@ impl TerminalActor {
         if self.event_sink.is_none() && self.event_subscribers.borrow().is_empty() {
             return;
         }
+        self.output_since_idle_tick = true;
         // OSC-133 prompt marks (phux-foz.4). Scanned before the coalesced
         // dirty/title sources below so a command boundary and its dirty
         // burst arrive in stream order.
@@ -1629,13 +1649,13 @@ impl TerminalActor {
     }
 
     /// Emit `idle` when an output burst has settled (phux-y2t), called from
-    /// the tick arm. A burst is "settled" when a tick fires and the grid
-    /// has not been mutated since the previous tick
-    /// (`!terminal_dirty_since_tick`). Idempotent: only the first settled
-    /// tick after a `dirty` emits `idle`; subsequent idle ticks are silent
-    /// until the next burst.
+    /// the tick arm. A burst is "settled" when no PTY output chunk arrived
+    /// since the previous tick. Idempotent: only the first settled tick after
+    /// a `dirty` emits `idle`; subsequent idle ticks are silent until the next
+    /// burst.
     fn maybe_emit_idle(&mut self) {
-        if self.in_output_burst && !self.terminal_dirty_since_tick {
+        let had_output = std::mem::take(&mut self.output_since_idle_tick);
+        if self.in_output_burst && !had_output {
             self.in_output_burst = false;
             self.dirty_event_emitted_this_burst = false;
             self.emit_event(AgentEvent::Idle);
@@ -1892,6 +1912,7 @@ impl TerminalActor {
     #[cfg(test)]
     pub fn vt_write_for_test(&mut self, bytes: &[u8]) {
         self.terminal.borrow_mut().vt_write(bytes);
+        self.publish_input_snapshot();
         self.terminal_dirty_since_tick = true;
         self.agent_dirty_since_detect = true;
     }
@@ -1961,6 +1982,18 @@ impl TerminalActor {
         synth.screen_state_with_scrollback(&terminal, pane, scrollback, cells)
     }
 
+    /// Publish the complete terminal-derived encoder state after a terminal
+    /// mutation. Capture failures retain the previous good snapshot.
+    fn publish_input_snapshot(&self) {
+        let terminal = self.terminal.borrow();
+        match InputEncoderSnapshot::capture(&terminal, self.cell_px) {
+            Ok(snapshot) => {
+                self.input_snapshot_tx.send_replace(snapshot);
+            }
+            Err(err) => warn!(error = %err, "input encoder snapshot capture failed"),
+        }
+    }
+
     /// Translate a [`TerminalInput`] into PTY bytes via the per-pane
     /// encoders + the current terminal state.
     ///
@@ -2011,16 +2044,7 @@ impl TerminalActor {
                     debug!(?input, "input encoded to zero bytes; nothing to write");
                     return;
                 }
-                if let Some(tx) = self.pty_tx.as_ref() {
-                    let len = bytes.len();
-                    if tx.send(bytes).is_err() {
-                        debug!("PTY writer channel closed; dropping input");
-                    } else {
-                        debug!(len, "input queued to PTY writer");
-                    }
-                } else {
-                    debug!(?input, "no PTY; input discarded");
-                }
+                self.service_encoded_input(bytes);
             }
             Ok(None) => {
                 debug!(?input, "input gated/dropped by encoder");
@@ -2028,6 +2052,23 @@ impl TerminalActor {
             Err(err) => {
                 warn!(error = %err, "input encode failed; dropping event");
             }
+        }
+    }
+
+    /// Forward bytes encoded by the dedicated input lane to the PTY writer.
+    fn service_encoded_input(&self, bytes: Vec<u8>) {
+        if bytes.is_empty() {
+            return;
+        }
+        if let Some(tx) = self.pty_tx.as_ref() {
+            let len = bytes.len();
+            if tx.send(bytes).is_err() {
+                debug!("PTY writer channel closed; dropping input");
+            } else {
+                debug!(len, "input queued to PTY writer");
+            }
+        } else {
+            debug!("no PTY; encoded input discarded");
         }
     }
 
@@ -2079,6 +2120,7 @@ impl TerminalActor {
             cell_width: u32::from(cell_w),
             cell_height: u32::from(cell_h),
         });
+        self.publish_input_snapshot();
         // A resize reflows the grid: every consumer reference is rebuilt
         // on the next diff, so force the next tick to walk (phux-4l0), and
         // force the next detector tick to re-scan (ADR-0046) — a reflow can
@@ -2492,7 +2534,22 @@ impl TerminalActor {
                     return;
                 }
 
-                // Input → PTY. Polled before the PTY-output arm (biased
+                // Bytes already encoded on the dedicated input lane. This
+                // bounded mailbox is the production input path and shares the
+                // actor's highest scheduling priority.
+                Some(bytes) = self.encoded_input_rx.recv() => {
+                    self.service_encoded_input(bytes);
+                    for _ in 1..MAX_INPUT_COALESCE {
+                        match self.encoded_input_rx.try_recv() {
+                            Ok(next) => self.service_encoded_input(next),
+                            Err(_) => break,
+                        }
+                    }
+                }
+
+                // Legacy inline input → PTY, retained for direct-drive tests
+                // that intentionally construct the runtime without a lane.
+                // Polled before the PTY-output arm (biased
                 // order) so a queued keystroke is serviced this turn
                 // rather than waiting behind an output burst — the fix for
                 // load-correlated input starvation. Bounded by
@@ -2595,6 +2652,7 @@ impl TerminalActor {
                             debug!(bytes = payload.len(), "vt_write: PTY chunk(s) -> Terminal");
                             self.terminal.borrow_mut().vt_write(&payload);
                             self.answer_color_queries(&payload);
+                            self.publish_input_snapshot();
                             // The grid changed: let the next tick walk
                             // the rows (phux-4l0 idle short-circuit) and let
                             // the next detector tick re-scan (ADR-0046).
@@ -2864,10 +2922,9 @@ impl TerminalActor {
                 // `synthesize_against_reference` returns non-empty bytes.
                 _ = tick.tick() => {
                     // phux-y2t: close an output burst with an `idle` event
-                    // when the grid has settled since the previous tick.
-                    // MUST run before `tick_emit`, which consumes the
-                    // `terminal_dirty_since_tick` flag `maybe_emit_idle`
-                    // reads. No-op without an event sink.
+                    // when no PTY output arrived since the previous tick.
+                    // This bookkeeping is independent of the state-sync
+                    // emitter gate, so headless watchers settle raw panes too.
                     self.maybe_emit_idle();
                     self.tick_emit();
                 }
@@ -4364,6 +4421,57 @@ mod tests {
             actor.consumer_state(client).expect("state").next_seq,
             1,
             "no emission means the per-consumer seq never advanced",
+        );
+    }
+
+    /// phux-bowo: dirty/idle settling is independent of the state-sync
+    /// emitter gate. A raw-only pane must produce a fresh pair for each
+    /// output burst even though `tick_emit` stays gated and therefore leaves
+    /// `terminal_dirty_since_tick` set.
+    #[test]
+    fn raw_only_consumer_gets_repeatable_dirty_idle_cycles() {
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        let raw_client = ClientId(1);
+        let (outbound, mut output_rx) = dummy_outbound();
+        actor
+            .register_consumer(raw_client, outbound, 11, false)
+            .expect("register raw consumer");
+        let (event_tx, mut event_rx) = mpsc::channel(8);
+        actor.set_event_sink(event_tx);
+
+        for chunk in [b"first".as_slice(), b"\r\nsecond".as_slice()] {
+            actor.vt_write_for_test(chunk);
+            actor.source_events_from_chunk(chunk);
+            assert!(
+                matches!(event_rx.try_recv(), Ok(AgentEvent::Dirty)),
+                "each output burst must begin with dirty",
+            );
+
+            // The first tick observes output and keeps the burst open. The
+            // gated tick emits no synthesized output and does not consume its
+            // state-sync dirty flag.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert!(event_rx.try_recv().is_err(), "first tick is not idle");
+
+            // A following quiet tick settles independently of that still-set
+            // state-sync flag, re-arming dirty for the next burst.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert!(
+                matches!(event_rx.try_recv(), Ok(AgentEvent::Idle)),
+                "quiet tick must close the burst with idle",
+            );
+        }
+
+        assert!(
+            output_rx.try_recv().is_err(),
+            "raw consumer must remain on the byte-faithful broadcast path",
+        );
+        assert!(
+            actor.terminal_dirty_since_tick,
+            "gated tick must not weaken state-sync dirty bookkeeping",
         );
     }
 
@@ -6196,5 +6304,24 @@ mod tests {
             !actor.agent_dirty_since_detect,
             "a scan consumes the flag; otherwise every tick re-projects the grid forever",
         );
+    }
+
+    #[test]
+    fn input_snapshot_publishes_after_seed_output_and_resize() {
+        let seeded = TerminalActor::new_with_seed(80, 24, b"\x1b[?2004h").expect("seeded");
+        assert!(seeded.handle.input_snapshot.borrow().bracketed_paste);
+
+        let mut actor = seeded.actor;
+        let mut snapshots = seeded.handle.input_snapshot;
+        snapshots.borrow_and_update();
+        actor.vt_write_for_test(b"\x1b[?1004h");
+        assert!(snapshots.has_changed().expect("publisher alive"));
+        assert!(snapshots.borrow_and_update().focus_reporting);
+
+        actor.handle_resize(101, 39, Some((11, 19)));
+        assert!(snapshots.has_changed().expect("publisher alive"));
+        let resized = *snapshots.borrow_and_update();
+        assert_eq!((resized.cols, resized.rows), (101, 39));
+        assert_eq!(resized.cell_px, (11, 19));
     }
 }

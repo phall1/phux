@@ -96,14 +96,36 @@ impl tokio::io::AsyncWrite for ClientStream {
 ///
 /// # Errors
 ///
-/// Returns [`DialError::Io`] on socket-level failures and
-/// [`DialError::Connect`] on TLS/upgrade failures (including a fingerprint
-/// that did not match the pin).
+/// Returns [`DialError::Unreachable`] when the host's name does not resolve
+/// or the TCP connect gets no answer (refused, no route, timed out),
+/// [`DialError::Connect`] on other connect and TLS/upgrade failures
+/// (including a fingerprint that did not match the pin), and
+/// [`DialError::Io`] on tungstenite-level socket I/O failures during the
+/// upgrade.
 pub async fn dial(d: &WsDial) -> Result<Ws, DialError> {
     let target = WsTarget::parse(&d.url)?;
+    // Resolve explicitly first: a name that does not resolve is a
+    // reachability failure, not a generic connect failure — on an overlay
+    // network, MagicDNS being down (Tailscale stopped on this end) fails
+    // exactly here. The connect below re-resolves the same (host, port)
+    // tuple, which after a successful lookup is a cheap cache hit and keeps
+    // one connect path that still tries every resolved address.
+    if let Err(err) = tokio::net::lookup_host((target.host.as_str(), target.port)).await {
+        return Err(DialError::Unreachable(format!(
+            "dial {}: name resolution failed: {err}",
+            target.addr_label()
+        )));
+    }
     let tcp = TcpStream::connect((target.host.as_str(), target.port))
         .await
-        .map_err(|err| DialError::Connect(format!("dial {}: {err}", target.addr_label())))?;
+        .map_err(|err| {
+            let msg = format!("dial {}: {err}", target.addr_label());
+            if crate::is_reachability_io(&err) {
+                DialError::Unreachable(msg)
+            } else {
+                DialError::Connect(msg)
+            }
+        })?;
     let stream = if target.secure {
         ClientStream::Tls(Box::new(tls_connect(tcp, &target, d).await?))
     } else {
@@ -289,5 +311,48 @@ mod tests {
     #[test]
     fn rejects_non_websocket_scheme() {
         assert!(WsTarget::parse("https://example.com/").is_err());
+    }
+
+    #[tokio::test]
+    async fn refused_tcp_connect_classifies_unreachable() {
+        // Bind then drop a listener so the port is known-refusing.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("bind");
+        let port = listener.local_addr().expect("local addr").port();
+        drop(listener);
+
+        let err = dial(&WsDial {
+            url: format!("ws://127.0.0.1:{port}"),
+            token: None,
+            trust: CertTrust::SkipVerify,
+            tls_server_name: None,
+        })
+        .await
+        .expect_err("nothing is listening");
+        assert!(matches!(err, DialError::Unreachable(_)), "got {err:?}");
+        assert!(
+            err.to_string()
+                .starts_with("transport connect error: dial 127.0.0.1:"),
+            "got {err}"
+        );
+    }
+
+    /// A hostname that does not resolve classifies as `Unreachable` — the
+    /// `MagicDNS`-down shape of an overlay outage. `.invalid` is reserved by
+    /// RFC 2606 and guaranteed never to resolve.
+    #[tokio::test]
+    async fn unresolvable_hostname_classifies_unreachable() {
+        let err = dial(&WsDial {
+            url: "ws://phux-test-nxdomain.invalid:8787".to_owned(),
+            token: None,
+            trust: CertTrust::SkipVerify,
+            tls_server_name: None,
+        })
+        .await
+        .expect_err(".invalid never resolves");
+        assert!(matches!(err, DialError::Unreachable(_)), "got {err:?}");
+        assert!(
+            err.to_string().contains("name resolution failed"),
+            "got {err}"
+        );
     }
 }

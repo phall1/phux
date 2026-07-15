@@ -80,6 +80,9 @@ amends / extends) are hand-curated from each ADR's body.
 | [0046](./0046-server-side-agent-state-detection.md) | The server derives agent state; detection is level-triggered | Accepted (extends [0040](./0040-agent-identity-metadata.md); implements [0029](./0029-one-cursor-authority-and-repaint-scheduler.md)'s repaint accumulator) |
 | [0047](./0047-ci-metrics-branch.md) | CI metrics recorded to an orphan `ci-metrics` branch | Accepted |
 | [0048](./0048-outbound-dial-out-connector-transport.md) | Outbound dial-out (connector) transport mode | Proposed (walks through [0037](./0037-overlay-network-reachability.md)'s deferred door; builds on [0031](./0031-remote-consumer-auth-and-encryption.md), [0038](./0038-hub-satellite-auth.md)) |
+| [0040](./0049-drag-to-resize-and-default-mouse-capture.md) | Drag-to-resize panes and default outer-terminal mouse capture | Accepted |
+| [0050](./0050-client-local-focus-and-advisory-attention.md) | Client-local focus and advisory agent attention | Accepted (reaffirms [0019](./0019-tui-multi-pane-rendering.md)) |
+| [0051](./0051-explicit-spawn-ownership.md) | Explicit spawn ownership, client-owned placement | Accepted |
 
 ## When to write an ADR
 

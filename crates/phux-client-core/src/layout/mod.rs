@@ -15,7 +15,9 @@
 //! metadata key `phux.tui.layout/v1`. The current envelope is v2 —
 //! `{version, windows: [{name, root: LayoutNode, focused_terminal}],
 //! focused_window_index}` (docs/spec/L3.md §3.2), encoded by
-//! [`Workspace::encode_cbor`] / [`Workspace::decode_cbor`]. The legacy
+//! [`Workspace::encode_cbor`] / [`Workspace::decode_cbor`]. Focus fields remain
+//! for compatibility but are non-authoritative; ADR-0049 requires recipients
+//! to preserve their client-local focus when adopting topology. The legacy
 //! v1 single-window envelope (`{version, root, focus}`,
 //! [`LayoutState::encode_cbor`]) is still decoded for back-compat and
 //! wrapped as a one-window workspace.
@@ -207,8 +209,9 @@ pub enum LayoutEncodeError {
 /// `kill_pane` the TUI mutates the in-memory tree and pushes the new
 /// shape back to the server via [`Self::encode_cbor`] + `SET_METADATA`.
 ///
-/// Focus is per-client and never travels over the wire (ADR-0019
-/// decision 6); it lives here as a convenience for the renderer.
+/// Focus is per-client (ADR-0019 decision 6). Compatibility envelopes still
+/// serialize it, but recipients ignore the sender's value during topology
+/// reconciliation (ADR-0049); it lives here as renderer-local state.
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct LayoutState {
     /// The binary split tree. `None` until the first pane is seeded.

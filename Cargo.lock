@@ -1609,7 +1609,7 @@ checksum = "68ab91017fe16c622486840e4c83c9a37afeff978bd239b5293d61ece587de66"
 [[package]]
 name = "libghostty-vt"
 version = "0.2.0"
-source = "git+https://github.com/phall1/libghostty-rs.git?rev=130d9e555252e80f2836228b9851f2f0186d97ee#130d9e555252e80f2836228b9851f2f0186d97ee"
+source = "git+https://github.com/phall1/libghostty-rs.git?rev=9d02528ac8028670b7d63596a2f049f64fd5f07f#9d02528ac8028670b7d63596a2f049f64fd5f07f"
 dependencies = [
  "bitflags 2.13.0",
  "int-enum",
@@ -1620,7 +1620,7 @@ dependencies = [
 [[package]]
 name = "libghostty-vt-sys"
 version = "0.2.0"
-source = "git+https://github.com/phall1/libghostty-rs.git?rev=130d9e555252e80f2836228b9851f2f0186d97ee#130d9e555252e80f2836228b9851f2f0186d97ee"
+source = "git+https://github.com/phall1/libghostty-rs.git?rev=9d02528ac8028670b7d63596a2f049f64fd5f07f#9d02528ac8028670b7d63596a2f049f64fd5f07f"
 
 [[package]]
 name = "libm"
@@ -2104,6 +2104,7 @@ dependencies = [
 name = "phux"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "clap",
  "dhat",
  "libghostty-vt",
@@ -2218,6 +2219,7 @@ dependencies = [
 name = "phux-mcp"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "phux-client",
  "phux-config",
  "phux-core",

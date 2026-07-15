@@ -238,6 +238,7 @@ fn spawn_terminal_in_default_group_round_trips_input() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -292,6 +293,90 @@ fn spawn_terminal_in_default_group_round_trips_input() {
     });
 }
 
+#[test]
+fn explicit_owner_terminal_selects_exact_session_window() {
+    run_local(async {
+        use phux_protocol::wire::frame::{TYPE_ATTACHED, TYPE_TERMINAL_SNAPSHOT};
+
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone(), None);
+
+        let mut first = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut first, &attach_create_if_missing("first")).await;
+        let (kind, attached) = recv_typed(&mut first).await;
+        assert_eq!(kind, TYPE_ATTACHED);
+        let owner = match attached {
+            FrameKind::Attached { snapshot, .. } => snapshot.focused_pane,
+            other => panic!("expected Attached, got {other:?}"),
+        };
+        assert_eq!(recv_typed(&mut first).await.0, TYPE_TERMINAL_SNAPSHOT);
+
+        let mut second = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(&mut second, &attach_create_if_missing("second")).await;
+        assert_eq!(recv_typed(&mut second).await.0, TYPE_ATTACHED);
+        assert_eq!(recv_typed(&mut second).await.0, TYPE_TERMINAL_SNAPSHOT);
+
+        let mut headless = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        send_frame(
+            &mut headless,
+            &FrameKind::SpawnTerminal {
+                request_id: 50,
+                group: DEFAULT_GROUP_ID,
+                command: Some(vec!["/bin/cat".to_owned()]),
+                cwd: None,
+                env: None,
+                term: None,
+                satellite: None,
+                owner_terminal: Some(owner.clone()),
+            },
+        )
+        .await;
+        let spawned = match await_terminal_spawned(&mut headless, 50).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("expected Ok, got {other:?}"),
+        };
+        send_frame(
+            &mut headless,
+            &FrameKind::Command {
+                request_id: 51,
+                command: Command::GetState {
+                    scope: StateScope::Server,
+                },
+            },
+        )
+        .await;
+        let snapshot = match await_command_result(&mut headless, 51).await {
+            CommandResult::OkWith(CommandValue::State(snapshot)) => snapshot,
+            other => panic!("expected state, got {other:?}"),
+        };
+        let owner_window = snapshot
+            .panes
+            .iter()
+            .find(|p| p.id == owner)
+            .unwrap()
+            .window_id;
+        let spawned_window = snapshot
+            .panes
+            .iter()
+            .find(|p| p.id == spawned)
+            .unwrap()
+            .window_id;
+        assert_eq!(
+            spawned_window, owner_window,
+            "ownership target must win over the most recently active second session"
+        );
+
+        drop((first, second, headless));
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
 /// Drain frames until a `COMMAND_RESULT` matching `request_id` arrives.
 async fn await_command_result(stream: &mut UnixStream, request_id: u32) -> CommandResult {
     let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
@@ -336,6 +421,7 @@ fn spawn_terminal_lands_in_attached_session_not_a_new_session() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -418,6 +504,7 @@ fn spawn_terminal_env_term_overrides_default() {
                 env: Some(vec![("TERM".to_owned(), "phux-spawn-override".to_owned())]),
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -472,6 +559,7 @@ fn spawn_terminal_default_term_is_xterm_256color() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -525,6 +613,7 @@ fn spawn_terminal_term_field_overrides_default() {
                 env: None,
                 term: Some("phux-term-field".to_owned()),
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -576,6 +665,7 @@ fn spawn_terminal_env_term_beats_term_field() {
                 env: Some(vec![("TERM".to_owned(), "phux-env-wins".to_owned())]),
                 term: Some("phux-term-field".to_owned()),
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -622,6 +712,7 @@ fn spawn_terminal_unknown_group_returns_group_not_found() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -669,6 +760,7 @@ fn spawn_terminal_emits_terminal_closed_on_pty_exit() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -734,6 +826,7 @@ fn terminal_resize_updates_pane_dims_observable_on_reattach() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -920,6 +1013,7 @@ fn spawn_terminal_injects_matching_terminal_id_env() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -1085,6 +1179,7 @@ fn spawn_terminal_inherits_focused_pane_live_cwd() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -1253,6 +1348,7 @@ fn spawn_terminal_session_root_inherits_seed_pane_dir() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;
@@ -1337,6 +1433,7 @@ fn spawn_terminal_last_cwd_per_window_inherits_active_pane_dir() {
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             },
         )
         .await;

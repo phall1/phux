@@ -36,6 +36,7 @@ pub mod copy;
 pub mod driver;
 mod exec_widgets;
 mod fleet;
+mod focus;
 // phux-foz.11: glass-diff regression + stress tests for the compose
 // invariant (no doubled text under rapid window switching / control spam).
 #[cfg(test)]

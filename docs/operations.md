@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-07-10
+last-reviewed: 2026-07-15
 ---
 
 # Operations
@@ -168,7 +168,7 @@ WebSocket/TLS and QUIC/TLS. SSH-stdio is built (phux-v45.9): the dialing side
 runs `ssh HOST phux stdio-bridge`, delegating authentication and encryption to
 SSH; the remote bridge is an ordinary local UDS client on the target host.
 
-**v0.2+ (future, wire-compatible):** Satellites are phux servers on other machines. The hub authenticates consumers and routes terminal sessions to satellite servers via the `Transport` trait ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)).
+**Federation hub (current):** Satellites are phux servers on other machines. A server started with `--hub` dials enabled `[[satellites]]`, aggregates their Terminal inventory, and routes host-qualified Terminal operations over the same wire ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)). Routes are hub-and-spoke and Terminal-scoped: remote sessions/windows are not merged, and relayed VT bytes remain opaque.
 
 Current remote transports:
 - **WebSocket/TCP:** `phux server --listen HOST:PORT`; loopback can be plaintext
@@ -298,9 +298,12 @@ phux is **overlay-agnostic** — pick what fits your trust model:
   or [Netbird](https://netbird.io)** — for hand-rolled overlays. All behave
   identically to phux; it only ever sees an IP.
 
+For step-by-step Tailscale, Headscale, and raw WireGuard walkthroughs, see
+[Remote access](./remote-access.md).
+
 ```sh
 # Before starting the server:
-phux pair                            # record the token + cert fingerprint
+phux pair                            # token + fingerprint, plus the detected overlay address
 
 # Server, reachable on its overlay address:
 phux server --listen 0.0.0.0:8787   # binds all interfaces, including the overlay
@@ -308,6 +311,12 @@ phux server --listen 0.0.0.0:8787   # binds all interfaces, including the overla
 # Client, from anywhere on the overlay:
 phux attach --ws wss://<overlay-host>:8787 --token HEX --cert-fingerprint FP
 ```
+
+Overlay-address detection in `phux pair` is best-effort (the `tailscale` CLI
+when present, else a CGNAT route heuristic); raw-WireGuard operators on
+private ranges find the address with their usual tooling. `PHUX_TAILSCALE`
+substitutes the CLI that `phux pair` runs (default: `tailscale` on PATH),
+mirroring `PHUX_SSH` for the hub dialer.
 
 Hosted relays, rendezvous servers, and NAT hole-punching that would remove the
 both-ends-install requirement are deliberately out of scope for the self-host
