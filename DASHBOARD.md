@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:29:13Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:29:30Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,31 +9,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 74 | 59% | 13m13s | 16m51s | 913 |
+| ci | 75 | 59% | 13m13s | 16m51s | 913 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
-| release-please | 12 | 100% | 36s | 48s | 22 |
-| conventional-commits | 68 | 91% | 16s | 19s | 13 |
+| release-please | 13 | 100% | 37s | 48s | 23 |
+| conventional-commits | 69 | 91% | 16s | 19s | 13 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 73 | 2s | 13m04s | 16m41s |
-| check | 72 | 2s | 2m37s | 4m23s |
-| detect docs-only | 74 | 2s | 5s | 7s |
+| test | 74 | 2s | 13m02s | 16m41s |
+| check | 73 | 2s | 2m37s | 4m23s |
+| detect docs-only | 75 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 12m43s | 10 |
+| test | tests (unit + e2e) | 12m45s | 9 |
 | check | rust checks (fmt + clippy + doc + deny) | 3m01s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 23s | 20 |
+| test | Run Swatinem/rust-cache@v2 | 23s | 18 |
 | check | Run Swatinem/rust-cache@v2 | 21s | 19 |
 | check | docs-check | 9s | 17 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 19 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 20 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 18 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -117,8 +117,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 10:29 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 10:28 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 10:28 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
+| 2026-07-15 10:28 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
+| 2026-07-15 10:28 | release-please | push | main | success | 38s | 33s |
 | 2026-07-15 10:27 | conventional-commits | pull_request | swarm/spawn-placement | success | 16s | 12s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/foundation-train | success | 15s | 12s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/layout-cli | success | 16s | 13s |
@@ -144,9 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:10 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 13s |
 | 2026-07-15 10:10 | release-please | push | main | success | 48s | 43s |
 | 2026-07-15 10:06 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 16s | 12s |
-| 2026-07-15 10:03 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 17s | 13s |
-| 2026-07-15 10:03 | conventional-commits | pull_request | feat/overlay-reachability-first- | success | 20s | 16s |
-| 2026-07-15 10:03 | ci | pull_request | feat/overlay-reachability-first- | success | 13m37s | 17m51s |
 
 ---
 
