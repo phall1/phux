@@ -169,6 +169,18 @@ pub const REGISTRY: &[ActionSpec] = &[
         args: &[],
     },
     ActionSpec {
+        name: "next-attention",
+        category: Category::Pane,
+        description: "Jump to the next pane waiting for an answer",
+        args: &[],
+    },
+    ActionSpec {
+        name: "return-from-attention",
+        category: Category::Pane,
+        description: "Return to where attention navigation started",
+        args: &[],
+    },
+    ActionSpec {
         name: "previous-pane",
         category: Category::Pane,
         description: "Cycle focus to the previous pane",
@@ -581,6 +593,13 @@ mod tests {
                  (add an ActionSpec or document it in PALETTE_EXEMPT)",
             );
         }
+    }
+
+    #[test]
+    fn attention_navigation_actions_are_registered() {
+        let names: BTreeSet<&str> = REGISTRY.iter().map(|spec| spec.name).collect();
+        assert!(names.contains("next-attention"));
+        assert!(names.contains("return-from-attention"));
     }
 
     #[test]
