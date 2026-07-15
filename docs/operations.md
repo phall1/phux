@@ -168,7 +168,7 @@ WebSocket/TLS and QUIC/TLS. SSH-stdio is built (phux-v45.9): the dialing side
 runs `ssh HOST phux stdio-bridge`, delegating authentication and encryption to
 SSH; the remote bridge is an ordinary local UDS client on the target host.
 
-**v0.2+ (future, wire-compatible):** Satellites are phux servers on other machines. The hub authenticates consumers and routes terminal sessions to satellite servers via the `Transport` trait ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)).
+**Federation hub (current):** Satellites are phux servers on other machines. A server started with `--hub` dials enabled `[[satellites]]`, aggregates their Terminal inventory, and routes host-qualified Terminal operations over the same wire ([ADR-0007](../ADR/0007-mosh-class-transport-and-satellites.md)). Routes are hub-and-spoke and Terminal-scoped: remote sessions/windows are not merged, and relayed VT bytes remain opaque.
 
 Current remote transports:
 - **WebSocket/TCP:** `phux server --listen HOST:PORT`; loopback can be plaintext

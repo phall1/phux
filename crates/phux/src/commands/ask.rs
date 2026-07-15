@@ -3,6 +3,7 @@ use std::process::ExitCode;
 
 use phux_client::ask::AskedPayload;
 use phux_client::attach::AttachError;
+use phux_client::selector::format_terminal_id;
 use phux_protocol::TerminalId;
 use phux_server::runtime::default_socket_path;
 
@@ -54,15 +55,7 @@ pub(crate) fn run_ask(
 
 fn print_success(pane: &TerminalId, payload: &AskedPayload, json: bool) -> ExitCode {
     if json {
-        let value = serde_json::json!({
-            "event": "asked",
-            "terminal": format!("@{}", pane.local_id().unwrap_or(0)),
-            "id": payload.id,
-            "question": payload.question,
-            "suggestions": payload.suggestions,
-            "elapsed_seconds": payload.elapsed_seconds,
-        });
-        match serde_json::to_string_pretty(&value) {
+        match serde_json::to_string_pretty(&success_json(pane, payload)) {
             Ok(line) => println!("{line}"),
             Err(err) => {
                 eprintln!("phux: failed to serialize ask: {err}");
@@ -70,11 +63,50 @@ fn print_success(pane: &TerminalId, payload: &AskedPayload, json: bool) -> ExitC
             }
         }
     } else {
-        println!(
-            "reported ask {} to @{}",
-            payload.id,
-            pane.local_id().unwrap_or(0)
-        );
+        println!("{}", success_text(pane, payload));
     }
     ExitCode::SUCCESS
+}
+
+fn success_json(pane: &TerminalId, payload: &AskedPayload) -> serde_json::Value {
+    serde_json::json!({
+        "event": "asked",
+        "terminal": format_terminal_id(pane),
+        "id": payload.id,
+        "question": payload.question,
+        "suggestions": payload.suggestions,
+        "elapsed_seconds": payload.elapsed_seconds,
+    })
+}
+
+fn success_text(pane: &TerminalId, payload: &AskedPayload) -> String {
+    format!(
+        "reported ask {} to {}",
+        payload.id,
+        format_terminal_id(pane)
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn satellite_success_outputs_canonical_selector() {
+        let pane = TerminalId::satellite("region/@build", 7);
+        let payload = AskedPayload {
+            id: "q1".to_owned(),
+            question: "Continue?".to_owned(),
+            suggestions: vec!["yes".to_owned()],
+            elapsed_seconds: Some(5),
+        };
+        assert_eq!(
+            success_json(&pane, &payload)["terminal"],
+            "region/@build/@7"
+        );
+        assert_eq!(
+            success_text(&pane, &payload),
+            "reported ask q1 to region/@build/@7"
+        );
+    }
 }
