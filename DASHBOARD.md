@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T19:24:44Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T19:27:07Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 125 | 60% | 13m29s | 17m15s | 1539 |
+| ci | 126 | 60% | 13m18s | 17m15s | 1551 |
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 19 | 100% | 41s | 52s | 27 |
@@ -19,30 +19,30 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 124 | 2s | 13m18s | 17m02s |
-| check | 123 | 2s | 2m37s | 4m27s |
-| detect docs-only | 125 | 2s | 5s | 7s |
+| test | 125 | 2s | 13m18s | 17m02s |
+| check | 124 | 2s | 2m37s | 4m27s |
+| detect docs-only | 126 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 15m20s | 16 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 16 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 17 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 18 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 17 |
-| check | docs-check | 9s | 15 |
+| test | tests (unit + e2e) | 15m20s | 15 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 17 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 18 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 18 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 18 |
+| check | docs-check | 9s | 16 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 18 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m08s | 63 |
-| ci / check | doc | 14s | 63 |
-| ci / check | deny | 3s | 63 |
-| ci / check | fmt | 1s | 66 |
+| ci / check | clippy | 2m02s | 64 |
+| ci / check | doc | 14s | 64 |
+| ci / check | deny | 3s | 64 |
+| ci / check | fmt | 1s | 67 |
 | ci / test | unit | 13m05s | 54 |
 | ci / test | e2e | 9s | 53 |
 | observatory / timings | build-dev | 10m47s | 3 |
@@ -53,7 +53,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 32% | 69 |
+| ci / check | 31% | 70 |
 | ci / test | 39% | 67 |
 | stress / stress | 0% | 1 |
 
@@ -120,6 +120,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 19:24 | conventional-commits | pull_request | fix/hook-env-socket | success | 14s | 11s |
 | 2026-07-15 19:19 | conventional-commits | pull_request | feat/phux-pair-qr | success | 16s | 12s |
 | 2026-07-15 19:18 | conventional-commits | pull_request | ci/agents-smoke | success | 18s | 15s |
+| 2026-07-15 19:18 | ci | pull_request | ci/agents-smoke | failure | 8m39s | 12m07s |
 | 2026-07-15 19:11 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 14s |
 | 2026-07-15 19:11 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 19:11 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:25 | conventional-commits | pull_request | release-please--branches--main-- | success | 13s | 11s |
 | 2026-07-15 18:25 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 18:25 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
-| 2026-07-15 18:25 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
 
 ---
 
