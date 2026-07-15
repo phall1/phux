@@ -1,7 +1,241 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T03:36:13Z",
+  "generated_at": "2026-07-15T04:26:40Z",
   "recent_runs": [
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:25:40Z",
+      "duration_s": 20,
+      "runner_s": 17
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:11:53Z",
+      "duration_s": 13,
+      "runner_s": 10
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:11:53Z",
+      "duration_s": 821,
+      "runner_s": 976
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T04:08:51Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:08:51Z",
+      "duration_s": 16,
+      "runner_s": 12
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:08:33Z",
+      "duration_s": 13,
+      "runner_s": 9
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T04:08:33Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T04:08:32Z",
+      "duration_s": 2,
+      "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:08:13Z",
+      "duration_s": 37,
+      "runner_s": 32
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T04:08:13Z",
+      "duration_s": 809,
+      "runner_s": 1045
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:56:58Z",
+      "duration_s": 843,
+      "runner_s": 1074
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:56:58Z",
+      "duration_s": 18,
+      "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "fix/mouse-encoder-size-and-scroll",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:52:06Z",
+      "duration_s": 963,
+      "runner_s": 1106
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/mouse-encoder-size-and-scroll",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:52:06Z",
+      "duration_s": 15,
+      "runner_s": 12
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T03:42:39Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:42:38Z",
+      "duration_s": 14,
+      "runner_s": 10
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:42:07Z",
+      "duration_s": 821,
+      "runner_s": 971
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:42:07Z",
+      "duration_s": 16,
+      "runner_s": 13
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "failure",
+      "created_at": "2026-07-15T03:40:54Z",
+      "duration_s": 790,
+      "runner_s": 973
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:40:54Z",
+      "duration_s": 12,
+      "runner_s": 10
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:39:51Z",
+      "duration_s": 16,
+      "runner_s": 12
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:39:51Z",
+      "duration_s": 71,
+      "runner_s": 84
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:38:43Z",
+      "duration_s": 17,
+      "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:38:43Z",
+      "duration_s": 88,
+      "runner_s": 105
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/mouse-encoder-size-and-scroll",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:36:15Z",
+      "duration_s": 16,
+      "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "fix/mouse-encoder-size-and-scroll",
+      "conclusion": "success",
+      "created_at": "2026-07-15T03:36:15Z",
+      "duration_s": 769,
+      "runner_s": 917
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -10,6 +244,15 @@
       "created_at": "2026-07-15T03:30:36Z",
       "duration_s": 19,
       "runner_s": 16
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ci-observability",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-15T03:30:36Z",
+      "duration_s": 509,
+      "runner_s": 655
     },
     {
       "workflow": "conventional-commits",
@@ -21,192 +264,221 @@
       "runner_s": 12
     },
     {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:26:47Z",
-      "duration_s": 17,
-      "runner_s": 14
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/mouse-encoder-size-and-scroll",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:22:09Z",
-      "duration_s": 19,
-      "runner_s": 17
-    },
-    {
       "workflow": "ci",
       "event": "pull_request",
-      "branch": "fix/mouse-encoder-size-and-scroll",
+      "branch": "ci/draft-release-prs",
       "conclusion": "success",
-      "created_at": "2026-07-15T03:22:09Z",
-      "duration_s": 745,
-      "runner_s": 893
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:13:05Z",
-      "duration_s": 17,
-      "runner_s": 12
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:13:05Z",
-      "duration_s": 989,
-      "runner_s": 1214
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "ci/node24-actions",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:12:37Z",
-      "duration_s": 17,
-      "runner_s": 13
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "ci/node24-actions",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:12:37Z",
-      "duration_s": 845,
-      "runner_s": 975
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:11:56Z",
-      "duration_s": 21,
-      "runner_s": 18
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:11:56Z",
-      "duration_s": 963,
-      "runner_s": 1116
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "ci/node24-actions",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T03:09:28Z",
-      "duration_s": 209,
-      "runner_s": 400
+      "created_at": "2026-07-15T03:29:08Z",
+      "duration_s": 774,
+      "runner_s": 926
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 5,
-      "success_rate": 80,
-      "median_s": 845,
+      "runs": 20,
+      "success_rate": 60,
+      "median_s": 774,
       "p95_s": 963,
-      "runner_minutes": 77
+      "runner_minutes": 240
     },
     {
       "workflow": "conventional-commits",
-      "runs": 5,
-      "success_rate": 100,
-      "median_s": 17,
+      "runs": 16,
+      "success_rate": 94,
+      "median_s": 16,
       "p95_s": 19,
-      "runner_minutes": 1
+      "runner_minutes": 3
     },
     {
       "workflow": "release-please",
-      "runs": 2,
+      "runs": 5,
       "success_rate": 100,
-      "median_s": 17,
-      "p95_s": 17,
-      "runner_minutes": 1
+      "median_s": 20,
+      "p95_s": 21,
+      "runner_minutes": 2
     }
   ],
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 5,
+      "runs": 20,
       "median_queue_s": 2,
-      "median_s": 812,
+      "median_s": 763,
       "p95_s": 954
     },
     {
       "job": "check",
-      "runs": 5,
+      "runs": 20,
       "median_queue_s": 2,
-      "median_s": 157,
-      "p95_s": 197
+      "median_s": 155,
+      "p95_s": 242
     },
     {
       "job": "detect docs-only",
-      "runs": 5,
+      "runs": 20,
       "median_queue_s": 2,
-      "median_s": 6,
-      "p95_s": 6
+      "median_s": 5,
+      "p95_s": 7
     }
   ],
   "slow_steps": [
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 760,
-      "n": 4
+      "median_s": 761,
+      "n": 13
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 102,
-      "n": 4
+      "n": 14
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 22,
-      "n": 5
+      "n": 16
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 18,
-      "n": 5
+      "median_s": 22,
+      "n": 15
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 4
+      "n": 14
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 5
+      "n": 17
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 5
+      "n": 17
     }
   ],
-  "cache": [],
-  "phase_medians": [],
-  "slow_tests": [],
+  "cache": [
+    {
+      "workflow": "ci",
+      "job": "check",
+      "samples": 5,
+      "hit_rate": 60
+    },
+    {
+      "workflow": "ci",
+      "job": "test",
+      "samples": 3,
+      "hit_rate": 100
+    }
+  ],
+  "phase_medians": [
+    {
+      "workflow": "ci",
+      "job": "check",
+      "phase": "clippy",
+      "median_s": 40,
+      "n": 4
+    },
+    {
+      "workflow": "ci",
+      "job": "check",
+      "phase": "doc",
+      "median_s": 11,
+      "n": 4
+    },
+    {
+      "workflow": "ci",
+      "job": "check",
+      "phase": "deny",
+      "median_s": 3,
+      "n": 4
+    },
+    {
+      "workflow": "ci",
+      "job": "check",
+      "phase": "fmt",
+      "median_s": 1,
+      "n": 4
+    },
+    {
+      "workflow": "ci",
+      "job": "test",
+      "phase": "unit",
+      "median_s": 716,
+      "n": 2
+    },
+    {
+      "workflow": "ci",
+      "job": "test",
+      "phase": "e2e",
+      "median_s": 8,
+      "n": 2
+    }
+  ],
+  "slow_tests": {
+    "sha": "b10c26f44",
+    "tests": [
+      {
+        "binary": "phux-server::perf_bursty_output",
+        "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
+        "seconds": 116.798
+      },
+      {
+        "binary": "phux-server",
+        "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
+        "seconds": 28.688
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "a_plain_shell_pane_never_gets_an_agent_record",
+        "seconds": 6.017
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "deleting_the_record_hands_it_back_to_the_detector",
+        "seconds": 3.814
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
+        "seconds": 3.813
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "detector_publishes_blocked_from_a_live_prompt_box",
+        "seconds": 3.517
+      },
+      {
+        "binary": "phux-server::agent_events",
+        "test": "unattached_subscriber_receives_events",
+        "seconds": 3.015
+      },
+      {
+        "binary": "phux-server::phux_3uv_acked_incremental",
+        "test": "acked_incremental_converges_and_seq_is_monotonic",
+        "seconds": 2.514
+      },
+      {
+        "binary": "phux-server",
+        "test": "runtime::input_lane::tests::lane_routed_input_interleaves_with_a_large_pty_output_burst",
+        "seconds": 2.124
+      },
+      {
+        "binary": "phux-server::l2_adversarial",
+        "test": "test_subscribe_events_no_loss",
+        "seconds": 2.016
+      }
+    ]
+  },
   "build_timings": [],
   "binary_size": {
     "latest": null,
