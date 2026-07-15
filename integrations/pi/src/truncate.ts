@@ -18,15 +18,34 @@ export function truncateText(input: string, maxChars: number): TruncatedText {
     return { text: "", truncated: true, omittedChars: chars.length };
   }
 
-  const omittedChars = chars.length - maxChars;
-  const marker = `\n... ${omittedChars} characters omitted ...\n`;
-  const markerChars = Array.from(marker);
+  let omittedChars = chars.length - maxChars;
+  let marker = `\n... ${omittedChars} characters omitted ...\n`;
+  let markerChars = Array.from(marker);
   if (markerChars.length >= maxChars) {
     return {
       text: chars.slice(0, maxChars).join(""),
       truncated: true,
       omittedChars,
     };
+  }
+
+  // The marker consumes part of maxChars, so more source characters are
+  // omitted than `input.length - maxChars`. Iterate because the corrected
+  // count can itself change the marker's digit width.
+  for (;;) {
+    const contentBudget = maxChars - markerChars.length;
+    const corrected = chars.length - contentBudget;
+    if (corrected === omittedChars) break;
+    omittedChars = corrected;
+    marker = `\n... ${omittedChars} characters omitted ...\n`;
+    markerChars = Array.from(marker);
+    if (markerChars.length >= maxChars) {
+      return {
+        text: chars.slice(0, maxChars).join(""),
+        truncated: true,
+        omittedChars: chars.length - maxChars,
+      };
+    }
   }
 
   const contentBudget = maxChars - markerChars.length;

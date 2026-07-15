@@ -1,5 +1,11 @@
 import { PhuxError } from "./errors.js";
-import { nodeProcessRunner, type ProcessResult, type ProcessRunner, type RunRequest } from "./runner.js";
+import {
+  DEFAULT_MAX_OUTPUT_BYTES,
+  nodeProcessRunner,
+  type ProcessResult,
+  type ProcessRunner,
+  type RunRequest,
+} from "./runner.js";
 import {
   parseRunResult,
   parseScreenState,
@@ -16,6 +22,8 @@ export interface PhuxCliOptions {
   readonly cwd?: string;
   readonly env?: NodeJS.ProcessEnv;
   readonly runner?: ProcessRunner;
+  readonly maxStdoutBytes?: number;
+  readonly maxStderrBytes?: number;
 }
 
 export interface ExecutionOptions {
@@ -40,6 +48,10 @@ export interface WaitOptions extends ExecutionOptions {
   readonly phuxTimeoutSeconds?: number;
 }
 
+export type WaitOutcome =
+  | { readonly outcome: "satisfied"; readonly screen: ScreenState }
+  | { readonly outcome: "timed_out"; readonly screen: ScreenState };
+
 export interface RunOptions extends ExecutionOptions {
   /** phux's own sentinel deadline, in seconds (distinct from local timeoutMs). */
   readonly phuxTimeoutSeconds?: number;
@@ -60,6 +72,8 @@ export class PhuxCli {
   private readonly cwd: string | undefined;
   private readonly env: NodeJS.ProcessEnv | undefined;
   private readonly runner: ProcessRunner;
+  private readonly maxStdoutBytes: number;
+  private readonly maxStderrBytes: number;
 
   constructor(options: PhuxCliOptions = {}) {
     this.executable = options.executable ?? "phux";
@@ -67,6 +81,10 @@ export class PhuxCli {
     this.cwd = options.cwd;
     this.env = options.env;
     this.runner = options.runner ?? nodeProcessRunner;
+    this.maxStdoutBytes = options.maxStdoutBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    this.maxStderrBytes = options.maxStderrBytes ?? DEFAULT_MAX_OUTPUT_BYTES;
+    requireNonNegativeInteger(this.maxStdoutBytes, "maxStdoutBytes");
+    requireNonNegativeInteger(this.maxStderrBytes, "maxStderrBytes");
   }
 
   async probe(options: ExecutionOptions = {}): Promise<PhuxProbe> {
@@ -87,7 +105,10 @@ export class PhuxCli {
       }
       return { available: true, version: match[1], rawVersion };
     } catch (error) {
-      if (error instanceof PhuxError && (error.code === "aborted" || error.code === "timeout")) throw error;
+      if (error instanceof PhuxError &&
+          (error.code === "aborted" || error.code === "timeout" || error.code === "output_limit")) {
+        throw error;
+      }
       return {
         available: false,
         reason: isMissingExecutable(error)
@@ -115,7 +136,7 @@ export class PhuxCli {
     return this.jsonCommand("snapshot", args, options, parseScreenState);
   }
 
-  async wait(options: WaitOptions = {}): Promise<ScreenState> {
+  async wait(options: WaitOptions = {}): Promise<WaitOutcome> {
     const args = ["wait", "--json"];
     if (options.until !== undefined) args.push("--until", options.until);
     if (options.idleMs !== undefined) {
@@ -128,7 +149,12 @@ export class PhuxCli {
     }
     this.pushSocket(args);
     if (options.target !== undefined) args.push(options.target);
-    return this.jsonCommand("wait", args, options, parseScreenState);
+    const result = await this.completed("wait", args, options, true);
+    if (result.exitCode !== 0 && result.exitCode !== 124) {
+      throw commandFailed("wait", this.executable, args, result);
+    }
+    const screen = parseJson("wait", this.executable, result.stdout, args, parseScreenState);
+    return { outcome: result.exitCode === 124 ? "timed_out" : "satisfied", screen };
   }
 
   async run(target: string, command: readonly string[], options: RunOptions = {}): Promise<RunResult> {
@@ -209,6 +235,8 @@ export class PhuxCli {
       ...(this.env === undefined ? {} : { env: this.env }),
       ...(options.signal === undefined ? {} : { signal: options.signal }),
       ...(options.timeoutMs === undefined ? {} : { timeoutMs: options.timeoutMs }),
+      maxStdoutBytes: this.maxStdoutBytes,
+      maxStderrBytes: this.maxStderrBytes,
     };
     return this.runner(request);
   }
@@ -222,6 +250,14 @@ export class PhuxCli {
         argv,
         stderr: result.stderr,
       });
+    }
+    if (result.termination === "output_limit") {
+      const limit = result.outputLimit === "stdout" ? this.maxStdoutBytes : this.maxStderrBytes;
+      throw new PhuxError(
+        "output_limit",
+        `phux command exceeded the ${String(limit)}-byte ${result.outputLimit} capture limit`,
+        { argv, stderr: result.stderr },
+      );
     }
   }
 

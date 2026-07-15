@@ -3,6 +3,7 @@ export type PhuxErrorCode =
   | "command_failed"
   | "aborted"
   | "timeout"
+  | "output_limit"
   | "malformed_json"
   | "invalid_response";
 

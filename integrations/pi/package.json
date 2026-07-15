@@ -15,13 +15,19 @@
     "terminal"
   ],
   "files": [
-    "extensions",
-    "src",
+    "dist",
+    "extensions/index.ts",
     "README.md"
   ],
   "exports": {
-    ".": "./src/index.ts",
-    "./adapter": "./src/adapter.ts"
+    ".": {
+      "types": "./dist/src/index.d.ts",
+      "import": "./dist/src/index.js"
+    },
+    "./adapter": {
+      "types": "./dist/src/adapter.d.ts",
+      "import": "./dist/src/adapter.js"
+    }
   },
   "pi": {
     "extensions": [
@@ -29,10 +35,12 @@
     ]
   },
   "scripts": {
-    "build": "tsc -p tsconfig.build.json",
+    "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
+    "build": "npm run clean && tsc -p tsconfig.build.json",
     "test": "npm run build:test && node --test dist/test/*.test.js",
-    "build:test": "tsc -p tsconfig.test.json",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "build:test": "npm run clean && tsc -p tsconfig.test.json",
+    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "prepack": "npm run build"
   },
   "devDependencies": {
     "@types/node": "^24.0.0",

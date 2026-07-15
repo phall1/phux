@@ -27,6 +27,16 @@ function expectCode(code: PhuxError["code"]): (error: unknown) => boolean {
   return (error) => error instanceof PhuxError && error.code === code;
 }
 
+const screenJson = JSON.stringify({
+  schema_version: 3,
+  pane: 1,
+  cols: 80,
+  rows: 1,
+  cursor: { x: 0, y: 0, visible: true },
+  lines: ["ready"],
+  scrollback: [],
+});
+
 test("ls parses the documented CLI shape and passes flags before positionals", async () => {
   const fake = fakeRunner(completed(JSON.stringify({
     schema_version: 1,
@@ -38,6 +48,32 @@ test("ls parses the documented CLI shape and passes flags before positionals", a
 
   assert.deepEqual(result.sessions, [{ name: "work", windows: 2, attached: false }]);
   assert.deepEqual(fake.requests[0]?.args, ["ls", "--json", "--socket", "/tmp/p.sock"]);
+});
+
+test("wait preserves the final screen for exit 0 and specialized exit 124", async () => {
+  const satisfied = new PhuxCli({ runner: fakeRunner(completed(screenJson, 0)).runner });
+  assert.deepEqual(await satisfied.wait(), {
+    outcome: "satisfied",
+    screen: {
+      schema_version: 3,
+      pane: 1,
+      cols: 80,
+      rows: 1,
+      cursor: { x: 0, y: 0, visible: true },
+      lines: ["ready"],
+      scrollback: [],
+    },
+  });
+
+  const timedOut = new PhuxCli({ runner: fakeRunner(completed(screenJson, 124)).runner });
+  const outcome = await timedOut.wait();
+  assert.equal(outcome.outcome, "timed_out");
+  assert.deepEqual(outcome.screen.lines, ["ready"]);
+});
+
+test("wait keeps unrelated nonzero exits as command failures", async () => {
+  const cli = new PhuxCli({ runner: fakeRunner(completed("", 1, "no server")).runner });
+  await assert.rejects(cli.wait(), expectCode("command_failed"));
 });
 
 test("run treats a documented nonzero child exit as typed data", async () => {
@@ -89,6 +125,23 @@ test("abort and local timeout are distinct normalized errors", async () => {
 
   await assert.rejects(aborted.ls(), expectCode("aborted"));
   await assert.rejects(timedOut.ls(), expectCode("timeout"));
+});
+
+test("output overflow is exposed as a typed actionable error", async () => {
+  const overflow: ProcessResult = {
+    termination: "output_limit",
+    outputLimit: "stdout",
+    exitCode: null,
+    stdout: "partial",
+    stderr: "",
+  };
+  const cli = new PhuxCli({ runner: fakeRunner(overflow).runner, maxStdoutBytes: 7 });
+  await assert.rejects(
+    cli.ls(),
+    (error) => error instanceof PhuxError &&
+      error.code === "output_limit" &&
+      error.message.includes("7-byte stdout"),
+  );
 });
 
 test("CLI parsers reject similar MCP response shapes", async () => {
