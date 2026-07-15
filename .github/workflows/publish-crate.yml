@@ -49,7 +49,7 @@ jobs:
         with:
           ref: ${{ inputs.tag }}
       - uses: DeterminateSystems/nix-installer-action@v22
-      - uses: cachix/cachix-action@v15
+      - uses: cachix/cachix-action@v17
         with:
           name: phux
           authToken: ${{ secrets.CACHIX_AUTH_TOKEN }}

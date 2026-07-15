@@ -1,0 +1,16 @@
+# actionlint configuration.
+#
+# The `paths` ignores below suppress FALSE POSITIVES from actionlint's
+# bundled popular-actions schema snapshot, which (as of actionlint 1.7.12)
+# predates actions/create-github-app-token v3 (2026-03): the real v3
+# action.yml defines `client-id` and demotes `app-id` to a deprecated
+# optional input, but the bundled snapshot still requires `app-id` and does
+# not know `client-id`. Verified against the action.yml at tags v3 and
+# v3.2.0. Drop these ignores once a newer actionlint ships a refreshed
+# snapshot (re-run `actionlint .github/workflows/*.yml` without them to
+# check).
+paths:
+  .github/workflows/release-please.yml:
+    ignore:
+      - 'missing input "app-id" which is required by action "actions/create-github-app-token@v3"'
+      - 'input "client-id" is not defined in action "actions/create-github-app-token@v3"'
