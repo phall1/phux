@@ -57,8 +57,6 @@ Authoritative docs, in order of priority:
   (process model, crate graph, data model, threading, transport).
 - [`docs/consumers/tui.md`](./docs/consumers/tui.md) — TUI consumer
   surface (CLI, config, keybindings, status bar, hooks).
-- [`docs/consumers/opencode.md`](./docs/consumers/opencode.md) — public
-  OpenCode plugin setup, tools, lifecycle, and safety boundaries.
 - [`docs/operations.md`](./docs/operations.md) — error model, logging,
   security boundaries.
 - [`docs/vision.md`](./docs/vision.md) — the long arc.
