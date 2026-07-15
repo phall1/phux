@@ -1978,7 +1978,7 @@ impl TerminalActor {
             }
             TerminalInput::Mouse(event) => {
                 let mut enc = self.mouse_enc.borrow_mut();
-                let bytes = enc.encode(event, &terminal)?;
+                let bytes = enc.encode(event, &terminal, self.cell_px)?;
                 Ok(Some(bytes.to_vec()))
             }
             TerminalInput::Focus(event) => {

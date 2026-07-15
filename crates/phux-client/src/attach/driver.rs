@@ -1694,6 +1694,12 @@ async fn main_loop<W: super::RenderSink>(
     // viewport (clients own their chrome per DESIGN §8.5).
     let mut viewport_dims: (u16, u16) =
         current_viewport().map_or((80, 24), |v| (v.cols.max(1), v.rows.max(1)));
+    // Host per-cell pixel size for the INPUT_MOUSE cells→pixels scaling
+    // (SPEC input.md §3.1). Tracked next to `viewport_dims` and refreshed
+    // on the same SIGWINCH edge — a monitor change can move the window to
+    // a display with a different cell size (phux-yyex).
+    let mut cell_px_dims: (u16, u16) =
+        current_viewport().map_or(HOST_CELL_PX_FALLBACK, |v| host_cell_px(&v));
     let mut session_name = String::new();
     // phux-4li.20: cache of the server's session graph, refreshed from
     // every ATTACHED snapshot. The `<leader> a` session picker reads
@@ -2151,6 +2157,7 @@ async fn main_loop<W: super::RenderSink>(
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
+                    cell_px: cell_px_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
                     pending_windows: &mut pending_windows,
@@ -2913,6 +2920,7 @@ async fn main_loop<W: super::RenderSink>(
                     resolver: resolver.as_mut(),
                     workspace: &mut workspace,
                     viewport: viewport_dims,
+                    cell_px: cell_px_dims,
                     next_request_id: &mut next_request_id,
                     pending_splits: &mut pending_splits,
                     pending_windows: &mut pending_windows,
@@ -3106,6 +3114,7 @@ async fn main_loop<W: super::RenderSink>(
                 let prev_dims = viewport_dims;
                 let viewport = current_viewport_or_default();
                 viewport_dims = (viewport.cols.max(1), viewport.rows.max(1));
+                cell_px_dims = host_cell_px(&viewport);
                 // Bound predict to the FOCUSED pane's current grid, not the
                 // whole viewport — predictions are pane-local (phux-7ry0). The
                 // pane grids resize on the server's resize-ack snapshot, which
@@ -4131,6 +4140,31 @@ fn current_viewport_or_default() -> ViewportInfo {
             ViewportInfo::new(80, 24)
         }
     }
+}
+
+/// Host per-cell pixel fallback when the outer terminal reports no pixel
+/// geometry. MUST stay equal to the server's `DEFAULT_CELL_PX` (and the
+/// kitty-graphics `FALLBACK_CELL_PX` in `paint.rs`): with no pixel report
+/// the server keeps its seed cell size, and `INPUT_MOUSE` positions only
+/// quantize back to the right cell if both ends assume the same geometry
+/// (phux-yyex, SPEC input.md §3.1).
+const HOST_CELL_PX_FALLBACK: (u16, u16) = (8, 16);
+
+/// Derive the host's per-cell pixel size from a [`ViewportInfo`], mirroring
+/// the server's SPEC L1 §9.2.1 derivation exactly (`pixel / cells`,
+/// floored; degenerate axes rejected). The dispatcher scales pane-local
+/// cell coordinates by this at the `INPUT_MOUSE` send boundary, so client
+/// and server must floor the same division on the same numbers.
+fn host_cell_px(viewport: &ViewportInfo) -> (u16, u16) {
+    let derived = (|| {
+        if viewport.cols == 0 || viewport.rows == 0 {
+            return None;
+        }
+        let w = viewport.pixel_w? / viewport.cols;
+        let h = viewport.pixel_h? / viewport.rows;
+        (w > 0 && h > 0).then_some((w, h))
+    })();
+    derived.unwrap_or(HOST_CELL_PX_FALLBACK)
 }
 
 /// Read the controlling-TTY size via `tcgetwinsize` and return the
