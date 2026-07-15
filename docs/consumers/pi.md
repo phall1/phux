@@ -8,9 +8,9 @@ last-reviewed: 2026-07-15
 
 **TL;DR.** `@phux/pi` lets Pi select and operate a pane in an external local
 phux server while preserving the target in Pi's session history. It provides
-six bounded terminal tools, three human commands, and best-effort Pi lifecycle
-metadata. It does not embed a terminal, provide remote authentication, or own
-the phux server.
+eighteen bounded terminal tools, three human commands, branch-local named
+targets, and best-effort Pi lifecycle metadata. It does not embed a terminal,
+provide remote authentication, or own the phux server.
 
 ---
 
@@ -59,16 +59,26 @@ absolute `executable`, but the installed Pi extension expects `phux` on `PATH`.
 
 ## Surface
 
-The extension registers exactly these six model tools:
+The extension registers exactly these sixteen model tools:
 
 | Tool | Operation |
 |---|---|
 | `phux_list` | List phux sessions. |
 | `phux_create` | Create a named session without attaching and select its seed pane. |
-| `phux_snapshot` | Read a pane's bounded screen projection. |
-| `phux_send_keys` | Send named keys or literal key text to a pane. |
+| `phux_snapshot` | Read a pane's bounded, side-effect-free screen projection. |
+| `phux_send_keys` | Send named keys or literal key text to one pane. |
 | `phux_run` | Run one shell command line and return its exit result. |
 | `phux_wait` | Wait for visible text or idleness and return the bounded final screen. |
+| `phux_panes` | Inventory pane ownership, agent state, attention, title, cwd, and evidence. |
+| `phux_spawn` | Spawn a pane without attaching and optionally save an alias. |
+| `phux_launch` | Launch a configured integration from the CLI's versioned machine result. |
+| `phux_kill` | With an explicit target and `confirm:true`, destroy a selector, alias, or the validated members of a named group. Selectors and groups may destroy multiple panes. |
+| `phux_signal` | Interrupt, freeze, or resume a pane's process group; terminate and kill require an explicit target and `confirm:true` because selectors may affect multiple processes or panes. |
+| `phux_tag` | List, add, or remove terminal tags. |
+| `phux_ask` | Report a human-attention ask event. |
+| `phux_watch_events` | Collect typed events for 50 ms–30 s, then stop the streaming CLI subprocess. |
+| `phux_rendered_snapshot` | Capture the attached client's composited frame at bounded dimensions. |
+| `phux_targets` | List or mutate branch-local named aliases and groups. |
 
 It registers exactly these three human commands:
 
@@ -82,18 +92,36 @@ The headless phux CLI owns argument syntax, selector rules, JSON, and exit
 codes. Use the [agent CLI guide](./agents.md) for that canonical contract rather
 than treating this adapter as a second CLI definition.
 
-Tool output sent to the model is bounded to 200 lines and 12 KiB. The result
-states when the adapter truncated output and preserves a separate truncation
-flag reported by phux.
+Input-authority control is an upstream blocker rather than a Pi tool. The
+`take` lease is scoped to a live CLI connection, and a one-shot CLI invocation
+disconnects immediately and releases it; `give` consequently cannot represent
+a durable paired action either. These tools must remain absent until phux
+provides a persistent transport/lifetime that Pi can safely own.
 
-## Selecting and preserving a target
+Tool output sent to the model is bounded to 200 lines and 12 KiB. CLI stdout
+and stderr capture are independently bounded, every subprocess accepts Pi
+cancellation, and targeted CLI tools expose finite local timeouts. The watch
+adapter requires a finite collection window and returns at most 100 parsed events rather than
+leaving an indefinitely streaming subprocess. Results state when the adapter
+truncated output and preserve a separate truncation flag reported by phux.
+
+## Selecting and preserving targets
 
 `/phux` inventories the public agent projection, groups panes by session, and
 stores the chosen canonical pane selector plus its owning session and window.
 `phux_create` stores the same ownership fields for the newly created seed pane.
-The selection is appended as a versioned custom entry in Pi's session branch,
-so resuming or moving through the branch reconstructs the latest selection on
-that branch.
+The selection is appended as the existing versioned `phux-target` custom entry
+in Pi's session branch, preserving compatibility with earlier package sessions.
+
+`phux_targets` adds named aliases and groups in a separate versioned branch
+entry. Use `alias:build` anywhere a tool accepts one pane; `phux_kill` and
+`phux_tag` also accept `group:workers` and expand it to at most 64 canonical
+pane selectors. Definitions store pane ownership, not only `@id`. Immediately
+before every named-target action, the extension refreshes inventory and rejects
+missing or reused ids; inventory failure fails closed. Explicit raw CLI
+selectors are caller-owned and bypass this named-target check. Branch
+navigation reconstructs the latest selection and named-target document on that
+branch.
 
 Restoration never silently falls back to phux's focused pane. Before an
 implicit target is made available to tools or lifecycle reporting, the
@@ -142,9 +170,16 @@ lock; it does not prevent the interleaved-input case above.
 
 ## Current boundaries and security
 
-- There is no paste tool. `phux_send_keys` sends key items, not a clipboard or
-  bracketed-paste operation. Do not present it as safe paste support; dedicated
-  paste remains tracked work under bead `phux-foir`.
+- There is no paste tool. The current canonical CLI ships no headless paste
+  verb, so the adapter does not synthesize paste from `send-keys` or bypass the
+  CLI. `phux_send_keys` remains key input only; dedicated paste is tracked by
+  bead `phux-foir`.
+- `phux_rendered_snapshot` follows the CLI's `snapshot --rendered` contract:
+  unlike ordinary snapshot it attaches a headless client and establishes that
+  client's bounded viewport. Use `phux_snapshot` for a side-effect-free pane
+  read.
+- `phux_launch` validates schema version 1, integration id, plugin id, terminal
+  id, and resolved argv. It never returns the resolved argv to the model.
 - The package is a Node/Pi integration around an external native process. It
   has no WASM build and does not render or nest a terminal inside Pi.
 - Remote phux attach, pairing, and token transport are not supported. The

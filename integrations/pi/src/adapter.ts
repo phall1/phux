@@ -9,17 +9,28 @@ import {
 import {
   parseAgentRecord,
   parseAgentStateList,
+  parseAskedEvent,
   parseCreateResult,
+  parseLaunchResult,
+  parseRenderedFrame,
   parseRunResult,
   parseScreenState,
   parseSessionList,
+  parseSpawnResult,
+  parseWatchEvent,
   SchemaValidationError,
   type AgentRecord,
   type AgentStateList,
+  type AskedEvent,
   type CreateResult,
+  type LaunchResult,
+  type RenderedFrame,
   type RunResult,
   type ScreenState,
   type SessionList,
+  type SpawnResult,
+  type TagRow,
+  type WatchEvent,
 } from "./schemas.js";
 
 export interface PhuxCliOptions {
@@ -70,6 +81,45 @@ export interface RunOptions extends ExecutionOptions {
 
 export interface AgentTargetOptions extends ExecutionOptions {
   readonly target: string;
+}
+
+export interface SpawnOptions extends ExecutionOptions {
+  readonly satellite?: string;
+  readonly cwd?: string;
+  readonly command?: readonly string[];
+}
+
+export interface LaunchOptions extends ExecutionOptions {
+  readonly cwd?: string;
+  readonly extra?: readonly string[];
+}
+
+export interface RenderedSnapshotOptions extends ExecutionOptions {
+  readonly session?: string;
+  readonly cols: number;
+  readonly rows: number;
+}
+
+export interface AskOptions extends ExecutionOptions {
+  readonly id?: string;
+  readonly suggestions?: readonly string[];
+  readonly elapsedSeconds?: number;
+}
+
+export type TerminalSignal = "interrupt" | "freeze" | "resume" | "terminate" | "kill";
+export type TagAction = "ls" | "add" | "rm";
+
+export interface WatchOptions extends ExecutionOptions {
+  readonly target: string;
+  /** Required collection window. The streaming CLI is always stopped after this bound. */
+  readonly durationMs: number;
+  readonly maxEvents: number;
+}
+
+export interface WatchCollection {
+  readonly events: readonly WatchEvent[];
+  readonly truncated: boolean;
+  readonly ended: boolean;
 }
 
 export interface PhuxProbe {
@@ -167,6 +217,31 @@ export class PhuxCli {
     return this.jsonCommand("new", args, options, parseCreateResult);
   }
 
+  async spawn(options: SpawnOptions = {}): Promise<SpawnResult> {
+    const args = ["spawn", "--json"];
+    if (options.satellite !== undefined) args.push("--satellite", options.satellite);
+    if (options.cwd !== undefined) args.push("--cwd", options.cwd);
+    this.pushSocket(args);
+    if (options.command !== undefined) {
+      if (options.command.length === 0) throw new TypeError("command must contain at least one argv item");
+      args.push("--", ...options.command);
+    }
+    return this.jsonCommand("spawn", args, options, parseSpawnResult);
+  }
+
+  async launch(integration: string, options: LaunchOptions = {}): Promise<LaunchResult> {
+    if (integration.trim().length === 0) throw new TypeError("integration must be non-empty");
+    const args = ["launch", "--json"];
+    if (options.cwd !== undefined) args.push("--cwd", options.cwd);
+    this.pushSocket(args);
+    args.push(integration);
+    if (options.extra !== undefined) {
+      if (options.extra.length === 0) throw new TypeError("extra must contain at least one argv item");
+      args.push("--", ...options.extra);
+    }
+    return this.jsonCommand("launch", args, options, parseLaunchResult);
+  }
+
   /** Read one pane's public projection, including declared-record provenance. */
   async agentShow(options: AgentTargetOptions): Promise<AgentStateList> {
     const args = ["agent", "show", "--json"];
@@ -202,6 +277,15 @@ export class PhuxCli {
     if (!/^@\d+\t-$/.test(result.stdout.trim())) {
       throw invalidResponse("agent clear", this.executable, args, "expected @N\\t- confirmation");
     }
+  }
+
+  async renderedSnapshot(options: RenderedSnapshotOptions): Promise<RenderedFrame> {
+    requirePositiveInteger(options.cols, "cols");
+    requirePositiveInteger(options.rows, "rows");
+    const args = ["snapshot", "--rendered", "--json", "--cols", String(options.cols), "--rows", String(options.rows)];
+    this.pushSocket(args);
+    if (options.session !== undefined) args.push(options.session);
+    return this.jsonCommand("snapshot --rendered", args, options, parseRenderedFrame);
   }
 
   async snapshot(options: SnapshotOptions = {}): Promise<ScreenState> {
@@ -271,6 +355,69 @@ export class PhuxCli {
     this.pushSocket(args);
     args.push(target, ...keys);
     await this.completed("send-keys", args, options, false);
+  }
+
+  async kill(target: string, options: ExecutionOptions = {}): Promise<void> {
+    const args = ["kill", target];
+    this.pushSocket(args);
+    await this.completed("kill", args, options, false);
+  }
+
+  async signal(target: string, signal: TerminalSignal, options: ExecutionOptions = {}): Promise<void> {
+    const args = ["signal", target, signal];
+    this.pushSocket(args);
+    await this.completed("signal", args, options, false);
+  }
+
+  async tag(action: TagAction, target: string, tags: readonly string[] = [], options: ExecutionOptions = {}): Promise<readonly TagRow[]> {
+    if (action !== "ls" && tags.length === 0) throw new TypeError("tags must contain at least one item");
+    if (action === "ls" && tags.length !== 0) throw new TypeError("tag ls does not accept tags");
+    const args = ["tag", action, target, ...tags];
+    this.pushSocket(args);
+    const result = await this.completed(`tag ${action}`, args, options, false);
+    return parseTagRows(result.stdout, `tag ${action}`, this.executable, args);
+  }
+
+  async ask(target: string, question: string, options: AskOptions = {}): Promise<AskedEvent> {
+    if (question.trim().length === 0) throw new TypeError("question must be non-empty");
+    const args = ["ask", target, "--json"];
+    if (options.id !== undefined) args.push("--id", options.id);
+    for (const suggestion of options.suggestions ?? []) args.push("--suggest", suggestion);
+    if (options.elapsedSeconds !== undefined) {
+      requireNonNegativeInteger(options.elapsedSeconds, "elapsedSeconds");
+      args.push("--elapsed-seconds", String(options.elapsedSeconds));
+    }
+    this.pushSocket(args);
+    args.push(question);
+    return this.jsonCommand("ask", args, options, parseAskedEvent);
+  }
+
+  async watch(options: WatchOptions): Promise<WatchCollection> {
+    requirePositiveInteger(options.durationMs, "durationMs");
+    requirePositiveInteger(options.maxEvents, "maxEvents");
+    const args = ["watch", "--json"];
+    this.pushSocket(args);
+    args.push(options.target);
+    let result: ProcessResult;
+    try {
+      result = await this.execute(args, { ...options, timeoutMs: options.durationMs });
+    } catch (cause) {
+      throw new PhuxError("unavailable", `could not start phux executable ${JSON.stringify(this.executable)}: ${errorText(cause)}`, {
+        argv: [this.executable, ...args], cause,
+      });
+    }
+    if (result.termination === "aborted") this.throwTermination(result, [this.executable, ...args]);
+    if (result.termination === "output_limit") this.throwTermination(result, [this.executable, ...args]);
+    if (result.termination === "completed" && result.exitCode !== 0) {
+      throw commandFailed("watch", this.executable, args, result);
+    }
+    const events = parseWatchLines(result.stdout, this.executable, args);
+    const truncated = events.length > options.maxEvents;
+    return {
+      events: truncated ? events.slice(-options.maxEvents) : events,
+      truncated,
+      ended: result.termination === "completed",
+    };
   }
 
   private async jsonCommand<T>(
@@ -392,6 +539,41 @@ function parseAgentConfirmation(
   return parseJson(verb, executable, line.slice(tab + 1), args, parseAgentRecord);
 }
 
+function parseWatchLines(stdout: string, executable: string, args: string[]): WatchEvent[] {
+  const lines = stdout.split("\n").filter((line) => line.trim().length > 0);
+  return lines.map((line, index) => {
+    let value: unknown;
+    try {
+      value = JSON.parse(line);
+    } catch (cause) {
+      throw new PhuxError("malformed_json", `phux watch returned malformed JSON on line ${String(index + 1)}: ${errorText(cause)}`, {
+        argv: [executable, ...args], cause,
+      });
+    }
+    try {
+      return parseWatchEvent(value, `$[${index}] (phux watch --json line)`);
+    } catch (cause) {
+      if (cause instanceof SchemaValidationError) {
+        throw invalidResponse("watch", executable, args, cause.message, cause);
+      }
+      throw cause;
+    }
+  });
+}
+
+function parseTagRows(stdout: string, verb: string, executable: string, args: string[]): TagRow[] {
+  const lines = stdout.trim().length === 0 ? [] : stdout.trim().split("\n");
+  if (lines.length === 0) throw invalidResponse(verb, executable, args, "expected at least one @N\\t<tag text> confirmation");
+  return lines.map((line) => {
+    const tab = line.indexOf("\t");
+    const terminal = tab < 0 ? "" : line.slice(0, tab);
+    if (!/^@\d+$/.test(terminal)) {
+      throw invalidResponse(verb, executable, args, "expected @N\\t<tag text> confirmation");
+    }
+    return { terminal, tagsText: line.slice(tab + 1) };
+  });
+}
+
 function invalidResponse(
   verb: string,
   executable: string,
@@ -453,5 +635,11 @@ function errorText(error: unknown): string {
 function requireNonNegativeInteger(value: number, name: string): void {
   if (!Number.isSafeInteger(value) || value < 0) {
     throw new RangeError(`${name} must be a non-negative safe integer`);
+  }
+}
+
+function requirePositiveInteger(value: number, name: string): void {
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError(`${name} must be a positive safe integer`);
   }
 }
