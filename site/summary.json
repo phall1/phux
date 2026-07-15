@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T08:44:30Z",
+  "generated_at": "2026-07-15T08:44:46Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T08:44:34Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T03:42:07Z",
       "duration_s": 821,
       "runner_s": 971
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T03:42:07Z",
-      "duration_s": 16,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
@@ -284,9 +284,9 @@
     },
     {
       "workflow": "stress",
-      "runs": 3,
-      "success_rate": 67,
-      "median_s": 1271,
+      "runs": 4,
+      "success_rate": 50,
+      "median_s": 1,
       "p95_s": 1271,
       "runner_minutes": 43
     },
