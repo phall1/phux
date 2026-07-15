@@ -1,7 +1,13 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { parseScreenState, SchemaValidationError } from "../src/schemas.js";
+import {
+  parseLaunchResult,
+  parseRenderedFrame,
+  parseScreenState,
+  parseWatchEvent,
+  SchemaValidationError,
+} from "../src/schemas.js";
 import { truncateLines, truncateText } from "../src/truncate.js";
 
 test("screen parser validates dimensions and normalizes additive fields", () => {
@@ -15,6 +21,16 @@ test("screen parser validates dimensions and normalizes additive fields", () => 
   });
   assert.deepEqual(screen.scrollback, []);
   assert.throws(() => parseScreenState({ ...screen, rows: 2 }), SchemaValidationError);
+});
+
+test("new machine parsers reject incompatible versions and malformed event payloads", () => {
+  assert.throws(() => parseLaunchResult({
+    schema_version: 2, terminal_id: 1, integration: "codex", plugin: "agents", argv: ["codex"],
+  }), SchemaValidationError);
+  assert.throws(() => parseWatchEvent({ event: "asked", terminal: "@1", id: "q" }), SchemaValidationError);
+  assert.throws(() => parseRenderedFrame({
+    schema_version: 1, cols: 2, rows: 1, cursor: null, cells: [],
+  }), /exactly 2 entries/);
 });
 
 test("truncation helpers bound output and retain newest lines", () => {
