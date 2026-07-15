@@ -67,7 +67,9 @@ The agent surfaces nest:
 All three are unprivileged consumers
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); none holds a
 protocol-level privilege. The wire underneath stays additive and versioned,
-normative under [`../spec/`](../spec/).
+normative under [`../spec/`](../spec/). Installing `phux-mcp` does not make its
+tools visible to a host; see [Registering with a host](./mcp.md#registering-with-a-host)
+for the Claude Code command and generic stdio configuration.
 
 The selector grammar is owned by [`tui.md`](./tui.md) §3; this file links there
 rather than restating the table (the doc system's one-fact-one-home rule). The

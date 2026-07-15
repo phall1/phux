@@ -17,6 +17,54 @@ shared agent surface and live in their owning docs; this file links them.
 
 ---
 
+## Registering with a host
+
+Installing phux puts `phux-mcp` on `PATH`, but does not register it with an
+MCP host. Start phux first so the server is running (`phux` starts it when
+needed), then register the stdio adapter with Claude Code:
+
+```sh
+claude mcp add phux -- phux-mcp
+```
+
+`phux-mcp` does not auto-start the phux server, and neither does the
+`phux_new` tool. Leave the server running while the host calls tools such as
+`phux_ls`.
+
+For another MCP host, select its stdio transport and use `phux-mcp` with no
+arguments. Hosts that use the common MCP server configuration shape can use:
+
+```json
+{
+  "mcpServers": {
+    "phux": {
+      "command": "phux-mcp"
+    }
+  }
+}
+```
+
+The adapter connects to the default phux socket. For a non-default socket, set
+`PHUX_SOCKET` in the environment the host gives the MCP process:
+
+```json
+{
+  "mcpServers": {
+    "phux": {
+      "command": "phux-mcp",
+      "env": {
+        "PHUX_SOCKET": "/absolute/path/to/phux.sock"
+      }
+    }
+  }
+}
+```
+
+An individual tool call can instead supply its optional `socket` argument;
+that argument takes precedence over `PHUX_SOCKET`. The adapter does not read
+credentials or require credentials in its host configuration: access is to
+the local Unix socket under the permissions of the user running the host.
+
 ## 0. What this is, what this isn't
 
 This is the MCP adapter only. `phux-mcp` has no separate core: each tool
