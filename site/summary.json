@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T11:00:12Z",
+  "generated_at": "2026-07-15T11:00:25Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-15T11:00:10Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,23 +271,14 @@
       "created_at": "2026-07-15T10:19:14Z",
       "duration_s": 846,
       "runner_s": 1033
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "swarm/pi-parity",
-      "conclusion": "success",
-      "created_at": "2026-07-15T10:19:07Z",
-      "duration_s": 15,
-      "runner_s": 10
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 85,
+      "runs": 86,
       "success_rate": 62,
-      "median_s": 816,
+      "median_s": 809,
       "p95_s": 1012,
       "runner_minutes": 1080
     },
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 84,
+      "runs": 85,
       "median_queue_s": 2,
       "median_s": 802,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 83,
+      "runs": 84,
       "median_queue_s": 2,
-      "median_s": 157,
+      "median_s": 156,
       "p95_s": 263
     },
     {
       "job": "detect docs-only",
-      "runs": 85,
+      "runs": 86,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -349,7 +349,7 @@
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 149,
-      "n": 20
+      "n": 18
     },
     {
       "job": "test",
@@ -361,13 +361,13 @@
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 21,
-      "n": 20
+      "n": 18
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 20
+      "n": 18
     },
     {
       "job": "test",
@@ -379,7 +379,7 @@
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 20
+      "n": 18
     }
   ],
   "cache": [
