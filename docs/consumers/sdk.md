@@ -6,11 +6,11 @@ last-reviewed: 2026-06-06
 
 # The internal Rust client library
 
-**TL;DR.** `phux-client` is the in-tree Rust library behind the CLI and MCP
-adapter. It speaks `phux-protocol` and exposes useful internal client
-functions, but it is unpublished and its typed `Agent` facade is incomplete.
-Treat the CLI and versioned JSON shapes as the supported programmatic surface
-today, not this crate as a stable public SDK.
+**TL;DR.** `phux-client` is the unpublished, in-tree Rust library behind the
+CLI and MCP adapter. Its programmatic control surface is a set of async free
+functions for selection, snapshots, input, commands, waits, events, and asks;
+it has no typed client facade or stable public SDK contract. External callers
+should use the CLI or MCP adapter.
 
 ---
 
@@ -22,11 +22,11 @@ the [MCP adapter](./mcp.md), but downstream consumers cannot depend on a
 versioned crates.io package yet. It wraps the `phux-protocol` codec and the
 internal resolution, snapshot, run, and wait functions used by the binaries.
 
-This sits at **L1** — the terminal substrate ([`../spec/L1.md`](../spec/L1.md)).
-A program using it speaks terminal lifecycle, input atoms, snapshots, and
-events; it does not get sessions, windows, or layout as types. Those are L3
-conventions plus client logic ([`../spec/L3.md`](../spec/L3.md)), not part of
-the L1 handle.
+Its transport operations speak **L1**, the terminal substrate
+([`../spec/L1.md`](../spec/L1.md)): terminal lifecycle, input atoms, snapshots,
+and events. The crate also contains client-side L3 helpers for session/window
+selection and layout; those model conventions over L1 state rather than adding
+a privileged wire tier ([`../spec/L3.md`](../spec/L3.md)).
 
 It is one consumer among peers — the reference TUI, the [web client](./web.md),
 the [CLI agent surface](./agents.md), and the [MCP adapter](./mcp.md) — none
@@ -48,16 +48,32 @@ engine, not a normative structured wire tier, and a consumer that wants to
 own its projection follows phux-web's carry-your-own-engine shape instead.
 Either way the wire stays identical; only the projection differs.
 
-## The agent handle
+## Free-function surface
 
-`phux-client` also contains a typed `Agent` handle, but it is not a complete
-public facade. Command execution, event subscription, signals, attach/create,
-and prompt-readiness behavior are incomplete or stubbed. Its types show the
-direction of a native SDK; they are not a shipped compatibility promise.
+There is no `Agent` handle. The CLI and MCP adapter compose the crate's module
+functions directly:
 
-Use the [CLI agent surface](./agents.md) or [MCP adapter](./mcp.md) today. Their
-`ScreenState`, `RunResult`, and `WaitOutcome` JSON shapes are versioned, though
-still pre-1.0.
+- `selector::{parse, resolve, resolve_with_tags, pick_target_pane}` parses the
+  CLI target grammar and resolves it against a `SessionSnapshot`.
+- `snapshot::{get_screen, get_screen_scrollback}` reads structured screen
+  state without attaching or resizing the terminal.
+- `send_keys::{send, send_to}` routes input to a focused or already-resolved
+  terminal.
+- `run::{run, run_in}` submits a command and returns a `RunOutcome` with its
+  captured `RunResult` or timeout state.
+- `wait::poll_until` polls screen state for a `Condition` and returns a
+  `WaitResult`.
+- `watch::{watch_events, collect_events}` consumes the pushed `AgentEvent`
+  stream continuously or with finite bounds.
+- `ask::report` reports an `AskedPayload` to the existing event stream.
+
+The async operation functions open the connections they need and return
+`attach::AttachError` for transport, protocol, or server refusal failures.
+The selector helpers are synchronous and operate on caller-provided snapshots.
+These are workspace-internal Rust APIs, not a compatibility facade. Use the
+[CLI agent surface](./agents.md) or [MCP adapter](./mcp.md) outside the
+workspace. Their `ScreenState`, `RunResult`, and `WaitOutcome` JSON shapes are
+versioned, though still pre-1.0.
 
 ## Where to read
 

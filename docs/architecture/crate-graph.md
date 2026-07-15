@@ -129,9 +129,9 @@ Cross-cuts:
 - **Automation** — server-side rules subscribing to L1 events. Not yet implemented; an optional service when it lands.
 
 A consumer's tier set is declared at HELLO time. Today's `phux-client`
-is an L1+L3-equivalent TUI consumer. The `phux-client` SDK is L1-only;
-a future native GUI consumer will be L1+L3 with its own metadata
-schema. The reference TUI is **not** protocol-privileged
+is an L1+L3-equivalent TUI consumer. Its workspace-internal headless
+free functions use L1; a future native GUI consumer will be L1+L3 with
+its own metadata schema. The reference TUI is **not** protocol-privileged
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)) — the wire
 carries nothing that exists for it alone.
 
