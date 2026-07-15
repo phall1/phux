@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:19:46Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:20:02Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 12 | 100% | 36s | 48s | 22 |
-| conventional-commits | 62 | 92% | 16s | 19s | 12 |
+| conventional-commits | 64 | 92% | 16s | 19s | 12 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 10:19 | conventional-commits | pull_request | fix/client-local-focus | success | 14s | 10s |
+| 2026-07-15 10:19 | conventional-commits | pull_request | fix/input-lane-ordering | success | 19s | 16s |
 | 2026-07-15 10:19 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 14s | 10s |
 | 2026-07-15 10:19 | conventional-commits | pull_request | swarm/satellite-selectors | success | 15s | 10s |
 | 2026-07-15 10:19 | conventional-commits | pull_request | swarm/pi-parity | success | 15s | 10s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 12s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | fix/headless-watch-idle | success | 17s | 12s |
-| 2026-07-15 09:56 | ci | pull_request | fix/headless-watch-idle | success | 13m52s | 16m05s |
-| 2026-07-15 09:56 | release-please | push | main | success | 41s | 35s |
 
 ---
 
