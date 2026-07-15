@@ -196,6 +196,14 @@ which-key-delay-ms = 600
 #       once attached). The rows refresh live as agent events arrive.
 "A" = "agent-fleet"
 
+# Attention navigation (phux-oih5.16, ADR-0049). q jumps to the next pane
+# with a pending AgentEvent::Asked, cycling by window order then DFS leaf
+# order; Q returns to the pane where that excursion began. These unoccupied
+# lowercase/uppercase mnemonic keys are client-local and never write layout
+# metadata or shared focus. The fleet dashboard above remains unchanged.
+"q" = "next-attention"
+"Q" = "return-from-attention"
+
 # New session: C (Shift-c) creates a fresh session and switches this
 # client to it in-process. With no name it opens a prompt; the session
 # picker (s, alias a) also offers a "+ New session" row. (Lowercase c is

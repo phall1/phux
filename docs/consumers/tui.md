@@ -1644,6 +1644,15 @@ surface that names windows, colored by the `attention` theme slot
   (`[ ASK xN ]` when several panes are asking), sitting left of the
   ADR-0033 supervisory badge when one is up.
 
+**Jump and return.** `C-a q` (`next-attention`) jumps to the next asking
+pane in deterministic window order, then depth-first leaf order, wrapping at
+the end. The first jump saves the pane you came from; further cycling does
+not overwrite it. `C-a Q` (`return-from-attention`) returns there once and
+consumes the saved origin. If no pane is asking, no origin was saved, or the
+origin closed, the action bells without moving focus. Both actions are
+client-local: they send no frame and write no layout metadata or shared focus.
+`C-a A` remains the full agent-fleet dashboard (§5.6).
+
 **Clearing rule.** Attention clears when the client forwards key or
 paste input to the asking pane — i.e. you focused it and typed
 (presumably answering). Merely focusing or clicking the pane does
@@ -1652,6 +1661,14 @@ paste input to the asking pane — i.e. you focused it and typed
 on the next `Asked` after input cleared it. The flag is client-local
 and per-attach — it does not persist across detach/reattach (a
 re-emitted `Asked` from the ADR-0036 detector re-raises it).
+
+**Implementation provenance.** The attention channel tracked as
+`phux-oih5.15` is already present: the wire `AgentEvent::Asked`, explicit ask
+hook, server detector/state, and TUI asked fold shipped in commits `bdb64f6`,
+`2e59992`, `23c7bca`, and `28f0b34`. No replacement wire is introduced here.
+The shared/directed-focus proposals tracked as `phux-oih5.10` and
+`phux-oih5.17` are superseded by accepted ADR-0049: topology may be shared,
+but focus authority and advisory attention navigation remain client-local.
 
 ---
 

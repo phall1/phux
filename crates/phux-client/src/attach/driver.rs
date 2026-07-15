@@ -69,6 +69,30 @@ use crate::render::chrome::status_bar::StatusBarPainter;
 use crate::render::overlay::OverlayState;
 use phux_config::SidebarPosition;
 
+/// Driver-owned state for client-local attention navigation (phux-oih5.16).
+///
+/// The first jump saves the pane the user came from. Further cycling leaves
+/// that origin untouched; return consumes it even when the pane has gone
+/// stale. Nothing in this state is serialized or written to metadata.
+#[derive(Debug, Default, PartialEq, Eq)]
+pub(super) struct AttentionNavigation {
+    origin: Option<TerminalId>,
+}
+
+impl AttentionNavigation {
+    /// Save an origin only when a navigation excursion is not already active.
+    pub(super) fn save_origin_once(&mut self, origin: Option<&TerminalId>) {
+        if self.origin.is_none() {
+            self.origin = origin.cloned();
+        }
+    }
+
+    /// Consume the saved origin. A stale origin must not remain armed forever.
+    pub(super) const fn take_origin(&mut self) -> Option<TerminalId> {
+        self.origin.take()
+    }
+}
+
 /// One pane's mirror: the libghostty Terminal that ingests
 /// `TERMINAL_OUTPUT` and the renderer that paints it to the outer
 /// terminal. Grown from "one of these per attach" (single-pane v0) to
@@ -1671,6 +1695,10 @@ async fn main_loop<W: super::RenderSink>(
     // route to the overlay (no pane forwarding) and pane stdout flushes
     // are suppressed (ADR-0020 §Decision invariant 5).
     let mut overlays = OverlayState::new();
+    // phux-oih5.16: one client-local return point for attention navigation.
+    // Cycling never overwrites it; return consumes it. It is deliberately
+    // absent from Workspace/L3 metadata and resets on re-attach.
+    let mut attention_navigation = AttentionNavigation::default();
     // ADR-0048: the in-flight divider drag. `None` between drags; a press
     // on a divider records the grabbed split, motion re-tunes it, release
     // clears it. Lives across dispatch batches (press and release land in
@@ -2178,6 +2206,7 @@ async fn main_loop<W: super::RenderSink>(
                     status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
+                    attention_navigation: &mut attention_navigation,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
@@ -2941,6 +2970,7 @@ async fn main_loop<W: super::RenderSink>(
                     status_bar: status_bar.as_ref(),
                     drag: &mut drag,
                     mouse_optout: &mut mouse_optout,
+                    attention_navigation: &mut attention_navigation,
                     plugin_actions: &plugin_actions,
                     plugin_panes: &plugin_panes,
                     plugin_tx: Some(&plugin_tx),
@@ -4683,6 +4713,17 @@ mod tests {
         assert_eq!(format_attention_hint(0), None);
         assert_eq!(format_attention_hint(1).as_deref(), Some("[ ASK ]"));
         assert_eq!(format_attention_hint(3).as_deref(), Some("[ ASK x3 ]"));
+    }
+
+    /// phux-oih5.16: the driver holds exactly one client-local origin. A
+    /// second attention jump cannot overwrite it, and return consumes it.
+    #[test]
+    fn attention_navigation_saves_once_and_consumes() {
+        let mut navigation = AttentionNavigation::default();
+        navigation.save_origin_once(Some(&TerminalId::local(1)));
+        navigation.save_origin_once(Some(&TerminalId::local(2)));
+        assert_eq!(navigation.take_origin(), Some(TerminalId::local(1)));
+        assert_eq!(navigation.take_origin(), None);
     }
 
     /// phux-foz.1: key/paste input forwarded to a pane clears its asked
