@@ -30,7 +30,7 @@ use std::future::Future;
 use std::io;
 use std::net::SocketAddr;
 use std::os::fd::RawFd;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use phux_protocol::wire::frame::{ErrorCode, FrameKind};
@@ -237,12 +237,52 @@ pub fn default_socket_path() -> PathBuf {
     p
 }
 
+/// Maximum byte length of a Unix-domain-socket path on this platform.
+///
+/// `bind(2)` and `connect(2)` copy the path into `sockaddr_un.sun_path`,
+/// a fixed-size buffer that must also hold a trailing NUL: 108 bytes on
+/// Linux, 104 on macOS and the BSDs, so the usable maximum is one less.
+/// Documented conservative constants are used rather than sizing
+/// `libc::sockaddr_un` because `libc` is a macOS-gated dependency here.
+pub const MAX_SOCKET_PATH_LEN: usize = if cfg!(target_os = "linux") { 107 } else { 103 };
+
+/// Check that `path` fits in a `sockaddr_un` on this platform.
+///
+/// A path longer than [`MAX_SOCKET_PATH_LEN`] can never be bound *or*
+/// connected to, so both the server's bind path and the CLI's
+/// connect/auto-spawn path validate up front and surface
+/// [`ServerError::SocketPathTooLong`] — which names the platform limit,
+/// the offending path, and its byte length — instead of the kernel's
+/// opaque "path must be shorter than `SUN_LEN`".
+pub fn validate_socket_path_len(path: &Path) -> Result<(), ServerError> {
+    let len = path.as_os_str().len();
+    if len > MAX_SOCKET_PATH_LEN {
+        return Err(ServerError::SocketPathTooLong {
+            path: path.to_path_buf(),
+            len,
+        });
+    }
+    Ok(())
+}
+
 /// Errors surfaced by [`ServerRuntime`].
 #[derive(Debug, thiserror::Error)]
 pub enum ServerError {
     /// The Unix domain socket could not be bound.
     #[error("failed to bind unix socket: {0}")]
     Bind(#[source] io::Error),
+
+    /// The socket path cannot fit in a `sockaddr_un`, so neither a server
+    /// bind nor a client connect could ever succeed on it.
+    #[error(
+        "socket path {path} is {len} bytes, but unix domain socket paths on this platform are limited to {MAX_SOCKET_PATH_LEN} bytes; pick a shorter path (e.g. under /tmp) via PHUX_SOCKET or --socket"
+    )]
+    SocketPathTooLong {
+        /// The over-long socket path.
+        path: PathBuf,
+        /// Byte length of `path`.
+        len: usize,
+    },
 
     /// Another server appears to be live at this socket path. The path is
     /// returned so callers can present a useful diagnostic.
@@ -487,6 +527,11 @@ impl ServerRuntime {
             );
             listener
         } else {
+            // phux-iwuc: fail fast on a path that cannot fit in a
+            // `sockaddr_un` — `bind(2)` would only reject it later with an
+            // opaque `SUN_LEN` error. The resume branch above adopts an
+            // already-bound listener, so only a fresh bind needs the gate.
+            validate_socket_path_len(&socket_path)?;
             prepare_socket_dir(&socket_path)?;
             handle_existing_socket(&socket_path).await?;
             let listener = crate::transport::UdsListener::new(
@@ -1068,6 +1113,35 @@ mod tests {
     use phux_protocol::caps::ClientCapabilities;
     use phux_protocol::wire::frame::{AttachTarget, ViewportInfo};
     use tokio::task::JoinSet;
+
+    #[test]
+    fn socket_path_at_the_platform_limit_is_accepted() {
+        // Exactly MAX_SOCKET_PATH_LEN bytes: a leading '/' plus the fill.
+        let path = PathBuf::from(format!("/{}", "a".repeat(MAX_SOCKET_PATH_LEN - 1)));
+        assert_eq!(path.as_os_str().len(), MAX_SOCKET_PATH_LEN);
+        validate_socket_path_len(&path).unwrap();
+    }
+
+    #[test]
+    fn socket_path_over_the_platform_limit_names_limit_and_length() {
+        let len = MAX_SOCKET_PATH_LEN + 1;
+        let path = PathBuf::from(format!("/{}", "a".repeat(len - 1)));
+        let err = validate_socket_path_len(&path).unwrap_err();
+        assert!(matches!(err, ServerError::SocketPathTooLong { .. }));
+        let msg = err.to_string();
+        assert!(
+            msg.contains(&format!("{len} bytes")),
+            "offending length missing from: {msg}"
+        );
+        assert!(
+            msg.contains(&format!("{MAX_SOCKET_PATH_LEN} bytes")),
+            "platform limit missing from: {msg}"
+        );
+        assert!(
+            msg.contains("/tmp"),
+            "shorter-path remedy missing from: {msg}"
+        );
+    }
 
     #[test]
     fn detach_aborts_raw_output_pumps_without_closing_writer_mailbox() {

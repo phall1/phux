@@ -44,6 +44,12 @@ pub(crate) fn run_server(
     resume: Option<std::os::fd::RawFd>,
 ) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
+    // phux-iwuc: fail before the banner and the runtime bring-up when the
+    // path cannot fit in a sockaddr_un — the bind inside `run_async` would
+    // gate it too, but only after "listening on ..." has already printed.
+    if let Err(code) = crate::commands::ensure_socket_path_fits(&socket_path) {
+        return code;
+    }
 
     // Banner only for a hand-started foreground server (a human watching
     // a long-running process). The `--daemonize` child of the auto-spawn

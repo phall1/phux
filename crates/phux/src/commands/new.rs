@@ -48,6 +48,11 @@ pub(crate) fn run_new(
     };
 
     let socket_path = socket.unwrap_or_else(default_socket_path);
+    // phux-iwuc: fail before auto-spawn with the sockaddr_un limit named,
+    // instead of the 2s spawn timeout + a doomed connect.
+    if let Err(code) = crate::commands::ensure_socket_path_fits(&socket_path) {
+        return code;
+    }
     let rt = match cli_runtime() {
         Ok(rt) => rt,
         Err(code) => return code,
