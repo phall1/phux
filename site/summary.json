@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T18:27:13Z",
+  "generated_at": "2026-07-15T18:30:29Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "ci/sccache-workspace-cache",
+      "conclusion": "success",
+      "created_at": "2026-07-15T18:30:03Z",
+      "duration_s": 14,
+      "runner_s": 11
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T17:59:06Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/phux-pair-qr",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T17:59:06Z",
-      "duration_s": 18,
-      "runner_s": 14
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 106,
+      "runs": 107,
       "success_rate": 86,
       "median_s": 16,
       "p95_s": 20,
