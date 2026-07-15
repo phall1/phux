@@ -44,9 +44,12 @@ slow_tests='[]'
 junit_stats='null'
 junit_path="${PHUX_JUNIT:-}"
 if [ -n "$junit_path" ] && [ -s "$junit_path" ]; then
+    # awk, not `head -15`: head closes the pipe after 15 lines and a junit
+    # with thousands of testcases then kills sort with SIGPIPE, which
+    # pipefail turns into a failed lane ("sort: write error").
     slow_tests=$(grep -oE '<testcase [^>]*' "$junit_path" \
         | sed -nE 's/.* name="([^"]*)".* classname="([^"]*)".* time="([^"]*)".*/\2\t\1\t\3/p' \
-        | sort -t"$(printf '\t')" -k3,3 -rn | head -15 \
+        | sort -t"$(printf '\t')" -k3,3 -rn | awk 'NR <= 15' \
         | jq -cRs '[split("\n")[] | select(length > 0) | split("\t")
                     | {binary: .[0], test: .[1], seconds: (.[2] | tonumber)}]')
     # grep -c prints the 0 itself (exiting 1), so `|| true` — appending a

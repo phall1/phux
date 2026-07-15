@@ -23,7 +23,7 @@ out="${3:-${PHUX_METRICS_DIR:-target/ci-metrics}/records.ndjson}"
 mkdir -p "$(dirname "$out")"
 
 units=$(sed -n '/^const UNIT_DATA = \[$/,/^\];$/p' "$html" | sed '1s/.*/[/; $s/;$//')
-total=$(sed -n 's/^DURATION = \(.*\);$/\1/p' "$html" | head -1)
+total=$(sed -n 's/^DURATION = \(.*\);$/\1/p;/^DURATION = /q' "$html")
 if [ -z "$units" ] || ! jq -e 'type == "array"' <<<"$units" >/dev/null 2>&1; then
     echo "::error::could not extract UNIT_DATA from ${html} — cargo's report format changed; update scripts/ci/parse-timings.sh" >&2
     exit 1
