@@ -411,6 +411,13 @@ pub struct TerminalHandle {
     /// Sender for input events (keys, mouse, etc.). Drained by the
     /// actor and written to the PTY via the per-pane encoders.
     pub input: mpsc::Sender<TerminalInput>,
+    /// Bounded handoff for bytes already encoded on the dedicated input lane.
+    /// The lane uses `try_send`, so a saturated actor never blocks input
+    /// routing or grows memory without bound.
+    pub encoded_input: mpsc::Sender<Vec<u8>>,
+    /// Latest complete `Send` input-encoder state captured by the actor after
+    /// every terminal mutation.
+    pub input_snapshot: tokio::sync::watch::Receiver<crate::input::InputEncoderSnapshot>,
     /// Sender for snapshot requests. The ATTACH handler uses this to
     /// build `TERMINAL_SNAPSHOT` frames.
     pub snapshot: mpsc::Sender<SnapshotRequest>,

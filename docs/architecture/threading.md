@@ -1,7 +1,7 @@
 ---
 audience: contributors, agents
 stability: evolving
-last-reviewed: 2026-07-11
+last-reviewed: 2026-07-15
 ---
 
 # Threading and I/O
@@ -70,24 +70,22 @@ identifies a subscriber by a `usize` address rather than a
 
 ## The dedicated input lane (ADR-0044)
 
-Input **routing** — resolve the wire pane id, walk the subscription set, check
-the input lease (ADR-0033), `try_send` onto the pane actor's mailbox — runs on
-its own OS thread, the input lane, not on the LocalSet. Routing touches only
-`Send` state (`Arc<Mutex<ServerState>>` and the pane mailbox sender); it never
-references the `!Send` `Terminal`, so it can gate and deliver a keystroke on a
-second core in parallel with an output-broadcast tick draining on the main
-thread. This is the root fix for input/output contention: the actor's fair
-`select!` (input biased ahead of output; see below) makes the actor service a
-mailboxed keystroke promptly, and the lane makes that mailbox fill without
-waiting for the main thread to yield.
+Local input **routing and encoding** run on their own OS thread, the input
+lane, not on the LocalSet. The actor publishes a copyable snapshot after each
+output batch, seed replay, and resize. It contains libghostty's exact key
+options, resolved mouse tracking/format, DEC 1004/2004, and grid/cell geometry.
+The lane owns one stateful encoder set per generational pane, applies the latest
+snapshot, and `try_send`s bytes through a bounded actor mailbox. The actor's
+input arm only forwards those bytes to the PTY writer.
 
 The lane is a plain thread with a bounded channel and `blocking_recv`, not a
-second tokio runtime — routing is synchronous (a non-blocking `try_send`, no
-await), so no runtime is needed. Per-client input order is preserved (read loop
-enqueues in wire order; channel, lane, and mailbox are all FIFO), and lease
-exclusion is unchanged because the lane runs the same routing function under the
-same `Mutex`. Input **encode** (wire event → PTY bytes) reads the pane's live
-DEC-mode state and stays on the actor thread.
+second tokio runtime: gating and encoding are synchronous, and both handoffs are
+non-blocking. Per-client order is preserved because the read loop, lane channel,
+single encoder thread, and encoded-byte mailbox are FIFO. Lease/subscription
+semantics are unchanged because production and inline test paths share the same
+destination-resolution helpers under the same `Mutex`. Satellite-tagged input
+remains structured through the hub relay and is encoded by the destination
+server's local lane.
 
 ## Hot paths that could go multi-threaded later
 
@@ -95,8 +93,6 @@ The input lane above is the first realized fan-out off the main thread. Others
 can follow the same rule — cross only `Send` state, leave the `!Send` engine
 put — if a future profile demands it:
 
-- Moving input **encode** onto the lane, once a `Send` snapshot of the pane's
-  encoder-relevant DEC modes is published from the actor (deferred, ADR-0044).
 - PTY-byte feed and per-client capability rewriting on outbound terminal
   frames. Each terminal is independent and could move to `spawn_blocking` or
   a dedicated worker thread.

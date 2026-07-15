@@ -86,21 +86,32 @@ impl PerTerminalMouseEncoder {
         terminal: &GhosttyTerminal<'_, '_>,
         cell_px: (u16, u16),
     ) -> Result<&[u8], Error> {
+        let options = libghostty_vt::mouse::EncoderOptions::from_terminal(terminal)?;
+        self.encode_with_options(event, options, terminal.cols()?, terminal.rows()?, cell_px)
+    }
+
+    /// Encode from exact terminal-derived mode and geometry snapshots.
+    pub fn encode_with_options(
+        &mut self,
+        event: &MouseEvent,
+        options: libghostty_vt::mouse::EncoderOptions,
+        cols: u16,
+        rows: u16,
+        cell_px: (u16, u16),
+    ) -> Result<&[u8], Error> {
         let lg_event = mouse_event_to_libghostty(event)?;
         let cell_width = u32::from(cell_px.0.max(1));
         let cell_height = u32::from(cell_px.1.max(1));
-        self.encoder
-            .set_options_from_terminal(terminal)
-            .set_size(EncoderSize {
-                screen_width: u32::from(terminal.cols()?).saturating_mul(cell_width),
-                screen_height: u32::from(terminal.rows()?).saturating_mul(cell_height),
-                cell_width,
-                cell_height,
-                padding_top: 0,
-                padding_bottom: 0,
-                padding_right: 0,
-                padding_left: 0,
-            });
+        self.encoder.set_options(options).set_size(EncoderSize {
+            screen_width: u32::from(cols).saturating_mul(cell_width),
+            screen_height: u32::from(rows).saturating_mul(cell_height),
+            cell_width,
+            cell_height,
+            padding_top: 0,
+            padding_bottom: 0,
+            padding_right: 0,
+            padding_left: 0,
+        });
         self.buf.clear();
         self.encoder.encode_to_vec(&lg_event, &mut self.buf)?;
         Ok(&self.buf)
