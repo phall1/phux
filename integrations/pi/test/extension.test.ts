@@ -43,10 +43,12 @@ test("detailed status exposes stale state instead of choosing another pane", () 
 test("registers Pi-native commands and tolerates custom UI being unavailable", async () => {
   const commands = new Map<string, (args: string, ctx: ExtensionContext) => Promise<void>>();
   const events: string[] = [];
+  const tools: string[] = [];
   let appended = 0;
   const api = {
     appendEntry: () => { appended++; },
     on: (name: string) => { events.push(name); },
+    registerTool: (tool: { name: string }) => { tools.push(tool.name); },
     registerCommand: (name: string, options: { handler: (args: string, ctx: ExtensionContext) => Promise<void> }) => {
       commands.set(name, options.handler);
     },
@@ -77,6 +79,9 @@ test("registers Pi-native commands and tolerates custom UI being unavailable", a
   registerPhuxExtension(api, { cli });
 
   assert.deepEqual([...commands.keys()], ["phux", "phux-status", "phux-attach"]);
+  assert.deepEqual(tools, [
+    "phux_list", "phux_create", "phux_snapshot", "phux_send_keys", "phux_run", "phux_wait",
+  ]);
   assert.deepEqual(events, ["session_start", "session_tree"]);
 
   let customCalls = 0;

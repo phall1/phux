@@ -8,11 +8,13 @@ import {
 } from "./runner.js";
 import {
   parseAgentStateList,
+  parseCreateResult,
   parseRunResult,
   parseScreenState,
   parseSessionList,
   SchemaValidationError,
   type AgentStateList,
+  type CreateResult,
   type RunResult,
   type ScreenState,
   type SessionList,
@@ -53,6 +55,11 @@ export interface WaitOptions extends ExecutionOptions {
 export type WaitOutcome =
   | { readonly outcome: "satisfied"; readonly screen: ScreenState }
   | { readonly outcome: "timed_out"; readonly screen: ScreenState };
+
+export interface CreateOptions extends ExecutionOptions {
+  readonly cwd?: string;
+  readonly command?: readonly string[];
+}
 
 export interface RunOptions extends ExecutionOptions {
   /** phux's own sentinel deadline, in seconds (distinct from local timeoutMs). */
@@ -129,6 +136,18 @@ export class PhuxCli {
   async agentList(options: ExecutionOptions = {}): Promise<AgentStateList> {
     const args = this.withSocket(["agent", "list", "--json"]);
     return this.jsonCommand("agent list", args, options, parseAgentStateList);
+  }
+
+  async create(name: string, options: CreateOptions = {}): Promise<CreateResult> {
+    if (name.trim().length === 0) throw new TypeError("name must be non-empty");
+    const args = ["new", "--json", "-s", name];
+    if (options.cwd !== undefined) args.push("--cwd", options.cwd);
+    this.pushSocket(args);
+    if (options.command !== undefined) {
+      if (options.command.length === 0) throw new TypeError("command must contain at least one argv item");
+      args.push("--", ...options.command);
+    }
+    return this.jsonCommand("new", args, options, parseCreateResult);
   }
 
   async snapshot(options: SnapshotOptions = {}): Promise<ScreenState> {

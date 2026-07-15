@@ -60,6 +60,11 @@ export interface RunResult {
   readonly truncated: boolean;
 }
 
+export interface CreateResult {
+  readonly session: string;
+  readonly terminal_id: number;
+}
+
 export type AgentKind = "codex" | "claude" | "plugin" | "declared" | "unknown";
 export type AgentState = "unknown" | "idle" | "working" | "blocked" | "done";
 export type AgentAttention = "none" | "low" | "normal" | "high";
@@ -266,6 +271,16 @@ export function parseScreenState(value: unknown): ScreenState {
     lines,
     scrollback,
     cells,
+  };
+}
+
+export function parseCreateResult(value: unknown): CreateResult {
+  const root = record(value, "$ (phux new --json CLI shape)");
+  const session = string(root.session, "$.session");
+  if (session.length === 0) throw new SchemaValidationError("$.session", "non-empty");
+  return {
+    session,
+    terminal_id: integer(root.terminal_id, "$.terminal_id", 0, 4_294_967_295),
   };
 }
 

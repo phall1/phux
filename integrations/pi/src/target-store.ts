@@ -104,13 +104,28 @@ export class PhuxTargetStore {
   }
 
   select(pane: AgentPane): PhuxTargetSelection {
-    const selection: PhuxTargetSelection = {
+    return this.persist({
       version: PHUX_TARGET_VERSION,
       selector: pane.terminal,
       session: pane.session,
       window: pane.window,
       display: formatPaneDisplay(pane),
-    };
+    });
+  }
+
+  /** Select the documented seed pane created by `phux new --json`. */
+  selectCreated(session: string, terminalId: number): PhuxTargetSelection {
+    const selector = `@${String(terminalId)}`;
+    return this.persist({
+      version: PHUX_TARGET_VERSION,
+      selector,
+      session,
+      window: "window-0",
+      display: `${session}:window-0 ${selector}`,
+    });
+  }
+
+  private persist(selection: PhuxTargetSelection): PhuxTargetSelection {
     this.persistence.appendEntry(PHUX_TARGET_ENTRY, selection);
     this.snapshotValue = { selection, availability: "available" };
     return selection;

@@ -6,6 +6,7 @@ import type {
 import { PhuxCli } from "./adapter.js";
 import { PhuxTargetPicker } from "./components.js";
 import type { AgentPane } from "./schemas.js";
+import { registerPhuxTools } from "./tools.js";
 import {
   PhuxTargetStore,
   formatTargetStatus,
@@ -21,7 +22,9 @@ export function registerPhuxExtension(
   pi: ExtensionAPI,
   options: PhuxExtensionOptions = {},
 ): PhuxTargetStore {
-  const store = new PhuxTargetStore(pi, options.cli ?? new PhuxCli());
+  const cli = options.cli ?? new PhuxCli();
+  const store = new PhuxTargetStore(pi, cli);
+  registerPhuxTools(pi, cli, store);
 
   const updateStatus = (ctx: ExtensionContext): void => {
     if (!ctx.hasUI) return;

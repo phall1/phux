@@ -50,6 +50,19 @@ test("ls parses the documented CLI shape and passes flags before positionals", a
   assert.deepEqual(fake.requests[0]?.args, ["ls", "--json", "--socket", "/tmp/p.sock"]);
 });
 
+test("create uses documented new --json argv and parses the seed pane", async () => {
+  const fake = fakeRunner(completed(JSON.stringify({ session: "work", terminal_id: 7 })));
+  const cli = new PhuxCli({ runner: fake.runner, socket: "/tmp/p.sock" });
+
+  const result = await cli.create("work", { cwd: "/repo", command: ["bash", "-lc", "echo ok"] });
+
+  assert.deepEqual(result, { session: "work", terminal_id: 7 });
+  assert.deepEqual(fake.requests[0]?.args, [
+    "new", "--json", "-s", "work", "--cwd", "/repo", "--socket", "/tmp/p.sock",
+    "--", "bash", "-lc", "echo ok",
+  ]);
+});
+
 test("agentList inventories canonical panes and preserves owning sessions", async () => {
   const fake = fakeRunner(completed(JSON.stringify({
     schema_version: 1,

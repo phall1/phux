@@ -6,3 +6,4 @@ export * from "./runner.js";
 export * from "./target-store.js";
 export * from "./components.js";
 export * from "./extension.js";
+export * from "./tools.js";

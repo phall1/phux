@@ -45,6 +45,25 @@ test("selection persists a versioned canonical target with ownership fields", ()
   assert.equal(store.snapshot.availability, "available");
 });
 
+test("created seed panes persist enough ownership for branch reconstruction", () => {
+  const entries: Array<{ customType: string; data: unknown }> = [];
+  const store = new PhuxTargetStore(
+    { appendEntry: (customType, data) => entries.push({ customType, data }) },
+    { agentList: async () => ({ agents: [] }) },
+  );
+
+  const selection = store.selectCreated("fresh", 12);
+
+  assert.deepEqual(selection, {
+    version: 1,
+    selector: "@12",
+    session: "fresh",
+    window: "window-0",
+    display: "fresh:window-0 @12",
+  });
+  assert.deepEqual(entries, [{ customType: PHUX_TARGET_ENTRY, data: selection }]);
+});
+
 test("restore uses only the latest selection on the supplied branch", async () => {
   const otherBranch = { ...saved, selector: "@1", display: "other @1" };
   const store = new PhuxTargetStore(
