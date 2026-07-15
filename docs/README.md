@@ -1,7 +1,7 @@
 ---
 audience: humans, agents, consumers, contributors
 stability: stable
-last-reviewed: 2026-07-09
+last-reviewed: 2026-07-15
 ---
 
 # phux documentation
@@ -27,6 +27,7 @@ You do not need to understand the protocol before using phux.
 | Install through Homebrew, a release, or source | [Install guide](./INSTALL.md) |
 | Decide whether phux fits your workflow today | [When to use phux](./when-to-use.md) |
 | Change the prefix, keys, status bar, or hooks | [Configuration](./CONFIG.md) |
+| Reach your server from another network | [Remote access](./remote-access.md) |
 
 The shortest path is the quickstart. It gets a real session running first,
 then shows the read, act, wait, read loop that makes the same terminal useful
@@ -41,6 +42,7 @@ These pages are for people trying to get work done:
 - [Quickstart](./QUICKSTART.md) gets the first shared terminal running.
 - [Install](./INSTALL.md) covers every supported installation path.
 - [Configuration](./CONFIG.md) owns keybindings, status, and hooks.
+- [Remote access](./remote-access.md) reaches a server across networks over an overlay.
 - [The reference TUI](./consumers/tui.md) is the interactive terminal guide.
 - [Agents and the CLI](./consumers/agents.md) is the headless CLI and JSON guide.
 - [The OpenCode integration](./consumers/opencode.md) adds OpenCode tools, target selection, and lifecycle metadata.

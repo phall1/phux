@@ -708,6 +708,13 @@ pub enum AttachError {
     #[error("transport connect error: {0}")]
     Connect(String),
 
+    /// The remote host did not answer the dial: connection refused, no
+    /// route, or handshake timeout. Distinguished from [`Self::Connect`]
+    /// (which covers pin and auth failures on a host that answered) so the
+    /// CLI can hint at overlay reachability instead of credentials.
+    #[error("transport connect error: {0}")]
+    Unreachable(String),
+
     /// The server closed the connection without sending `DETACHED`.
     /// Distinguished from a clean detach so the CLI can surface "server
     /// went away" vs "you detached".
@@ -752,6 +759,7 @@ impl From<phux_dial::DialError> for AttachError {
         match value {
             phux_dial::DialError::Io(err) => Self::Io(err),
             phux_dial::DialError::Connect(msg) => Self::Connect(msg),
+            phux_dial::DialError::Unreachable(msg) => Self::Unreachable(msg),
         }
     }
 }
