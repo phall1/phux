@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T09:52:26Z",
+  "generated_at": "2026-07-15T09:55:05Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -156,6 +156,15 @@
       "runner_s": 31
     },
     {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:41:15Z",
+      "duration_s": 817,
+      "runner_s": 1068
+    },
+    {
       "workflow": "conventional-commits",
       "event": "pull_request",
       "branch": "fix/input-lane-ordering",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T09:17:27Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "stress",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-15T09:17:05Z",
-      "duration_s": 6,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 56,
-      "success_rate": 64,
-      "median_s": 795,
+      "runs": 57,
+      "success_rate": 65,
+      "median_s": 797,
       "p95_s": 1012,
-      "runner_minutes": 710
+      "runner_minutes": 727
     },
     {
       "workflow": "stress",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 55,
+      "runs": 56,
       "median_queue_s": 2,
       "median_s": 788,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 54,
+      "runs": 55,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 263
     },
     {
       "job": "detect docs-only",
-      "runs": 56,
+      "runs": 57,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,58 +342,58 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 778,
-      "n": 15
+      "median_s": 775,
+      "n": 14
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 196,
-      "n": 15
+      "n": 16
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 20,
-      "n": 19
+      "n": 20
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 20,
-      "n": 20
+      "n": 19
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 17
+      "n": 18
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 19
+      "n": 20
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 20
+      "n": 19
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 22,
-      "hit_rate": 36
+      "samples": 23,
+      "hit_rate": 35
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 20,
-      "hit_rate": 40
+      "samples": 21,
+      "hit_rate": 38
     },
     {
       "workflow": "stress",
@@ -408,42 +408,42 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 128,
-      "n": 17
+      "n": 18
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 17
+      "n": 18
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 17
+      "n": 18
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 19
+      "n": 20
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 717,
-      "n": 15
+      "median_s": 716,
+      "n": 16
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 8,
-      "n": 14
+      "n": 15
     },
     {
       "workflow": "observatory",
@@ -468,57 +468,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "2e66804f1",
+    "sha": "0a0cec840",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 112.879
+        "seconds": 82.131
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 27.841
+        "seconds": 20.463
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.017
-      },
-      {
-        "binary": "phux-server::agent_detect",
-        "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.815
+        "seconds": 6.015
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.815
+        "seconds": 3.812
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "deleting_the_record_hands_it_back_to_the_detector",
+        "seconds": 3.810
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.515
+        "seconds": 3.513
       },
       {
         "binary": "phux-server::agent_events",
         "test": "unattached_subscriber_receives_events",
-        "seconds": 3.014
+        "seconds": 3.012
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.515
+        "seconds": 2.512
       },
       {
         "binary": "phux-server::l2_adversarial",
         "test": "test_subscribe_events_no_loss",
-        "seconds": 2.015
+        "seconds": 2.014
       },
       {
         "binary": "phux-server::phux_0q8_no_double_emit",
         "test": "live_output_is_delivered_exactly_once",
-        "seconds": 1.515
+        "seconds": 1.513
       }
     ]
   },
