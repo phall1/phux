@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T11:12:15Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T11:12:32Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 3 | 67% | 11m54s | 11m54s | 70 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 14 | 100% | 37s | 48s | 23 |
-| conventional-commits | 78 | 90% | 15s | 19s | 15 |
+| conventional-commits | 79 | 90% | 16s | 19s | 15 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 11:12 | conventional-commits | pull_request | swarm/spatial-final | success | 18s | 10s |
 | 2026-07-15 11:11 | conventional-commits | pull_request | swarm/spatial-final | cancelled | 14s | 10s |
 | 2026-07-15 11:11 | conventional-commits | pull_request | swarm/spatial-final | success | 15s | 12s |
 | 2026-07-15 11:11 | ci | pull_request | swarm/spatial-final | cancelled | 48s | 1m15s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/layout-cli | success | 16s | 13s |
 | 2026-07-15 10:25 | ci | pull_request | swarm/layout-cli | success | 14m49s | 16m46s |
 | 2026-07-15 10:19 | conventional-commits | pull_request | fix/client-local-focus | success | 14s | 10s |
-| 2026-07-15 10:19 | conventional-commits | pull_request | fix/input-lane-ordering | success | 19s | 16s |
 
 ---
 
