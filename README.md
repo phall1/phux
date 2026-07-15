@@ -340,6 +340,8 @@ Anything not in the first two lists is a direction, not a feature.
 | Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
 | Understand the model | [Concepts](./docs/CONCEPTS.md) |
 | Drive it from an agent | [Agents](./docs/consumers/agents.md) |
+| Connect OpenCode | [OpenCode](./docs/consumers/opencode.md) |
+| Connect Pi | [Pi](./docs/consumers/pi.md) |
 | Use the MCP adapter | [MCP](./docs/consumers/mcp.md) |
 | Read the wire spec | [Spec](./docs/spec/) |
 | See how it is built | [Architecture](./docs/architecture/) |
