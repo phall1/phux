@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T10:43:09Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:44:07Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 81 | 62% | 13m29s | 16m52s | 1018 |
+| ci | 82 | 62% | 13m29s | 16m52s | 1038 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 13 | 100% | 37s | 48s | 23 |
@@ -19,32 +19,32 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 80 | 2s | 13m19s | 16m41s |
-| check | 79 | 2s | 2m36s | 4m23s |
-| detect docs-only | 81 | 2s | 5s | 7s |
+| test | 81 | 2s | 13m22s | 16m41s |
+| check | 80 | 2s | 2m36s | 4m23s |
+| detect docs-only | 82 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 12m50s | 13 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m35s | 18 |
-| test | Run Swatinem/rust-cache@v2 | 24s | 20 |
-| check | Run Swatinem/rust-cache@v2 | 22s | 21 |
+| test | tests (unit + e2e) | 12m50s | 14 |
+| check | rust checks (fmt + clippy + doc + deny) | 2m29s | 19 |
+| test | Run Swatinem/rust-cache@v2 | 24s | 21 |
+| check | Run Swatinem/rust-cache@v2 | 21s | 20 |
 | check | docs-check | 9s | 20 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 20 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 21 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 21 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 20 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m47s | 36 |
-| ci / check | doc | 14s | 36 |
-| ci / check | deny | 3s | 36 |
-| ci / check | fmt | 1s | 38 |
-| ci / test | unit | 11m56s | 29 |
-| ci / test | e2e | 8s | 28 |
+| ci / check | clippy | 1m52s | 37 |
+| ci / check | doc | 14s | 37 |
+| ci / check | deny | 3s | 37 |
+| ci / check | fmt | 1s | 39 |
+| ci / test | unit | 11m56s | 30 |
+| ci / test | e2e | 8s | 29 |
 | observatory / timings | build-dev | 10m39s | 2 |
 | observatory / timings | build-release | 4m55s | 2 |
 | stress / stress | stress | 20m31s | 1 |
@@ -53,8 +53,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 41% | 41 |
-| ci / test | 56% | 39 |
+| ci / check | 40% | 42 |
+| ci / test | 55% | 40 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -127,6 +127,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:28 | release-please | push | main | success | 38s | 33s |
 | 2026-07-15 10:28 | ci | push | main | success | 13m38s | 15m46s |
 | 2026-07-15 10:27 | conventional-commits | pull_request | swarm/spawn-placement | success | 16s | 12s |
+| 2026-07-15 10:27 | ci | pull_request | swarm/spawn-placement | success | 16m54s | 20m35s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/foundation-train | success | 15s | 12s |
 | 2026-07-15 10:25 | ci | pull_request | swarm/foundation-train | success | 17m05s | 21m13s |
 | 2026-07-15 10:25 | conventional-commits | pull_request | swarm/layout-cli | success | 16s | 13s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:15 | ci | pull_request | swarm/layout-cli | cancelled | 9m44s | 13m43s |
 | 2026-07-15 10:15 | conventional-commits | pull_request | swarm/spawn-placement | success | 18s | 13s |
 | 2026-07-15 10:15 | ci | pull_request | swarm/spawn-placement | cancelled | 12m19s | 16m15s |
-| 2026-07-15 10:14 | conventional-commits | pull_request | swarm/mru-selector | success | 19s | 16s |
 
 ---
 
