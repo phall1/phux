@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T11:10:20Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T11:11:36Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,10 +10,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 86 | 62% | 13m29s | 16m52s | 1080 |
+| observatory | 3 | 67% | 11m54s | 11m54s | 70 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
-| observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 14 | 100% | 37s | 48s | 23 |
-| conventional-commits | 76 | 91% | 16s | 19s | 14 |
+| conventional-commits | 77 | 91% | 16s | 19s | 15 |
 
 ## ci jobs, last 30 days
 
@@ -46,7 +46,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 11m57s | 32 |
 | ci / test | e2e | 9s | 31 |
 | observatory / timings | build-dev | 10m39s | 2 |
-| observatory / timings | build-release | 4m55s | 2 |
+| observatory / timings | build-release | 4m55s | 3 |
 | stress / stress | stress | 20m31s | 1 |
 
 ## Cache effectiveness (last 30 days)
@@ -72,18 +72,18 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | `phux-server test "hub_relay_federation" (test)` | 33.62s |
 | `phux-server test "spawn_terminal" (test)` | 33.28s |
 
-### release: 5m01s (previous: 4m55s) — 358 units at `0abd5a5ed`
+### release: 4m56s (previous: 5m01s) — 358 units at `44ade3883`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 156.92s |
-| `phux bin "phux"` | 98.53s |
-| `phux-server` | 22.45s |
-| `regex-automata` | 20.4s |
-| `phux-mcp bin "phux-mcp"` | 20.0s |
-| `phux-config` | 17.06s |
-| `rustls` | 17.04s |
-| `clap_builder` | 16.5s |
+| `libghostty-vt-sys build script (run)` | 154.65s |
+| `phux bin "phux"` | 98.23s |
+| `regex-automata` | 21.84s |
+| `phux-server` | 20.36s |
+| `phux-mcp bin "phux-mcp"` | 20.06s |
+| `phux-config` | 17.83s |
+| `rustls` | 16.0s |
+| `clap_builder` | 14.47s |
 
 ## Release binary size
 
@@ -117,6 +117,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 11:11 | conventional-commits | pull_request | swarm/spatial-final | success | 15s | 12s |
 | 2026-07-15 11:09 | conventional-commits | pull_request | swarm/input-encode-final | success | 14s | 10s |
 | 2026-07-15 11:00 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 11:00 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
@@ -124,6 +125,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 | 2026-07-15 10:59 | release-please | push | main | success | 42s | 35s |
+| 2026-07-15 10:59 | observatory | push | main | failure | 11m56s | 23m14s |
 | 2026-07-15 10:42 | conventional-commits | pull_request | swarm/foundation-train | success | 14s | 10s |
 | 2026-07-15 10:42 | ci | pull_request | swarm/foundation-train | success | 16m44s | 21m10s |
 | 2026-07-15 10:41 | conventional-commits | pull_request | swarm/input-encode-train | success | 17s | 13s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:19 | conventional-commits | pull_request | fix/input-lane-ordering | success | 19s | 16s |
 | 2026-07-15 10:19 | ci | pull_request | fix/client-local-focus | cancelled | 8m15s | 10m27s |
 | 2026-07-15 10:19 | ci | pull_request | fix/input-lane-ordering | cancelled | 8m17s | 11m47s |
-| 2026-07-15 10:19 | conventional-commits | pull_request | swarm/remove-agent-facade | success | 14s | 10s |
-| 2026-07-15 10:19 | ci | pull_request | swarm/remove-agent-facade | success | 15m47s | 18m02s |
 
 ---
 
