@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T09:41:46Z",
+  "generated_at": "2026-07-15T09:41:57Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -19,6 +19,24 @@
       "created_at": "2026-07-15T09:41:34Z",
       "duration_s": 1,
       "runner_s": 1
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:41:34Z",
+      "duration_s": 18,
+      "runner_s": 14
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T09:41:15Z",
+      "duration_s": 36,
+      "runner_s": 31
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-15T08:44:22Z",
       "duration_s": 1053,
       "runner_s": 1311
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-15T08:27:52Z",
-      "duration_s": 985,
-      "runner_s": 1225
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-15T04:55:10Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -300,19 +300,19 @@
     },
     {
       "workflow": "release-please",
-      "runs": 9,
+      "runs": 10,
       "success_rate": 100,
       "median_s": 35,
       "p95_s": 44,
-      "runner_minutes": 20
+      "runner_minutes": 21
     },
     {
       "workflow": "conventional-commits",
-      "runs": 33,
+      "runs": 34,
       "success_rate": 91,
       "median_s": 16,
       "p95_s": 19,
-      "runner_minutes": 6
+      "runner_minutes": 7
     }
   ],
   "ci_jobs_30d": [
