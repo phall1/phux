@@ -475,11 +475,30 @@ this repository as of 2026-05-26. It is informative, not normative.
 The `COMMAND` / `COMMAND_RESULT` envelope (§5, per
 [ADR-0021](../../ADR/0021-control-plane-commands.md)) round-trips
 through the codec. The wire carries `KILL_TERMINAL` (tag 0x03),
-`GET_STATE` (tag 0x05), `KILL_TERMINALS` (tag 0x09), and the
+`GET_STATE` (tag 0x05), `KILL_TERMINALS` (tag 0x09),
+`DETACH_CLIENTS` (tag 0x13), and the
 agent-convenience commands `GET_SCREEN` (tag 0x07), `ROUTE_INPUT`
 (tag 0x08), `GET_TERMINAL_STATE` (tag 0x0c), and
 `SUBSCRIBE_TERMINAL_EVENTS` (tag 0x0d); the remaining §5.1 catalog
 entries are reserved and decode as `UnknownEnumValue` until allocated.
+
+`DETACH_CLIENTS { session: optional<str> }` force-detaches clients from
+*outside* the attach UI (backs `phux detach`): its body is a presence
+byte followed, when set, by a `u32`-length-prefixed UTF-8 session name.
+`session = Some(name)` detaches every client attached to that session;
+`session = None` detaches every attached client on the server. Each
+target receives a `DETACHED` frame (§7.2) and its attachment is torn
+down server-side, so its TUI exits cleanly. This is distinct from the
+`DETACH` frame, which detaches only the sending connection. The reply is
+`COMMAND_RESULT { OkWith(Json(count)) }` where `count` is the number of
+clients detached; an unknown session name detaches nobody and reports
+`0` (not an error). Scope: only session-attached clients (`ATTACH`
+consumers) are targeted; terminal-level subscribers (`ATTACH_TERMINAL`)
+have their own detach verb (`DETACH_TERMINAL`) and are not swept.
+Authorization matches the rest of the control plane (`KILL_TERMINAL`,
+`KILL_TERMINALS`): any peer that can reach the socket may issue it —
+transport access (UDS permissions, or the paired-token wss gate) is the
+trust boundary.
 
 `KILL_TERMINALS { ids: Vec<TerminalId> }` is the one atomic
 multi-terminal teardown operation

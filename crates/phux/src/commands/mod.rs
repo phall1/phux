@@ -60,6 +60,7 @@ pub(crate) mod ask;
 pub(crate) mod attach;
 pub(crate) mod config;
 pub(crate) mod config_action;
+pub(crate) mod detach;
 pub(crate) mod kill;
 pub(crate) mod launch;
 pub(crate) mod ls;
@@ -473,6 +474,23 @@ pub(crate) enum Command {
         /// Emit a schema-versioned JSON result or error.
         #[arg(long)]
         json: bool,
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Detach clients from a session, from outside the attach UI.
+    ///
+    /// The CLI counterpart to the `C-a d` keybinding. With `SESSION`, detaches
+    /// every client attached to that session; with no argument, detaches every
+    /// attached client on the server. Each target client's TUI exits cleanly.
+    /// Useful for scripting or reclaiming a session that's attached (or wedged)
+    /// elsewhere.
+    Detach {
+        /// Session to detach clients from. Omit to detach every attached
+        /// client on the server.
+        session: Option<String>,
+
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,

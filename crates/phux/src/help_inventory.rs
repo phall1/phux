@@ -98,6 +98,7 @@ phux config plugins
 phux config reload
 phux config run
 phux config show
+phux detach
 phux give
 phux insert-pane
 phux kill

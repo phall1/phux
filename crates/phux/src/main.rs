@@ -67,6 +67,7 @@ mod help_inventory;
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
+          detach     Detach clients from a session\n  \
           insert-pane Insert an already-created pane into a layout\n  \
           move-pane  Move an existing pane within a session layout\n  \
           swap-pane  Swap two existing pane leaves\n  \
@@ -298,6 +299,7 @@ fn main() -> ExitCode {
             &extra,
         ),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
+        Some(Command::Detach { session, socket }) => commands::detach::run_detach(session, socket),
         Some(Command::InsertPane {
             target,
             new_pane,

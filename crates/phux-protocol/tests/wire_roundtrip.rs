@@ -2023,6 +2023,26 @@ fn command_kill_terminals_round_trips() {
 }
 
 #[test]
+fn command_detach_clients_round_trips() {
+    // DETACH_CLIENTS (tag 0x13): a presence byte + optional session name.
+    // Exercise both the `None` (detach all) and `Some(name)` targeting so the
+    // presence byte and the string encoding both round-trip.
+    for session in [None, Some("work".to_owned()), Some(String::new())] {
+        let frame = FrameKind::Command {
+            request_id: 44,
+            command: Command::DetachClients {
+                session: session.clone(),
+            },
+        };
+        let mut buf = BytesMut::new();
+        frame.encode(&mut buf);
+        let (decoded, tail) = FrameKind::decode(&buf).unwrap();
+        assert_eq!(decoded, frame);
+        assert!(tail.is_empty());
+    }
+}
+
+#[test]
 fn command_result_ok_with_json_round_trips() {
     // GET_SCREEN's reply shape: OK_WITH(JSON(serialized ScreenState)).
     let frame = FrameKind::CommandResult {

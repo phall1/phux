@@ -541,6 +541,12 @@ pub(crate) const COMMAND_TAG_SIGNAL_TERMINAL: u8 = 0x11;
 /// The server validates and emits the normal `EVENT` frame; no new event kind
 /// or consumer surface is introduced.
 pub(crate) const COMMAND_TAG_REPORT_ASKED: u8 = 0x12;
+/// Wire tag for [`Command::DetachClients`]. Force-detaches the clients
+/// attached to a session (or every attached client when the target session
+/// is absent) from *outside* the attach UI — the `phux detach` verb. Unlike
+/// `FrameKind::Detach`, which detaches the sending connection, this targets
+/// other clients by session name.
+pub(crate) const COMMAND_TAG_DETACH_CLIENTS: u8 = 0x13;
 
 // Wire tags for the `InputEvent` tagged union (ROUTE_INPUT arg). These
 // mirror the four `INPUT_*` frame atoms (`docs/spec/input.md`).
@@ -1214,6 +1220,17 @@ pub enum Command {
         /// skipped silently; the op succeeds as long as it is structurally
         /// valid.
         ids: Vec<TerminalId>,
+    },
+    /// Force-detach clients from *outside* the attach UI — backs `phux detach`.
+    /// `session = Some(name)` detaches every client attached to that session;
+    /// `session = None` detaches every attached client on the server. Each
+    /// target client receives a `DETACHED` frame and its attachment is torn
+    /// down, so its TUI exits cleanly. Distinct from `FrameKind::Detach`, which
+    /// only detaches the sending connection. Reply: `COMMAND_RESULT { OkWith(
+    /// Json(count)) }` where `count` is the number of clients detached.
+    DetachClients {
+        /// Target session by name, or `None` to detach every attached client.
+        session: Option<String>,
     },
     /// Request a comprehensive snapshot of a terminal's full state: grid,
     /// scrollback, shell metadata, cursor, and sequence number (L2 Collection-aware
@@ -3156,6 +3173,10 @@ fn decode_spawn_error(dec: &mut Decoder<'_>) -> Result<SpawnError, DecodeError> 
 // same `Ok = 0x00` / sequential convention as the rest of the wire.
 // -----------------------------------------------------------------------------
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match arm per Command wire tag; the dispatch is a flat encode table, clearer whole than split"
+)]
 pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
     match command {
         Command::AttachTerminal { terminal_id } => {
@@ -3198,6 +3219,19 @@ pub(super) fn encode_command(command: &Command, enc: &mut Encoder<'_>) {
             enc.write_u16_be(u16::try_from(ids.len()).unwrap_or(u16::MAX));
             for id in ids {
                 encode_terminal_id(id, enc);
+            }
+        }
+        Command::DetachClients { session } => {
+            enc.write_u8(COMMAND_TAG_DETACH_CLIENTS);
+            // Presence byte + optional session name (u32-BE-len-prefixed
+            // UTF-8 via `write_str`), mirroring the other optional-string
+            // args.
+            match session {
+                Some(name) => {
+                    enc.write_u8(1);
+                    enc.write_str(name);
+                }
+                None => enc.write_u8(0),
             }
         }
         Command::GetTerminalState {
@@ -3295,6 +3329,10 @@ fn decode_input_event(dec: &mut Decoder<'_>) -> Result<InputEvent, DecodeError> 
     }
 }
 
+#[allow(
+    clippy::too_many_lines,
+    reason = "one match arm per Command wire tag; the dispatch is a flat decode table, clearer whole than split"
+)]
 pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeError> {
     let tag = dec.read_u8()?;
     match tag {
@@ -3341,6 +3379,14 @@ pub(super) fn decode_command(dec: &mut Decoder<'_>) -> Result<Command, DecodeErr
                 ids.push(decode_terminal_id(dec)?);
             }
             Ok(Command::KillTerminals { ids })
+        }
+        COMMAND_TAG_DETACH_CLIENTS => {
+            let session = if dec.read_u8()? != 0 {
+                Some(dec.read_str()?.to_owned())
+            } else {
+                None
+            };
+            Ok(Command::DetachClients { session })
         }
         COMMAND_TAG_GET_TERMINAL_STATE => {
             let terminal_id = decode_terminal_id(dec)?;
