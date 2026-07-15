@@ -102,6 +102,10 @@ pub fn seed_session_with_pty_and_colors(
         // Interning is idempotent — `spawn_terminal_actor` below returns the
         // same id.
         crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
+        // phux-cufw: the id names WHICH pane; the socket names WHICH
+        // server. Inject both so an in-pane `phux` hits this server even
+        // off the default socket path.
+        crate::terminal_actor::apply_server_socket(&mut cmd, s.server_socket_path());
         terminal
     });
     let terminal_token = root_token.child_token();
@@ -207,6 +211,9 @@ pub(crate) fn spawn_pane_with_pty_and_colors(
         // (see `seed_session_with_pty_and_colors`). Idempotent interning —
         // `spawn_terminal_actor` below returns the same id.
         crate::terminal_actor::apply_terminal_id(&mut cmd, &s.intern_terminal_wire(terminal));
+        // phux-cufw: pair the pane id with the server's own socket path
+        // (see `seed_session_with_pty_and_colors`).
+        crate::terminal_actor::apply_server_socket(&mut cmd, s.server_socket_path());
         Some(terminal)
     }) else {
         return Ok(None);

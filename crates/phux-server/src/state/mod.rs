@@ -281,6 +281,17 @@ pub struct ServerState {
     /// Defaults to the `phux_config` schema default (`xterm-256color`) so
     /// tests that never call the setter get the safe baseline.
     term: String,
+    /// The UDS path this server listens on. Mirrors
+    /// [`crate::runtime::ServerConfig::socket_path`] so every pane spawn
+    /// site can inject it into the child environment as `PHUX_SOCKET`
+    /// (phux-cufw) without an extra channel to the runtime. Set by the
+    /// runtime via [`Self::set_server_socket_path`] right after
+    /// `SharedState::new`.
+    ///
+    /// `None` when the runtime never mirrors it (state-only tests):
+    /// spawned panes then carry no `PHUX_SOCKET` and an in-pane `phux`
+    /// falls back to the default-socket resolution.
+    server_socket_path: Option<std::path::PathBuf>,
     /// How a Terminal viewed by clients of differing sizes resolves its one
     /// authoritative PTY geometry (`defaults.window-size`, phux-nk07). Mirrors
     /// [`crate::runtime::ServerConfig::window_size`] so `handle_viewport_resize`

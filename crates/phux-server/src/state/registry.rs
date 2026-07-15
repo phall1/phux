@@ -69,6 +69,7 @@ impl ServerState {
             history_limit: phux_config::DefaultsCfg::default().history_limit,
             cwd_inheritance: phux_config::CwdInheritance::default(),
             term: phux_config::DefaultsCfg::default().term,
+            server_socket_path: None,
             window_size: phux_config::WindowSize::default(),
             session_root: HashMap::new(),
             window_last_cwd: HashMap::new(),
@@ -261,6 +262,21 @@ impl ServerState {
     #[must_use]
     pub fn term(&self) -> &str {
         &self.term
+    }
+
+    /// Set the UDS path this server listens on. Called once at server
+    /// startup to mirror [`crate::runtime::ServerConfig::socket_path`]
+    /// into state so every pane spawn site can inject it as
+    /// `PHUX_SOCKET` (phux-cufw).
+    pub fn set_server_socket_path(&mut self, path: std::path::PathBuf) {
+        self.server_socket_path = Some(path);
+    }
+
+    /// Read the socket path set by [`Self::set_server_socket_path`].
+    /// `None` until the runtime mirrors it (e.g. in state-only tests).
+    #[must_use]
+    pub fn server_socket_path(&self) -> Option<&std::path::Path> {
+        self.server_socket_path.as_deref()
     }
 
     /// Set the multi-client window-size policy (`defaults.window-size`,
