@@ -4,7 +4,7 @@ stability: stable
 last-reviewed: 2026-07-15
 ---
 
-# 0048 — Outbound dial-out (connector) transport mode
+# 0051 — Outbound dial-out (connector) transport mode
 
 **TL;DR.** A server behind NAT can dial out to a self-hosted relay and hold
 one persistent QUIC tunnel; the relay bridges each consumer in as one

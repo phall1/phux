@@ -1,4 +1,4 @@
-//! Dial-out connector spike (ADR-0048, bead phux-1cfx): a server behind NAT
+//! Dial-out connector spike (ADR-0051, bead phux-1cfx): a server behind NAT
 //! reaches remote consumers through a self-hosted relay it dials OUT to.
 //!
 //! **NAT invariant (structural, not simulated).** The only network socket in
@@ -8,7 +8,7 @@
 //! participates in is one the connector dialed OUT. The rendezvous ordering
 //! is asserted: the tunnel registers at the relay while zero consumers exist.
 //!
-//! Topology under test (ADR-0048 Decisions 1-2):
+//! Topology under test (ADR-0051 Decisions 1-2):
 //!
 //! ```text
 //! consumer --QUIC "phux-quic/1"--> relay <--QUIC "phux-relay/1"-- connector --UDS--> server
@@ -29,7 +29,7 @@
 //!   on the server side of the tunnel; relay admission is never
 //!   authorization (Decision 4).
 //!
-//! Spike tolerances (ADR-0048 Decision 7 — flagged, not silently assumed):
+//! Spike tolerances (ADR-0051 Decision 7 — flagged, not silently assumed):
 //!
 //! * The "server side of the tunnel" verifying each consumer's token is the
 //!   in-test connector task (the server's UDS listener carries no
@@ -40,7 +40,7 @@
 //! * Bridged consumers surface to the server with the connector's local UDS
 //!   uid — acceptable in the spike, unacceptable in production.
 //!
-//! Explicitly OUT of spike scope (ADR-0048 assertion 7; these belong to the
+//! Explicitly OUT of spike scope (ADR-0051 assertion 7; these belong to the
 //! implementation bead, and nothing here should be read as covering them):
 //!
 //! * redial/supervision — production reuses `hub/link.rs` (backoff,
@@ -84,20 +84,20 @@ use crate::common::{
     spawn_server, spawn_server_with_seed_cmd, wait_for_socket,
 };
 
-/// The connector leg's dedicated ALPN (ADR-0048 Decision 2). Reserved
+/// The connector leg's dedicated ALPN (ADR-0051 Decision 2). Reserved
 /// normatively by the ADR; the `phux_protocol::policy` constant lands with
 /// the implementation bead, so the spike spells it as a literal — and it
 /// must NEVER be the production consumer ALPN (invariant 7).
 const RELAY_ALPN: &[u8] = b"phux-relay/1";
 
 /// The connector's tunnel-registration token — the relay-enrollment secret
-/// (ADR-0048 Decision 4, connector-to-relay leg). 32 bytes, mirroring
+/// (ADR-0051 Decision 4, connector-to-relay leg). 32 bytes, mirroring
 /// `auth::TOKEN_LEN`. Load-bearing beyond auth: quinn's `accept_bi()` does
 /// not resolve until the initiator sends bytes, so the preamble is also what
 /// registers the tunnel at the relay without deadlock.
 const TUNNEL_TOKEN: &[u8] = b"spike-tunnel-token-0123456789abc";
 
-/// The server-minted consumer pairing token (ADR-0048 Decision 4, consumer
+/// The server-minted consumer pairing token (ADR-0051 Decision 4, consumer
 /// leg). The relay never reads it; the server side of the tunnel verifies it.
 const CONSUMER_TOKEN: &[u8] = b"spike-consumer-token-0123456789a";
 
@@ -152,7 +152,7 @@ fn relay_endpoint(cert: &Path, key: &Path) -> (quinn::Endpoint, SocketAddr) {
 
 /// The ALPN a connection actually negotiated, read from quinn's handshake
 /// data. This is how the relay distinguishes the connector leg from consumer
-/// legs, and how the test asserts ADR-0048's ALPN separation.
+/// legs, and how the test asserts ADR-0051's ALPN separation.
 fn negotiated_alpn(conn: &quinn::Connection) -> Vec<u8> {
     conn.handshake_data()
         .expect("handshake completed")
@@ -308,7 +308,7 @@ async fn try_read_raw_frame(
 }
 
 // ---------------------------------------------------------------------------
-// The stub relay: a rendezvous point, not a peer (ADR-0048 Decision 1)
+// The stub relay: a rendezvous point, not a peer (ADR-0051 Decision 1)
 // ---------------------------------------------------------------------------
 
 /// One bridged consumer's byte taps, tunnel-side stream id attached. The
@@ -346,7 +346,7 @@ impl RelayState {
 
 /// Opaque splice half with a byte tap. This IS the relay's entire data
 /// path: read, tap, forward. No `FrameKind::decode`, no length-prefix
-/// awareness, no ack emission anywhere in the relay's code — ADR-0048
+/// awareness, no ack emission anywhere in the relay's code — ADR-0051
 /// invariants 1 and 5 hold by construction, not by discipline.
 async fn pump_tapped<R, W>(mut read: R, mut write: W, tap: Rc<RefCell<Vec<u8>>>)
 where
@@ -390,7 +390,7 @@ async fn admit_tunnel(conn: quinn::Connection, alpn: Vec<u8>, state: Rc<RefCell<
     if let Some(tx) = tunnel_up {
         let _ = tx.send(());
     }
-    // Stream-0 watchdog: ADR-0048 Decision 2 reserves stream 0 for the auth
+    // Stream-0 watchdog: ADR-0051 Decision 2 reserves stream 0 for the auth
     // preamble ONLY. Any further byte flips the flag the test asserts on.
     // `send0` is held (not dropped) so the reserved stream stays open.
     let _reserved_send0 = send0;
@@ -401,7 +401,7 @@ async fn admit_tunnel(conn: quinn::Connection, alpn: Vec<u8>, state: Rc<RefCell<
 }
 
 /// Bridge one admitted consumer: exactly one FRESH relay-initiated bidi
-/// stream toward the connector (ADR-0048 Decision 2 — the load-bearing
+/// stream toward the connector (ADR-0051 Decision 2 — the load-bearing
 /// stream discipline), spliced opaquely in both directions. One finished
 /// direction ends the bridge (the stdio-bridge shape).
 async fn bridge_consumer(conn: quinn::Connection, alpn: Vec<u8>, state: Rc<RefCell<RelayState>>) {
@@ -470,7 +470,7 @@ struct ConnectorState {
 
 /// Dial out from "inside the NAT" to the relay, register the tunnel, then
 /// serve bridged consumers: verify each consumer's bearer token (the
-/// server-side-of-the-tunnel check, ADR-0048 Decision 4) and splice the
+/// server-side-of-the-tunnel check, ADR-0051 Decision 4) and splice the
 /// admitted stream onto a FRESH UDS connection to the server.
 fn spawn_connector(
     relay_addr: SocketAddr,
@@ -678,7 +678,7 @@ async fn await_echo(consumer: &mut Consumer, needle: u8) {
 // The spike
 // ---------------------------------------------------------------------------
 
-/// The happy path, end to end (ADR-0048 assertions 1-6): a NAT'd server is
+/// The happy path, end to end (ADR-0051 assertions 1-6): a NAT'd server is
 /// reached by two concurrent consumers through the relay the connector
 /// dialed out to — full handshakes, live PTY output, byte-identical taps,
 /// ALPN separation, and the per-consumer stream discipline.
