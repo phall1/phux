@@ -25,6 +25,7 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "npm run typecheck && npm run build && node --test test/*.test.mjs && npm run pack:check",
     "smoke:opencode": "node scripts/smoke-opencode.mjs",
+    "smoke:real": "node scripts/smoke-real.mjs",
     "pack:check": "node scripts/test-pack.mjs",
     "prepack": "npm run build"
   },

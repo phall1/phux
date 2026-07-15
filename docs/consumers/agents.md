@@ -715,15 +715,13 @@ timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
 
 ## 6. Relationship to the other agent surfaces
 
-The CLI verbs here are the stable contract. The [Pi integration](./pi.md)
-selects a subset through Pi-native tools and adds branch-local target and
-lifecycle behavior; it links here instead of redefining CLI syntax. The
-[MCP adapter](./mcp.md) exposes
-them name-for-name (`phux_ls` ↔ `ls`, and `phux_snapshot` / `phux_send_keys` /
-`phux_run` / `phux_wait` ↔ the matching subcommands) over the same
-`phux-client` functions — same client-side resolution, same tiebreaks.
+The CLI verbs here are the stable contract. The
+[OpenCode integration](./opencode.md) and [Pi integration](./pi.md) each select
+a six-tool subset and add host-specific target and lifecycle behavior; their
+guides link here instead of redefining CLI syntax. The [MCP adapter](./mcp.md)
+exposes the CLI surface over JSON-RPC stdio and documents its own divergences.
 [`sdk.md`](./sdk.md) documents `phux-client`, the library crate those surfaces
-are built from. All three are unprivileged consumers
+are built from. These adapters are unprivileged consumers
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)); the wire
 underneath stays additive and versioned under [`../spec/`](../spec/)
 ([ADR-0022](../../ADR/0022-tool-for-agents.md)).
