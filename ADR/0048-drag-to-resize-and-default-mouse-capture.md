@@ -4,7 +4,7 @@ stability: stable
 last-reviewed: 2026-07-09
 ---
 
-# 0035 — Drag-to-resize panes and default outer-terminal mouse capture
+# 0048 — Drag-to-resize panes and default outer-terminal mouse capture
 
 **TL;DR.** The client enables its own outer-terminal mouse tracking
 (`?1006h` SGR + `?1002h` button-motion) on attach and restores it on

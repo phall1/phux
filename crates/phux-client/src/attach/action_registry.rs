@@ -285,7 +285,7 @@ pub const REGISTRY: &[ActionSpec] = &[
     ActionSpec {
         name: "set-pane",
         category: Category::Pane,
-        description: "Toggle per-pane mouse opt-out for the focused pane (ADR-0035)",
+        description: "Toggle per-pane mouse opt-out for the focused pane (ADR-0048)",
         args: &[("mouse", ArgValue::Str("toggle"))],
     },
 ];

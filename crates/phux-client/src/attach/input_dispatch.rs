@@ -169,13 +169,13 @@ pub(super) struct DispatchCtx<'a> {
     /// or in fixtures that don't exercise bar clicks (the row is still
     /// claimed as chrome; every click on it is a no-op).
     pub status_bar: Option<&'a crate::render::chrome::status_bar::StatusBarPainter>,
-    /// ADR-0035: the in-flight divider drag, or `None` when no divider is
+    /// ADR-0048: the in-flight divider drag, or `None` when no divider is
     /// grabbed. A press on a divider cell records the grabbed split here;
     /// subsequent button-motion events re-tune that split's ratio from the
     /// pointer position; a release clears it. Owned by `main_loop` (it
     /// must survive across dispatch batches) and threaded in by reference.
     pub drag: &'a mut Option<DragGrab>,
-    /// phux-npb3 (ADR-0035 decision 3 follow-up): panes that opted out of
+    /// phux-npb3 (ADR-0048 decision 3 follow-up): panes that opted out of
     /// client mouse handling via `set-pane mouse off`. Client-local state,
     /// owned by `main_loop` like `drag` and lent in by reference. Two
     /// consumers: the dispatcher skips synthesizing `INPUT_MOUSE` (and the
@@ -219,7 +219,7 @@ pub(super) struct DispatchCtx<'a> {
     pub vcs: &'a mut super::driver::VcsIndex,
 }
 
-/// An active divider drag (ADR-0035).
+/// An active divider drag (ADR-0048).
 ///
 /// Press on a divider cell records the controlling split (`node_path`) and
 /// its `axis`; while held, each button-motion event sets that split's
@@ -469,7 +469,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
             }
         }
-        // phux-4li.6 / ADR-0035: INPUT_MOUSE routing + click-to-focus +
+        // phux-4li.6 / ADR-0048: INPUT_MOUSE routing + click-to-focus +
         // divider drag-to-resize. The parser emits mouse coordinates in
         // outer-viewport cells (treated as 1-px-per-cell f64 per SPEC
         // §9.2.1); we hit-test against the multi-pane composition's
@@ -483,7 +483,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
         // client claims).
         if let InputEvent::Mouse(ref mouse) = ev {
             use super::multi_pane::{RouteDecision, route_mouse_event};
-            // ADR-0035: a release ALWAYS ends any in-flight drag first,
+            // ADR-0048: a release ALWAYS ends any in-flight drag first,
             // regardless of where it lands — the cursor may have left the
             // divider cell mid-drag. The commit broadcasts the final
             // layout via SET_METADATA, the same persistence path the
@@ -518,7 +518,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                 }
                 continue;
             }
-            // phux-npb3 hardening (PR #142 review, recorded in ADR-0035):
+            // phux-npb3 hardening (PR #142 review, recorded in ADR-0048):
             // while a divider drag is active, ONLY a release ends it and
             // ONLY motion re-tunes it — both handled above. Anything else
             // (notably a second Press from a chorded button, a wheel tick,
@@ -764,7 +764,7 @@ pub(super) async fn dispatch_input_events<W: super::RenderSink>(
                     continue;
                 }
                 RouteDecision::Divider { node_path, axis } => {
-                    // ADR-0035: a LEFT-button press on a divider starts a drag
+                    // ADR-0048: a LEFT-button press on a divider starts a drag
                     // and immediately snaps the split to the press position (so
                     // a click-without-motion still nudges, matching the
                     // intuitive "grab here"). Scroll-wheel and right/middle
@@ -1757,7 +1757,7 @@ fn run_action(
             });
         }
         "set-pane" => {
-            // phux-npb3 (ADR-0035 decision 3 follow-up): flip the focused
+            // phux-npb3 (ADR-0048 decision 3 follow-up): flip the focused
             // pane's per-pane mouse opt-out. `mouse = "off"` opts the pane
             // out of client mouse handling (no synthesized INPUT_MOUSE; the
             // driver drops outer capture while the pane is focused, so the
@@ -2378,7 +2378,7 @@ fn str_arg(resolved: &phux_config::keybind::ResolvedAction, key: &str) -> Option
 enum PaneMouseArg {
     /// Opt the pane back in to client mouse handling.
     On,
-    /// Opt the pane out (`set-pane mouse off`, ADR-0035's escape hatch).
+    /// Opt the pane out (`set-pane mouse off`, ADR-0048's escape hatch).
     Off,
     /// Flip the pane's current state (the palette default).
     Toggle,

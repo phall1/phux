@@ -34,7 +34,7 @@ pub struct PaneLayout {
     /// One [`DividerHit`] per interior split, mapping the cells that
     /// split's divider line occupies to the split's node path + axis. A
     /// mouse press that lands in any hit's `cells` resolves to the split
-    /// whose `ratio` the drag adjusts (ADR-0035). Built from the same
+    /// whose `ratio` the drag adjusts (ADR-0048). Built from the same
     /// segments as [`Self::dividers`] and clamped to the same viewport,
     /// so a hit cell is always a painted divider cell and vice versa.
     pub divider_hits: Vec<DividerHit>,
@@ -154,7 +154,7 @@ pub fn pane_rects(tree: &LayoutNode, viewport_dims: (u16, u16)) -> HashMap<Termi
 }
 
 /// The cell span available to the split at `path` for its `ratio`, in
-/// outer-viewport coordinates along the split's axis (ADR-0035).
+/// outer-viewport coordinates along the split's axis (ADR-0048).
 ///
 /// Returns `(start, content_len)` where `start` is the first cell of the
 /// split's bounds on its axis and `content_len` is the budget the ratio
