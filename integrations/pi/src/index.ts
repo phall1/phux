@@ -3,3 +3,6 @@ export * from "./errors.js";
 export * from "./schemas.js";
 export * from "./truncate.js";
 export * from "./runner.js";
+export * from "./target-store.js";
+export * from "./components.js";
+export * from "./extension.js";

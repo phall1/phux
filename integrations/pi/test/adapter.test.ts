@@ -50,6 +50,32 @@ test("ls parses the documented CLI shape and passes flags before positionals", a
   assert.deepEqual(fake.requests[0]?.args, ["ls", "--json", "--socket", "/tmp/p.sock"]);
 });
 
+test("agentList inventories canonical panes and preserves owning sessions", async () => {
+  const fake = fakeRunner(completed(JSON.stringify({
+    schema_version: 1,
+    agents: [{
+      terminal: "@3",
+      session: "work",
+      window: "window-0",
+      agent: { id: "codex", label: "Codex", kind: "codex" },
+      state: "working",
+      confidence: 0.9,
+      attention: "normal",
+      title: null,
+      cwd: "/repo",
+      sources: [],
+      explanation: "working cue",
+    }],
+  })));
+  const cli = new PhuxCli({ runner: fake.runner, socket: "/tmp/p.sock" });
+
+  const result = await cli.agentList();
+
+  assert.equal(result.agents[0]?.terminal, "@3");
+  assert.equal(result.agents[0]?.session, "work");
+  assert.deepEqual(fake.requests[0]?.args, ["agent", "list", "--json", "--socket", "/tmp/p.sock"]);
+});
+
 test("wait preserves the final screen for exit 0 and specialized exit 124", async () => {
   const satisfied = new PhuxCli({ runner: fakeRunner(completed(screenJson, 0)).runner });
   assert.deepEqual(await satisfied.wait(), {

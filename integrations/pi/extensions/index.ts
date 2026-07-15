@@ -1,4 +1,7 @@
-/** Minimal entrypoint; tools, UI, and lifecycle hooks land in later beads. */
-export default function phuxExtension(_pi: unknown): void {
-  // Loading the package is intentionally side-effect free.
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+
+import { registerPhuxExtension } from "../src/extension.js";
+
+export default function phuxExtension(pi: ExtensionAPI): void {
+  registerPhuxExtension(pi);
 }

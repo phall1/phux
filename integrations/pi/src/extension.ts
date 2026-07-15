@@ -1,0 +1,116 @@
+import type {
+  ExtensionAPI,
+  ExtensionContext,
+} from "@mariozechner/pi-coding-agent";
+
+import { PhuxCli } from "./adapter.js";
+import { PhuxTargetPicker } from "./components.js";
+import type { AgentPane } from "./schemas.js";
+import {
+  PhuxTargetStore,
+  formatTargetStatus,
+  type PhuxTargetSnapshot,
+} from "./target-store.js";
+
+export interface PhuxExtensionOptions {
+  readonly cli?: PhuxCli;
+}
+
+/** Register commands and lifecycle hooks around the extension's single shared target store. */
+export function registerPhuxExtension(
+  pi: ExtensionAPI,
+  options: PhuxExtensionOptions = {},
+): PhuxTargetStore {
+  const store = new PhuxTargetStore(pi, options.cli ?? new PhuxCli());
+
+  const updateStatus = (ctx: ExtensionContext): void => {
+    if (!isInteractiveContext(ctx)) return;
+    ctx.ui.setStatus("phux", formatTargetStatus(store.snapshot));
+  };
+
+  const restore = async (ctx: ExtensionContext): Promise<void> => {
+    store.restoreFromBranch(ctx.sessionManager.getBranch());
+    await store.refresh(ctx.signal);
+    updateStatus(ctx);
+  };
+
+  pi.on("session_start", async (_event, ctx) => restore(ctx));
+  pi.on("session_tree", async (_event, ctx) => restore(ctx));
+
+  pi.registerCommand("phux", {
+    description: "Select the default phux pane target",
+    handler: async (_args, ctx) => {
+      if (!isInteractiveContext(ctx)) return;
+      const snapshot = await store.refresh(ctx.signal);
+      updateStatus(ctx);
+      if (snapshot.availability === "unavailable") {
+        ctx.ui.notify(`Cannot inventory phux panes: ${snapshot.reason ?? "phux is unavailable"}`, "error");
+        return;
+      }
+      if (store.panes.length === 0) {
+        ctx.ui.notify("No phux panes are available; the current target was not changed", "warning");
+        return;
+      }
+
+      const selected = await ctx.ui.custom<AgentPane | null>((tui, theme, _keybindings, done) =>
+        new PhuxTargetPicker(store.panes, theme, done, () => done(null), () => tui.requestRender()));
+      if (selected === null) return;
+      const selection = store.select(selected);
+      updateStatus(ctx);
+      ctx.ui.notify(`phux target: ${selection.display}`, "info");
+    },
+  });
+
+  pi.registerCommand("phux-status", {
+    description: "Inspect the selected phux target",
+    handler: async (_args, ctx) => {
+      await store.refresh(ctx.signal);
+      updateStatus(ctx);
+      if (isInteractiveContext(ctx)) {
+        ctx.ui.notify(formatDetailedStatus(store.snapshot), statusNotice(store.snapshot));
+      }
+    },
+  });
+
+  pi.registerCommand("phux-attach", {
+    description: "Show a safe human attach handoff for the selected phux session",
+    handler: async (_args, ctx) => {
+      if (!isInteractiveContext(ctx)) return;
+      const selection = store.snapshot.selection;
+      if (selection === null) {
+        ctx.ui.notify("No phux target selected. Run /phux first.", "warning");
+        return;
+      }
+      ctx.ui.notify(formatAttachHandoff(store.snapshot), "info");
+    },
+  });
+
+  return store;
+}
+
+/** Pi 0.73 exposes hasUI; mode-aware hosts can be guarded more precisely. */
+export function isInteractiveContext(ctx: ExtensionContext): boolean {
+  const mode = (ctx as ExtensionContext & { readonly mode?: string }).mode;
+  return mode === undefined ? ctx.hasUI : mode === "interactive";
+}
+
+export function formatDetailedStatus(snapshot: PhuxTargetSnapshot): string {
+  const base = formatTargetStatus(snapshot);
+  return snapshot.reason === undefined ? base : `${base}\n${snapshot.reason}`;
+}
+
+export function formatAttachHandoff(snapshot: PhuxTargetSnapshot): string {
+  const selection = snapshot.selection;
+  if (selection === null) return "No phux target selected.";
+  const argv = JSON.stringify(["phux", "attach", selection.session]);
+  const warning = snapshot.availability === "available"
+    ? ""
+    : ` Target is currently ${snapshot.availability}; the saved session is shown without fallback.`;
+  return `Run outside Pi using argv ${argv}. Then navigate in phux to pane ${selection.selector} (window ${selection.window}). The extension does not execute attach.${warning}`;
+}
+
+function statusNotice(snapshot: PhuxTargetSnapshot): "info" | "warning" | "error" {
+  if (snapshot.availability === "unavailable") return "error";
+  if (snapshot.availability === "stale" || snapshot.availability === "unselected") return "warning";
+  return "info";
+}

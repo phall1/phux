@@ -60,6 +60,43 @@ export interface RunResult {
   readonly truncated: boolean;
 }
 
+export type AgentKind = "codex" | "claude" | "plugin" | "declared" | "unknown";
+export type AgentState = "unknown" | "idle" | "working" | "blocked" | "done";
+export type AgentAttention = "none" | "low" | "normal" | "high";
+
+export interface AgentIdentity {
+  readonly id: string;
+  readonly label: string;
+  readonly kind: AgentKind;
+}
+
+export interface AgentSource {
+  readonly kind: string;
+  readonly signal: string;
+  readonly confidence: number;
+  readonly observed: string;
+}
+
+export interface AgentPane {
+  /** Canonical phux pane selector, for example @3 or host/@3. */
+  readonly terminal: string;
+  readonly session: string;
+  readonly window: string;
+  readonly agent: AgentIdentity;
+  readonly state: AgentState;
+  readonly confidence: number;
+  readonly attention: AgentAttention;
+  readonly title: string | null;
+  readonly cwd: string | null;
+  readonly sources: readonly AgentSource[];
+  readonly explanation: string;
+}
+
+export interface AgentStateList {
+  readonly schema_version: 1;
+  readonly agents: readonly AgentPane[];
+}
+
 export class SchemaValidationError extends Error {
   constructor(readonly path: string, expectation: string) {
     super(`${path} must be ${expectation}`);
@@ -84,6 +121,24 @@ function string(value: unknown, path: string): string {
 function boolean(value: unknown, path: string): boolean {
   if (typeof value !== "boolean") throw new SchemaValidationError(path, "a boolean");
   return value;
+}
+
+function nullableString(value: unknown, path: string): string | null {
+  return value === null ? null : string(value, path);
+}
+
+function numberInRange(value: unknown, path: string, min: number, max: number): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value < min || value > max) {
+    throw new SchemaValidationError(path, `a number from ${min} through ${max}`);
+  }
+  return value;
+}
+
+function oneOf<const T extends readonly string[]>(value: unknown, path: string, values: T): T[number] {
+  if (typeof value !== "string" || !values.includes(value)) {
+    throw new SchemaValidationError(path, values.map((item) => JSON.stringify(item)).join(", "));
+  }
+  return value as T[number];
 }
 
 function integer(value: unknown, path: string, min: number, max = Number.MAX_SAFE_INTEGER): number {
@@ -223,4 +278,55 @@ export function parseRunResult(value: unknown): RunResult {
     duration_ms: integer(root.duration_ms, "$.duration_ms", 0),
     truncated: boolean(root.truncated, "$.truncated"),
   };
+}
+
+const AGENT_KINDS = ["codex", "claude", "plugin", "declared", "unknown"] as const;
+const AGENT_STATES = ["unknown", "idle", "working", "blocked", "done"] as const;
+const AGENT_ATTENTION = ["none", "low", "normal", "high"] as const;
+const PANE_SELECTOR = /^(?:[^/\s]+\/)?@\d+$/;
+
+export function parseAgentStateList(value: unknown): AgentStateList {
+  const root = record(value, "$ (phux agent list --json CLI shape)");
+  if (root.schema_version !== 1) {
+    throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  }
+  if (!Array.isArray(root.agents)) throw new SchemaValidationError("$.agents", "an array");
+
+  const agents = root.agents.map((item, index): AgentPane => {
+    const path = `$.agents[${index}]`;
+    const row = record(item, path);
+    const terminal = string(row.terminal, `${path}.terminal`);
+    if (!PANE_SELECTOR.test(terminal)) {
+      throw new SchemaValidationError(`${path}.terminal`, "a canonical pane selector such as @3 or host/@3");
+    }
+    const identity = record(row.agent, `${path}.agent`);
+    if (!Array.isArray(row.sources)) throw new SchemaValidationError(`${path}.sources`, "an array");
+    return {
+      terminal,
+      session: string(row.session, `${path}.session`),
+      window: string(row.window, `${path}.window`),
+      agent: {
+        id: string(identity.id, `${path}.agent.id`),
+        label: string(identity.label, `${path}.agent.label`),
+        kind: oneOf(identity.kind, `${path}.agent.kind`, AGENT_KINDS),
+      },
+      state: oneOf(row.state, `${path}.state`, AGENT_STATES),
+      confidence: numberInRange(row.confidence, `${path}.confidence`, 0, 1),
+      attention: oneOf(row.attention, `${path}.attention`, AGENT_ATTENTION),
+      title: nullableString(row.title, `${path}.title`),
+      cwd: nullableString(row.cwd, `${path}.cwd`),
+      sources: row.sources.map((source, sourceIndex): AgentSource => {
+        const sourcePath = `${path}.sources[${sourceIndex}]`;
+        const raw = record(source, sourcePath);
+        return {
+          kind: string(raw.kind, `${sourcePath}.kind`),
+          signal: string(raw.signal, `${sourcePath}.signal`),
+          confidence: numberInRange(raw.confidence, `${sourcePath}.confidence`, 0, 1),
+          observed: string(raw.observed, `${sourcePath}.observed`),
+        };
+      }),
+      explanation: string(row.explanation, `${path}.explanation`),
+    };
+  });
+  return { schema_version: 1, agents };
 }

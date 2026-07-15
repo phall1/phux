@@ -17,6 +17,7 @@
   "files": [
     "dist",
     "extensions/index.ts",
+    "src",
     "README.md"
   ],
   "exports": {
@@ -42,7 +43,13 @@
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "prepack": "npm run build"
   },
+  "peerDependencies": {
+    "@mariozechner/pi-coding-agent": "*",
+    "@mariozechner/pi-tui": "*"
+  },
   "devDependencies": {
+    "@mariozechner/pi-coding-agent": "^0.73.1",
+    "@mariozechner/pi-tui": "^0.73.1",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },

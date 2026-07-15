@@ -7,10 +7,12 @@ import {
   type RunRequest,
 } from "./runner.js";
 import {
+  parseAgentStateList,
   parseRunResult,
   parseScreenState,
   parseSessionList,
   SchemaValidationError,
+  type AgentStateList,
   type RunResult,
   type ScreenState,
   type SessionList,
@@ -121,6 +123,12 @@ export class PhuxCli {
   async ls(options: ExecutionOptions = {}): Promise<SessionList> {
     const args = this.withSocket(["ls", "--json"]);
     return this.jsonCommand("ls", args, options, parseSessionList);
+  }
+
+  /** Inventory panes and their owning session through the documented agent CLI projection. */
+  async agentList(options: ExecutionOptions = {}): Promise<AgentStateList> {
+    const args = this.withSocket(["agent", "list", "--json"]);
+    return this.jsonCommand("agent list", args, options, parseAgentStateList);
   }
 
   async snapshot(options: SnapshotOptions = {}): Promise<ScreenState> {
