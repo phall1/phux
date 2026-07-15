@@ -2944,6 +2944,21 @@ impl TerminalActor {
         )
         .entered();
 
+        // Consume the "mutated since last tick" flag BEFORE the emission
+        // gate (phux-bowo). `maybe_emit_idle` — which the tick arm runs just
+        // before this function — closes an output burst only once a tick has
+        // observed the grid unchanged, so the flag must be consumed on every
+        // tick, not only ticks that serve a state-sync consumer. When the
+        // gated return below left it latched, a pane with no state-sync
+        // consumer (every `phux watch` subscriber in practice: the TUI
+        // attaches Raw) never saw `idle`, and `in_output_burst` never
+        // reset, so `dirty` fired at most once per pane lifetime. Emission
+        // correctness is unchanged: a state-sync consumer that attaches
+        // after a gated-away mutation is still walked via
+        // `needs_initial_emit`.
+        let mutated = self.terminal_dirty_since_tick;
+        self.terminal_dirty_since_tick = false;
+
         // Emission gate (phux-0q8 / phux-3uv / phux-ia4 / phux-fseo). The tick
         // emits only for a *tick-managed* consumer — one that negotiated
         // `OutputMode::StateSync` (`state.wants_state_sync`), or any consumer
@@ -2955,16 +2970,16 @@ impl TerminalActor {
         // `&mut self.consumer_states`.
         let force_all_consumers = self.consumer_tick_emits;
         if !force_all_consumers && !self.consumer_states.values().any(|s| s.wants_state_sync) {
-            // No tick-managed consumer: nothing to emit (dirty flag untouched).
+            // No tick-managed consumer: nothing to emit.
             return;
         }
 
         // Idle short-circuit (phux-4l0). The per-consumer reference diff
         // walks + renders every viewport row into a throwaway `Vec<u8>`
         // for every consumer, every tick — pure waste when nothing has
-        // changed. Take and reset the "mutated since last tick" flag here;
-        // if the terminal is unchanged AND no consumer is awaiting its
-        // first emission, skip the entire per-consumer loop.
+        // changed. Using the flag consumed above: if the terminal is
+        // unchanged AND no consumer is awaiting its first emission, skip
+        // the entire per-consumer loop.
         //
         // Correctness: a `Clean` terminal cannot have diverged from any
         // consumer's last-emitted reference (the reference advanced to the
@@ -2981,8 +2996,6 @@ impl TerminalActor {
         //   the live grid. The grid can stay `Clean` indefinitely, so without
         //   this the held-back delta would never be retried once the client
         //   drains (the wave-hunt/server-lifecycle backpressure leak).
-        let mutated = self.terminal_dirty_since_tick;
-        self.terminal_dirty_since_tick = false;
         if !mutated
             && !self.consumer_states.values().any(|s| {
                 // phux-v45.8: a loss-tolerant consumer with un-acked frames in
@@ -4386,6 +4399,68 @@ mod tests {
             rx.try_recv().is_err(),
             "default human attach path must not wait for synthesized tick output",
         );
+    }
+
+    /// phux-bowo: dirty/idle burst bookkeeping must be tick-owned, not
+    /// StateSync-gated. With no state-sync consumer — the production shape
+    /// for every `phux watch` subscriber, since the TUI attaches Raw — the
+    /// gated `tick_emit` return used to leave `terminal_dirty_since_tick`
+    /// latched, so `maybe_emit_idle` never fired and `in_output_burst`
+    /// never reset: `idle` was never broadcast and `dirty` fired at most
+    /// once per pane lifetime. Two full bursts must each yield exactly
+    /// dirty-then-idle.
+    #[test]
+    fn watch_dirty_idle_flow_without_state_sync_consumer() {
+        fn drain_events(rx: &mut mpsc::Receiver<Outbound>) -> Vec<&'static str> {
+            let mut names = Vec::new();
+            while let Ok(out) = rx.try_recv() {
+                if let Outbound::Frame(FrameKind::Event { event, .. }) = out {
+                    match event {
+                        AgentEvent::Dirty => names.push("dirty"),
+                        AgentEvent::Idle => names.push("idle"),
+                        _ => {}
+                    }
+                }
+            }
+            names
+        }
+
+        let bundle = TerminalActor::new(20, 5).expect("new");
+        let mut actor = bundle.actor;
+        // Event-stream subscriber only, no attached consumer at all: the
+        // watch-a-pane-nobody-is-attached-to shape from agents.md.
+        let (evt_tx, mut evt_rx) = dummy_outbound();
+        actor.subscribe_to_events(SubscribeToEventsRequest {
+            subscriber: TerminalEventSubscriber {
+                outbound: evt_tx,
+                event_types: Vec::new(),
+            },
+            wire_terminal_id: 1,
+        });
+
+        for burst in 1..=2 {
+            // Output arrives: the grid mutates and the chunk is
+            // event-sourced, mirroring the production PTY path ordering.
+            actor.vt_write_for_test(b"burst-bytes");
+            actor.source_events_from_chunk(b"burst-bytes");
+            // First tick still observes the mutation: no idle yet.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert_eq!(
+                drain_events(&mut evt_rx),
+                vec!["dirty"],
+                "burst {burst}: one dirty and no idle while the tick still sees the mutation",
+            );
+            // Settled tick: idle must close the burst even though the
+            // emission gate has no state-sync consumer to serve.
+            actor.maybe_emit_idle();
+            actor.tick_emit();
+            assert_eq!(
+                drain_events(&mut evt_rx),
+                vec!["idle"],
+                "burst {burst}: the settled tick must broadcast idle with the emission gate off",
+            );
+        }
     }
 
     /// phux-fseo: a consumer that negotiated `OutputMode::StateSync`
