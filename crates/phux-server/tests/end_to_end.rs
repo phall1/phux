@@ -315,6 +315,31 @@ fn detach_clean_shutdown() {
     });
 }
 
+/// Shutdown must destroy live accept-loop client futures before joining the
+/// dedicated input lane. Each client future owns an `InputLaneHandle`; joining
+/// first would wait forever for the channel to close.
+#[test]
+fn shutdown_with_live_real_clients_releases_input_lane_handles() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server(socket_path.clone(), Some("default"));
+
+        let mut client_a = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        let mut client_b = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+        for client in [&mut client_a, &mut client_b] {
+            send_frame(client, &attach_by_name("default")).await;
+            assert_eq!(recv_typed(client).await.0, TYPE_ATTACHED);
+            assert_eq!(recv_typed(client).await.0, TYPE_TERMINAL_SNAPSHOT);
+        }
+
+        // Deliberately keep both real sockets alive across server shutdown.
+        // Their accept-loop tasks still hold lane handles at cancellation.
+        shutdown_and_join(shutdown_tx, server_handle, &socket_path).await;
+        drop((client_a, client_b));
+    });
+}
+
 #[test]
 fn server_survives_mid_frame_disconnect() {
     run_local(async {

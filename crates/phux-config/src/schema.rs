@@ -124,7 +124,7 @@ pub struct DefaultsCfg {
     pub log_filter: Option<String>,
 
     /// Whether the client enables its own outer-terminal mouse tracking
-    /// on attach (ADR-0035). `true` (default) emits DECSET
+    /// on attach (ADR-0048). `true` (default) emits DECSET
     /// `?1002h?1006h` so divider drag-to-resize and click-to-focus work
     /// without an inner program turning mouse mode on, and restores the
     /// host terminal's mouse state on detach. `false` is the

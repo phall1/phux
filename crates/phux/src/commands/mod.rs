@@ -5,7 +5,7 @@ use clap::{Subcommand, ValueEnum};
 use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
 use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope, TerminalSignal,
+    Command as WireCommand, CommandResult, FrameKind, TerminalSignal,
 };
 
 /// CLI signal names for `phux signal TARGET SIGNAL` (ADR-0033), mapped to the
@@ -510,7 +510,7 @@ pub(crate) enum Command {
     #[command(name = "send-keys", about = "Send keys to a pane")]
     SendKeys {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// Keys to send: named keys and/or literal strings, in order.
@@ -609,7 +609,7 @@ pub(crate) enum Command {
     #[command(about = "Report an agent ask event for a pane")]
     Ask {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// Stable question id for answer correlation.
@@ -664,7 +664,7 @@ pub(crate) enum Command {
     #[command(about = "Run a command in a pane and capture its exit code")]
     Run {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// The command line: all trailing args, joined with spaces.
@@ -1104,21 +1104,9 @@ pub(crate) async fn resolve_target(
     selector: &crate::selector::Selector,
     verb: &str,
 ) -> Result<phux_protocol::ids::TerminalId, ExitCode> {
-    let snapshot = match request_command(
-        socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    {
-        Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            return Err(ExitCode::FAILURE);
-        }
-        Err(err) => return Err(report_no_server(&err, socket_path, verb)),
-    };
+    let snapshot = phux_client::state::get_state(socket_path)
+        .await
+        .map_err(|err| report_no_server(&err, socket_path, verb))?;
     let candidates = resolve_targets(socket_path, selector, &snapshot).await;
     crate::selector::pick_target_pane(&candidates, &snapshot.focused_pane).ok_or_else(|| {
         eprintln!("phux: no such target");
@@ -1138,14 +1126,7 @@ pub(crate) async fn resolve_targets(
     selector: &crate::selector::Selector,
     snapshot: &phux_protocol::wire::info::SessionSnapshot,
 ) -> Vec<phux_protocol::ids::TerminalId> {
-    if !matches!(selector, crate::selector::Selector::Tag(_)) {
-        return crate::selector::resolve(selector, snapshot);
-    }
-    let tags = match Connection::connect(socket_path).await {
-        Ok(mut conn) => tag::fetch_tag_index(&mut conn, snapshot).await,
-        Err(_) => crate::selector::TagIndex::new(),
-    };
-    crate::selector::resolve_with_tags(selector, snapshot, &tags)
+    phux_client::state::resolve_targets(socket_path, selector, snapshot).await
 }
 
 /// Print an `AttachError` as a one-line, actionable message on stderr.
@@ -1217,6 +1198,13 @@ mod tests {
         assert_eq!(
             parse_selector(Some("@42")).unwrap(),
             Selector::TerminalId(42),
+        );
+        assert_eq!(
+            parse_selector(Some("devbox/@42")).unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 42,
+            },
         );
     }
 

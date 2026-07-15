@@ -33,11 +33,12 @@ routing touches none of that.
 ## Decision
 
 Spawn one dedicated OS thread — the input lane — at server start. Each per-client
-read loop, on decoding a **local** `INPUT_*` frame, hands a `Send` `RoutedInput`
-(client id, wire pane id, decoded event, log label) to the lane over a bounded
-channel instead of routing inline. The lane blocks on that channel and runs the
-*same* `handle_terminal_input` the inline path used, off the main runtime. The
-pane actor, its `Terminal`, and encode are unchanged and unmoved.
+read loop, on decoding a **local** `INPUT_*` frame or `ROUTE_INPUT` command,
+hands a `Send` `RoutedInput` (client id, wire pane id, decoded event, authority
+policy, and for commands a reply sender) to the lane over a bounded channel
+instead of routing inline. The lane blocks on that channel and runs the same
+existing subscription/lease or headless lease handler off the main runtime.
+The pane actor, its `Terminal`, and encode are unchanged and unmoved.
 
 This is sound because the routing path is fully `Send`: `SharedState` is
 `Arc<Mutex<ServerState>>`, and the pane mailbox is a `Send`
@@ -48,7 +49,9 @@ address with identical identity semantics.
 
 Satellite-tagged pane ids stay on the main thread (their delivery is a hub-link
 relay, not a mailbox send). Tests that drive `handle_client` directly pass
-`None` and route inline — identical behavior, on-thread.
+`None` and route inline — identical behavior, on-thread. Local `ROUTE_INPUT`
+waits for the lane's correlated result before its command acknowledgement is
+emitted, preserving its existing error and lease-check semantics.
 
 ## Why
 
@@ -76,8 +79,9 @@ relay, not a mailbox send). Tests that drive `handle_client` directly pass
   (SPEC §12.2): a key racing just past its sender's own `RELEASE_INPUT` is
   delivered if the wheel is free and dropped if another client grabbed it.
   Cross-client exclusion never weakens.
-- **Per-client input order is unchanged**: the read loop enqueues in wire order,
-  the channel and lane are FIFO, the mailbox is FIFO.
+- **Per-client input order is unchanged**: the read loop enqueues `INPUT_*` and
+  local `ROUTE_INPUT` in wire order, the channel and lane are FIFO, and the
+  mailbox is FIFO. Both input surfaces share this one queue.
 
 ## Deferred
 

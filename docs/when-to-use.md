@@ -23,16 +23,17 @@ do not need it yet. Find your row below.
 | A team composing terminal-native coding agents | **Yes** | Public Codex/Claude integration fixtures, plugin workspace profiles, and MCP tools give you a phux-shaped agent bench without an in-process plugin host. |
 | A tmux user who wants a modern, protocol-honest multiplexer | **Yes, with eyes open** | Attach/detach, splits, status bar, keybindings, visible help hints, and copy/navigation affordances work. Expect pre-1.0 edges. |
 | Someone on one SSH session who just wants splits and persistence | **Probably not yet** | tmux already does this well and phux adds no wire advantage for a single local user. Revisit when you want remoting or agents. |
-| A fleet operator who wants to drive terminals across machines | **Not yet — addressed for, not wired** | The wire already speaks `SATELLITE{host, id}`; nothing routes it. That's the v0.2 arc. |
+| A fleet operator who wants to drive terminals across machines | **Yes, with a hub-and-spoke limit** | A configured hub aggregates and routes satellite Terminals addressed as `host/@N`; it does not merge remote session/window models or chain satellite routes. |
 
 ## The honest gaps
 
 phux is pre-1.0. The wire, the reference TUI's attach/detach/multi-pane, and
 modern-protocol passthrough are real and tested, but remain pre-1.0. The
-headless verbs, `phux agent`, `phux-mcp`, plugin actions, and workspace
-save/restore are real and tested, but JSON/API details may still wiggle before
-1.0. Cross-machine routing, a native GUI consumer, and a typed public SDK crate
-are designed and addressed-for but **not wired yet**. Predictive local echo is
+headless verbs, `phux agent`, `phux-mcp`, plugin actions, workspace
+save/restore, and hub-to-satellite Terminal routing are real and tested, but
+JSON/API details may still wiggle before 1.0. Federated session/window joins,
+a native GUI consumer, and a typed public SDK crate remain intentionally
+absent. Predictive local echo is
 implemented behind the opt-in `[experimental]` config and remains off by
 default. If a capability is not in the [README status list](../README.md#status),
 treat it as a promise, not a feature.

@@ -81,6 +81,9 @@ test("registers Pi-native commands and tolerates custom UI being unavailable", a
   assert.deepEqual([...commands.keys()], ["phux", "phux-status", "phux-attach"]);
   assert.deepEqual(tools, [
     "phux_list", "phux_create", "phux_snapshot", "phux_send_keys", "phux_run", "phux_wait",
+    "phux_panes", "phux_spawn", "phux_launch", "phux_kill", "phux_signal",
+    "phux_tag", "phux_ask", "phux_watch_events",
+    "phux_rendered_snapshot", "phux_targets",
   ]);
   assert.deepEqual(events, [
     "session_start", "session_tree", "session_start", "agent_start", "agent_settled", "session_shutdown",

@@ -647,7 +647,7 @@ mod tests {
     }
 
     /// Clicking exactly on the divider column resolves to the split that
-    /// divider controls (ADR-0035 drag-to-resize grab target).
+    /// divider controls (ADR-0048 drag-to-resize grab target).
     #[test]
     fn route_mouse_divider_resolves_to_controlling_split() {
         use crate::layout::{NodePath, SplitDir as Sd};
@@ -976,7 +976,7 @@ mod tests {
             // Exact cover: nothing left uncovered.
             prop_assert_eq!(covered.len(), usize::from(cols) * usize::from(rows));
 
-            // ADR-0035 hit-map consistency: the union of every
+            // ADR-0048 hit-map consistency: the union of every
             // `divider_hits` cell set is exactly the painted divider cell
             // set (same cells, built from the same segments + viewport
             // clamp), and each hit's `node_path` resolves to a `Split`.

@@ -33,7 +33,7 @@ project structure locally from the real stream.
 
 phux is pre-alpha. The protocol is at version 0.5.0 and the spec leads the code: several behaviors are designed and written down before they are built, and a few shipped behaviors still diverge from the target the spec describes. This document distinguishes what runs today from a stated direction. Where they disagree, the divergence is marked inline and pointed at the ADR that decides it.
 
-What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). Cross-machine federation routing is designed but not built.
+What runs today: a server that spawns PTY-backed terminals and parses them with libghostty, a reference TUI that attaches over the wire, a browser client (phux-web), and a headless verb set a script or an agent can drive. The shipped CLI verbs are catalogued in [`QUICKSTART.md`](./QUICKSTART.md). Hub-and-spoke federation can dial configured satellites, aggregate their Terminal inventory, spawn there, and relay Terminal-scoped operations; satellite sessions/windows are intentionally not joined into the hub's local model.
 
 This document owns the maturity fact. Other docs link here rather than restating it.
 
@@ -88,11 +88,11 @@ The dissolution of the collection lifecycle tier shipped in protocol 0.3.0: the 
 
 ## Identity is federation-ready
 
-Every terminal is addressed by a `TerminalId` that is either `LOCAL { id }` or `SATELLITE { host, id }`. Today the server constructs `LOCAL` only, but the wire accepts both forms from the first byte: a consumer can write a `SATELLITE` id now, and the current server rejects it cleanly rather than misreading it. Routing it to a remote host is designed, not built — see the [maturity section](#maturity-pre-alpha-spec-first). The point is that remote identity is in the wire shape from the start, not bolted on later.
+Every terminal is addressed by a `TerminalId` that is either `LOCAL { id }` or `SATELLITE { host, id }`. A normal server constructs local ids. A federation hub also constructs satellite ids when it retags aggregate inventory, spawn replies, and relayed frames. A non-hub server still rejects a satellite id cleanly with `UnsupportedSatelliteRoute` rather than misreading it.
 
-Concretely: `TerminalId::Local { id: 42 }` names terminal 42 on the server you are talking to. `TerminalId::Satellite { host: "prod-box-3", id: 42 }` names terminal 42 on a different machine — and it is a well-formed wire value *today*. A v0.1 decoder parses it without complaint; the byte layout that carries it (a one-byte tag, then the fields) is frozen; the only thing a non-hub server does with it is answer `UnsupportedSatelliteRoute` instead of guessing. Satellites don't exist yet, but the name for one already does.
+Concretely: `TerminalId::Local { id: 42 }` names terminal 42 on the server you are talking to. `TerminalId::Satellite { host: "prod-box-3", id: 42 }` names terminal 42 on the configured satellite keyed by the opaque hub-local token `prod-box-3`. The CLI renders these as `@42` and `prod-box-3/@42`; both are accepted as direct selectors after they appear in the server's inventory. Satellite panes stay Terminal-scoped: the hub does not merge remote session/window identities or chain routes through another satellite.
 
-When federation lands, that `TerminalId` does not change shape — it gains a destination. The same value a v0.1 decoder already accepts becomes routable, so no consumer relearns what a terminal's name is. Contrast the bolt-on path, where remote addressing arrives later as a second scheme grafted beside the local one and every tool has to grow a new notion of identity. phux pays that cost once, up front, in the type.
+The forward-compatible tagged shape paid off without a second addressing scheme: the same `TerminalId` the early decoder accepted now carries a routable destination on a hub. The relay rewrites only the routing id at each hop and forwards VT payloads opaquely, preserving ADR-0007's boundary.
 
 See [ADR-0016 (TerminalId as wire primary)](../ADR/0016-terminal-id-as-wire-primary.md) and [ADR-0007 (Mosh-class transport and satellites)](../ADR/0007-mosh-class-transport-and-satellites.md).
 

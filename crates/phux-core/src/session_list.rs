@@ -4,8 +4,11 @@
 //! A [`SessionListJson`] is the stable, versioned JSON the CLI emits for
 //! `phux ls --json`. It is a plain-data projection of the per-session fields
 //! a caller needs to enumerate sessions: name, window count, and whether any
-//! client is attached. Richer per-session detail (creation time, ids, window
-//! layout) is a future additive field, not a new struct — mirroring how
+//! client is attached. The top-level `terminals` inventory carries canonical
+//! direct selectors (`@N` / `host/@N`), including satellite Terminals that
+//! deliberately have no hub-local session/window join. Richer per-session
+//! detail (creation time, ids, window layout) is a future additive field,
+//! not a new struct — mirroring how
 //! [`crate::screen::ScreenState`] reserves `--cells`/`--scrollback` growth.
 //!
 //! This type lives in `phux-core` (not the binary) so the shape has a single
@@ -21,7 +24,7 @@ use serde::{Deserialize, Serialize};
 ///
 /// Tracked independently of [`crate::screen::SCHEMA_VERSION`] because the two
 /// contracts (`phux snapshot --json` vs `phux ls --json`) evolve separately.
-pub const LS_SCHEMA_VERSION: u32 = 1;
+pub const LS_SCHEMA_VERSION: u32 = 2;
 
 /// One session's entry in the [`SessionListJson`] output.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -45,6 +48,9 @@ pub struct SessionListJson {
     pub schema_version: u32,
     /// Sessions, sorted by name.
     pub sessions: Vec<SessionJson>,
+    /// Every addressable Terminal in snapshot order, as a canonical selector.
+    #[serde(default)]
+    pub terminals: Vec<String>,
 }
 
 impl SessionListJson {
@@ -58,7 +64,15 @@ impl SessionListJson {
         Self {
             schema_version: LS_SCHEMA_VERSION,
             sessions,
+            terminals: Vec::new(),
         }
+    }
+
+    /// Add the aggregate Terminal inventory in server snapshot order.
+    #[must_use]
+    pub fn with_terminals(mut self, terminals: Vec<String>) -> Self {
+        self.terminals = terminals;
+        self
     }
 }
 
@@ -86,6 +100,7 @@ mod tests {
         // Order is preserved as given (caller sorts).
         assert_eq!(list.sessions[0].name, "alpha");
         assert_eq!(list.sessions[1].name, "beta");
+        assert!(list.terminals.is_empty());
     }
 
     #[test]
@@ -94,12 +109,21 @@ mod tests {
             name: "work".to_owned(),
             windows: 3,
             attached: true,
-        }]);
+        }])
+        .with_terminals(vec!["@7".to_owned(), "devbox/@42".to_owned()]);
 
         let json = serde_json::to_value(&list).expect("serialize");
-        assert_eq!(json["schema_version"], 1);
+        assert_eq!(json["schema_version"], 2);
         assert_eq!(json["sessions"][0]["name"], "work");
         assert_eq!(json["sessions"][0]["windows"], 3);
         assert_eq!(json["sessions"][0]["attached"], true);
+        assert_eq!(json["terminals"], serde_json::json!(["@7", "devbox/@42"]));
+
+        let old_shape: SessionListJson = serde_json::from_value(serde_json::json!({
+            "schema_version": 1,
+            "sessions": []
+        }))
+        .expect("v1 payloads remain deserializable for compatibility");
+        assert!(old_shape.terminals.is_empty());
     }
 }

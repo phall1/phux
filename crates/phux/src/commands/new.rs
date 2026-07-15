@@ -6,15 +6,13 @@ use phux_client::attach::connection::Connection;
 use phux_client::predict::PredictiveConfig;
 use phux_config::loader as config_loader;
 use phux_protocol::wire::frame::{
-    AttachTarget, Command as WireCommand, CommandResult, CommandValue, FrameKind,
-    SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope, StateScope,
+    AttachTarget, FrameKind, SESSION_CREATE_KEY, SESSION_CREATE_RESULT_KEY, Scope,
 };
 use phux_server::runtime::default_socket_path;
 
 use crate::commands::{
     DEFAULT_SESSION_NAME, attach::resolved_default_session_name, attach::run_attach_once,
-    cli_runtime, command_on, print_attach_error, report_no_server, request_command,
-    server::maybe_auto_spawn_server,
+    cli_runtime, print_attach_error, report_no_server, server::maybe_auto_spawn_server,
 };
 
 /// `phux new` — create a *new* session and attach to it.
@@ -63,16 +61,13 @@ pub(crate) fn run_new(
     // "new" (reject a duplicate -s, auto-name an omitted one). No server
     // yet → no existing names; the auto-spawn below seeds the chosen name.
     let existing = if socket_path.exists() {
-        match rt.block_on(request_command(
-            &socket_path,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )) {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => {
-                snap.sessions.iter().map(|s| s.name.clone()).collect()
-            }
-            _ => Vec::new(),
+        match rt.block_on(phux_client::state::get_state(&socket_path)) {
+            Ok(snapshot) => snapshot
+                .sessions
+                .iter()
+                .map(|session| session.name.clone())
+                .collect(),
+            Err(_) => Vec::new(),
         }
     } else {
         Vec::new()
@@ -230,22 +225,9 @@ pub(crate) async fn create_session_via_metadata(
 
     // Reject a duplicate name before writing (the server also refuses it, but
     // silently — SET_METADATA has no reply frame).
-    let pre = match command_on(
-        &mut conn,
-        0,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    {
-        Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-        Ok(other) => {
-            eprintln!("phux: unexpected GET_STATE result: {other:?}");
-            return Err(ExitCode::FAILURE);
-        }
-        Err(err) => return Err(report_no_server(&err, socket_path, "new")),
-    };
+    let pre = phux_client::state::get_state_on(&mut conn)
+        .await
+        .map_err(|err| report_no_server(&err, socket_path, "new"))?;
     if pre.sessions.iter().any(|s| s.name == name) {
         eprintln!("phux: session '{name}' already exists");
         return Err(ExitCode::FAILURE);

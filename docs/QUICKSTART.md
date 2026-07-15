@@ -115,7 +115,9 @@ phux is pre-alpha. Local persistent sessions, attach and detach, splits,
 multiple clients, modern terminal passthrough, the headless CLI, and the MCP
 adapter work today. Interfaces can still change before 1.0.
 
-Cross-machine federation is designed but not yet complete. Predictive local
+Hub-and-spoke federation now routes Terminal-scoped operations to configured
+satellites; aggregate inventory exposes direct `host/@N` selectors, without
+federated session/window joins. Predictive local
 echo is implemented as an opt-in `[experimental]` setting and remains off by
 default. The exact line between shipped behavior and design intent lives in
 [`CONCEPTS.md`](./CONCEPTS.md); suitability by workflow lives in

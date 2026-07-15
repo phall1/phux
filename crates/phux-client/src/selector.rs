@@ -20,7 +20,12 @@
 //! | `name:tag`  | window whose name is `tag` in session `name`        |
 //! | `name:N.M`  | pane index `M` of window `N` of session `name`      |
 //! | `@N`        | an opaque local Terminal id (`TerminalId::local(N)`) |
+//! | `host/@N`   | an opaque satellite Terminal id owned by `host`      |
 //! | `#tag`      | every Terminal carrying L3 tag `tag` (`phux.tags/v1`) |
+//!
+//! `host` is an opaque registry token and may contain any UTF-8 text,
+//! including `/@` or be empty. Parsing uses the final `/@` delimiter so the
+//! canonical formatter round-trips every registry-accepted host token.
 //!
 //! The `#tag` form ([ADR-0027](../../../ADR/0027-terminal-references-and-l3-links.md)
 //! decision point 5) resolves to a *set*, like a session name, against L3
@@ -46,6 +51,13 @@ pub enum Selector {
     Pane(String, WindowRef, u16),
     /// `@N` — a Terminal addressed directly by its local wire id.
     TerminalId(u32),
+    /// `host/@N` — a Terminal addressed by its hub-qualified wire id.
+    SatelliteTerminalId {
+        /// Opaque hub-local satellite routing token.
+        host: String,
+        /// Terminal id in the satellite server's local id space.
+        id: u32,
+    },
     /// `#tag` — every Terminal carrying the L3 tag `tag` (`phux.tags/v1`).
     /// Resolves to a set; see [`resolve_with_tags`].
     Tag(String),
@@ -65,8 +77,13 @@ pub enum WindowRef {
 pub enum ParseError {
     /// The selector was empty.
     Empty,
-    /// `@N` carried a non-numeric or out-of-range id.
+    /// `@N` or `host/@N` carried a non-numeric or out-of-range id.
     BadTerminalId(String),
+    /// A legacy error retained for source compatibility.
+    ///
+    /// Empty satellite host tokens are now valid because [`TerminalId`] and
+    /// the satellite registry accept them; [`parse`] no longer returns this.
+    EmptySatelliteHost,
     /// A pane index `M` (after the `.`) was non-numeric or out of range.
     BadPaneIndex(String),
     /// `#` carried no tag (the bare sigil).
@@ -78,6 +95,7 @@ impl std::fmt::Display for ParseError {
         match self {
             Self::Empty => write!(f, "empty selector"),
             Self::BadTerminalId(s) => write!(f, "invalid terminal id in '@{s}'"),
+            Self::EmptySatelliteHost => write!(f, "empty satellite host in terminal selector"),
             Self::BadPaneIndex(s) => write!(f, "invalid pane index '{s}'"),
             Self::EmptyTag => write!(f, "empty tag in '#' selector"),
         }
@@ -101,6 +119,19 @@ pub fn parse(raw: &str) -> Result<Selector, ParseError> {
     }
     if raw == "=" {
         return Ok(Selector::Last);
+    }
+    // Split at the final delimiter before recognizing local `@N`: a
+    // SatelliteHost is an opaque registry token and may itself begin with `@`,
+    // contain `/@`, or be empty. Since the formatter appends exactly one
+    // `/@N` suffix, rsplit makes every accepted host reversible.
+    if let Some((host, rest)) = raw.rsplit_once("/@") {
+        let id = rest
+            .parse::<u32>()
+            .map_err(|_| ParseError::BadTerminalId(rest.to_owned()))?;
+        return Ok(Selector::SatelliteTerminalId {
+            host: host.to_owned(),
+            id,
+        });
     }
     if let Some(rest) = raw.strip_prefix('@') {
         let id = rest
@@ -186,13 +217,9 @@ pub fn resolve_with_tags(
                 .into_iter()
                 .collect()
         }
-        Selector::TerminalId(id) => {
-            let wanted = TerminalId::local(*id);
-            if snapshot.panes.iter().any(|p| p.id == wanted) {
-                vec![wanted]
-            } else {
-                Vec::new()
-            }
+        Selector::TerminalId(id) => resolve_wire_id(snapshot, TerminalId::local(*id)),
+        Selector::SatelliteTerminalId { host, id } => {
+            resolve_wire_id(snapshot, TerminalId::satellite(host.as_str(), *id))
         }
         Selector::Tag(tag) => snapshot
             .panes
@@ -220,9 +247,11 @@ pub fn whole_session_name(selector: &Selector, snapshot: &SessionSnapshot) -> Op
     let session_id = match selector {
         Selector::Current | Selector::Last => snapshot.focused_session,
         Selector::Session(name) => session_id_by_name(snapshot, name)?,
-        Selector::Window(..) | Selector::Pane(..) | Selector::TerminalId(_) | Selector::Tag(_) => {
-            return None;
-        }
+        Selector::Window(..)
+        | Selector::Pane(..)
+        | Selector::TerminalId(_)
+        | Selector::SatelliteTerminalId { .. }
+        | Selector::Tag(_) => return None,
     };
     snapshot
         .sessions
@@ -231,15 +260,23 @@ pub fn whole_session_name(selector: &Selector, snapshot: &SessionSnapshot) -> Op
         .map(|s| s.name.clone())
 }
 
+/// Render a wire id as the canonical direct Terminal selector.
+///
+/// Local ids use `@N`; satellite ids retain their opaque hub-routing token
+/// and use `host/@N`. Both forms round-trip through [`parse`] + [`resolve`].
+#[must_use]
+pub fn format_terminal_id(id: &TerminalId) -> String {
+    match id {
+        TerminalId::Local { id } => format!("@{id}"),
+        TerminalId::Satellite { host, id } => format!("{}/@{id}", host.as_str()),
+    }
+}
+
 /// Choose one pane from a selector's `candidates`.
 ///
 /// Prefers the one equal to the server's `focused` pane (the common "the
 /// session I'm looking at" case), else the first in snapshot order. `None`
-/// only when the selector matched nothing.
-///
-/// Shared by every command that narrows a multi-pane selector to a single
-/// target (the CLI's `run`/`send-keys`/`snapshot`/`wait` and the MCP tools
-/// of the same name), so all of them agree on the "which pane" tiebreak.
+/// only when the selector matched nothing. Shared by the CLI and MCP tools.
 #[must_use]
 pub fn pick_target_pane(candidates: &[TerminalId], focused: &TerminalId) -> Option<TerminalId> {
     candidates
@@ -247,6 +284,16 @@ pub fn pick_target_pane(candidates: &[TerminalId], focused: &TerminalId) -> Opti
         .find(|id| *id == focused)
         .or_else(|| candidates.first())
         .cloned()
+}
+
+fn resolve_wire_id(snapshot: &SessionSnapshot, wanted: TerminalId) -> Vec<TerminalId> {
+    snapshot
+        .panes
+        .iter()
+        .any(|pane| pane.id == wanted)
+        .then_some(wanted)
+        .into_iter()
+        .collect()
 }
 
 /// All Terminals in `session`, across every window, in snapshot order.
@@ -327,6 +374,13 @@ mod tests {
             Selector::Pane("work".to_owned(), WindowRef::Index(1), 2),
         );
         assert_eq!(parse("@42").unwrap(), Selector::TerminalId(42));
+        assert_eq!(
+            parse("devbox/@42").unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 42,
+            },
+        );
         assert_eq!(parse("#build").unwrap(), Selector::Tag("build".to_owned()));
     }
 
@@ -334,6 +388,17 @@ mod tests {
     fn parse_rejects_empty_and_bad_numbers() {
         assert_eq!(parse(""), Err(ParseError::Empty));
         assert!(matches!(parse("@nope"), Err(ParseError::BadTerminalId(_))));
+        assert!(matches!(
+            parse("devbox/@nope"),
+            Err(ParseError::BadTerminalId(_))
+        ));
+        assert_eq!(
+            parse("/@1").unwrap(),
+            Selector::SatelliteTerminalId {
+                host: String::new(),
+                id: 1,
+            }
+        );
         assert!(matches!(
             parse("work:1.x"),
             Err(ParseError::BadPaneIndex(_))
@@ -427,12 +492,25 @@ mod tests {
 
     #[test]
     fn resolve_terminal_id_and_focused_and_misses() {
-        let snap = fixture();
+        let mut snap = fixture();
+        snap.panes.push(TerminalInfo::new(
+            TerminalId::satellite("devbox", 7),
+            WindowId::new(999),
+            120,
+            40,
+        ));
         assert_eq!(
             resolve(&parse("@100").unwrap(), &snap),
             vec![TerminalId::local(100)],
         );
-        // Unknown terminal id → empty.
+        assert_eq!(
+            resolve(&parse("devbox/@7").unwrap(), &snap),
+            vec![TerminalId::satellite("devbox", 7)],
+        );
+        // Direct ids still require inventory membership; a wrong host or id misses.
+        assert!(resolve(&parse("other/@7").unwrap(), &snap).is_empty());
+        assert!(resolve(&parse("devbox/@8").unwrap(), &snap).is_empty());
+        // Unknown local terminal id → empty.
         assert!(resolve(&parse("@999").unwrap(), &snap).is_empty());
         // Unknown session → empty.
         assert!(resolve(&parse("ghost").unwrap(), &snap).is_empty());
@@ -445,6 +523,24 @@ mod tests {
                 TerminalId::local(102),
             ],
         );
+    }
+
+    #[test]
+    fn terminal_id_formatter_emits_parseable_canonical_selectors() {
+        for id in [
+            TerminalId::local(7),
+            TerminalId::satellite("devbox", 42),
+            TerminalId::satellite("", 43),
+            TerminalId::satellite("region/@rack/@node", 44),
+            TerminalId::satellite("日本語 /@ host", 45),
+            TerminalId::satellite("@prod", 46),
+        ] {
+            let rendered = format_terminal_id(&id);
+            let mut snap = fixture();
+            snap.panes
+                .push(TerminalInfo::new(id.clone(), WindowId::new(999), 80, 24));
+            assert_eq!(resolve(&parse(&rendered).unwrap(), &snap), vec![id]);
+        }
     }
 
     #[test]

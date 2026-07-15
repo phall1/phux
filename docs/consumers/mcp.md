@@ -120,7 +120,9 @@ Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
 grammar as the CLI's `TARGET`**, whose table and examples live in
 [`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
 (last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
-(pane), and `@N` (opaque id).
+(pane), `@N` (opaque local id), and `host/@N` (opaque satellite id).
+The host-qualified form matches an exact entry in the aggregate Terminal
+inventory; it does not create a federated session/window join.
 
 Resolution is **client-side**, exactly as the CLI resolves it
 ([ADR-0021](../../ADR/0021-control-plane-commands.md)): the adapter
@@ -161,8 +163,10 @@ Lists phux sessions on the running server. No target.
 |---|---|---|---|
 | `socket` | string | no | Override the UDS path (see §2). |
 
-Result: `{ "sessions": [ { "name", "window_count", "attached_client_count" } ] }`,
-sorted by name. The MCP tool surfaces the **raw wire fields**
+Result: `{ "sessions": [ { "name", "window_count", "attached_client_count" } ],
+"terminals": ["@3", "devbox/@7"] }`, with sessions sorted by name and the
+complete addressable Terminal inventory in snapshot order. The MCP tool
+surfaces the **raw wire fields**
 (`window_count` / `attached_client_count`); the CLI's `ls --json`
 projects them to `windows` / `attached`. The two surfaces do not share
 identical keys ([`agents.md`](./agents.md) §3.1) — do not carry a parser
@@ -202,10 +206,8 @@ Routes input to the resolved pane by id. No attach, no resize.
 Each entry in `keys` is a named key (`Enter`, `Tab`, `C-c`, ...) or a
 literal string, tmux-style.
 
-Result: `{ "sent": true, "pane": "<pane>" }`. `pane` is rendered via the
-`TerminalId` `Debug` formatting, not a stable numeric id — `TerminalId`
-has no `Serialize` impl yet (tracked under phux-93b), so do not parse it
-as a number.
+Result: `{ "sent": true, "pane": "<pane>" }`. `pane` is the canonical
+direct selector (`@N` or `host/@N`) and can be passed back as `target`.
 
 ### 3.4 `phux_run`
 

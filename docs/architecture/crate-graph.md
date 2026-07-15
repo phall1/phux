@@ -125,13 +125,13 @@ in tree:
 
 Cross-cuts:
 
-- **Federation** ([ADR-0007](../../ADR/0007-mosh-class-transport-and-satellites.md)) — addressing scheme. The wire's `SessionId` already has a `LOCAL` / `SATELLITE` tag union per the ADR; `TerminalId` (ADR-0016) extends the same shape to every identity. Today's server constructs `LOCAL` only.
+- **Federation** ([ADR-0007](../../ADR/0007-mosh-class-transport-and-satellites.md)) — hub-and-spoke Terminal routing. Normal servers construct `LOCAL` ids; a hub retags aggregate inventory, spawn replies, and relayed frames as `SATELLITE { host, id }`. Satellite session/window models are not merged, and routes do not chain.
 - **Automation** — server-side rules subscribing to L1 events. Not yet implemented; an optional service when it lands.
 
 A consumer's tier set is declared at HELLO time. Today's `phux-client`
-is an L1+L3-equivalent TUI consumer. The `phux-client` SDK is L1-only;
-a future native GUI consumer will be L1+L3 with its own metadata
-schema. The reference TUI is **not** protocol-privileged
+is an L1+L3-equivalent TUI consumer. Its workspace-internal headless
+free functions use L1; a future native GUI consumer will be L1+L3 with
+its own metadata schema. The reference TUI is **not** protocol-privileged
 ([ADR-0017](../../ADR/0017-tui-not-protocol-privileged.md)) — the wire
 carries nothing that exists for it alone.
 

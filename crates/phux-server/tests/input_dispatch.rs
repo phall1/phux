@@ -1,33 +1,9 @@
-//! Wire-level integration test for the `INPUT_KEY` dispatch seam
-//! (`phux-5g9`).
+//! Wire-level integration test for dedicated input-lane dispatch.
 //!
-//! Reproduces the keystroke-drop bug the parent agent caught with a
-//! real `phux attach`: every client→server input frame was hitting
-//! `handle_client`'s catch-all `_ => debug!("unhandled message type")`
-//! arm and being silently discarded. The `pty_pump.rs` test exercises
-//! the `TerminalActor` input mpsc directly (bypassing the wire), which is
-//! why it kept passing while the binary was half-deaf.
-//!
-//! This test drives the actual `handle_client` dispatch:
-//!
-//! 1. Pre-seeds a session whose pane is backed by a real PTY running
-//!    `cat` — `cat` echoes stdin to stdout in cooked mode, so we get a
-//!    crisp echo signal without depending on a user shell's prompt.
-//! 2. Sends `ATTACH { ByName("default") }` over a real Unix socket,
-//!    waits for `ATTACHED` + `TERMINAL_SNAPSHOT` so subscription is in
-//!    place (the dispatch path gates on the client being subscribed
-//!    to the pane it's sending input to).
-//! 3. Sends one `INPUT_KEY { terminal_id, KeyEvent("a") }` followed by an
-//!    Enter key (cooked mode is line-buffered). On any subsequent
-//!    `TERMINAL_OUTPUT` frame, the byte `b'a'` must appear — that proves
-//!    the wire dispatch arm exists, routes to the right `TerminalActor`,
-//!    the actor encodes the key into PTY bytes, and `cat` echoes them
-//!    back through the `TerminalActor`'s output broadcast → fanout → the
-//!    attached client.
-//!
-//! If the dispatch is missing (the bug), step 3 produces no output
-//! and the test times out — exactly the symptom the parent agent
-//! observed in real life.
+//! A real UDS client attaches to a PTY-backed `cat`, then writes an
+//! `INPUT_KEY`, `ROUTE_INPUT`, and another `INPUT_KEY` without waiting for the
+//! command acknowledgement. The echoed `abc` proves both input surfaces use
+//! one FIFO from the client read loop through pane delivery.
 
 #![allow(clippy::expect_used, reason = "tests")]
 #![allow(clippy::unwrap_used, reason = "tests")]
@@ -37,13 +13,13 @@ mod common;
 
 use std::time::Duration;
 
+use phux_protocol::input::InputEvent;
 use phux_protocol::input::key::{KeyAction, KeyEvent, ModSet, PhysicalKey};
 use phux_protocol::wire::frame::{
-    FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_OUTPUT, TYPE_TERMINAL_SNAPSHOT,
+    Command, CommandResult, FrameKind, TYPE_ATTACHED, TYPE_TERMINAL_SNAPSHOT,
 };
 use portable_pty::CommandBuilder;
 use tempfile::TempDir;
-use tokio::net::UnixStream;
 use tokio::time::timeout;
 
 use crate::common::{
@@ -79,35 +55,8 @@ const fn enter_key() -> KeyEvent {
     }
 }
 
-/// Drain `TERMINAL_OUTPUT` frames until either `needle` appears in the
-/// accumulated bytes or `WIRE_RECV_TIMEOUT` elapses.
-///
-/// `cat` may emit the echo in several chunks (terminal driver + program
-/// echo), so we accumulate until we see the byte we sent or we give up.
-async fn await_echo(stream: &mut UnixStream, needle: u8) -> Vec<u8> {
-    let mut acc: Vec<u8> = Vec::new();
-    let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
-    while tokio::time::Instant::now() < deadline {
-        let remaining = deadline - tokio::time::Instant::now();
-        let Ok((type_byte, frame)) = timeout(remaining, recv_typed(stream)).await else {
-            break;
-        };
-        if type_byte != TYPE_TERMINAL_OUTPUT {
-            // Other frames (e.g. metadata) are fine; ignore.
-            continue;
-        }
-        if let FrameKind::TerminalOutput { bytes, .. } = frame {
-            acc.extend_from_slice(&bytes);
-            if acc.contains(&needle) {
-                return acc;
-            }
-        }
-    }
-    acc
-}
-
 #[test]
-fn input_key_dispatch_routes_to_pane_actor_pty() {
+fn mixed_input_key_and_route_input_preserve_wire_order() {
     run_local(async {
         let tmp = TempDir::new().unwrap();
         let socket_path = tmp.path().join("phux.sock");
@@ -145,7 +94,9 @@ fn input_key_dispatch_routes_to_pane_actor_pty() {
             "second server-to-client frame must be TERMINAL_SNAPSHOT",
         );
 
-        // ---- INPUT_KEY: press 'a' ----
+        // Send mixed data-plane and control-plane input without waiting for
+        // the ROUTE_INPUT acknowledgement. The per-client read loop must put
+        // every event on one dedicated-lane FIFO in this wire order.
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
@@ -154,25 +105,63 @@ fn input_key_dispatch_routes_to_pane_actor_pty() {
             },
         )
         .await;
-
-        // ---- INPUT_KEY: Enter (cat is line-buffered in cooked mode) ----
+        send_frame(
+            &mut stream,
+            &FrameKind::Command {
+                request_id: 7,
+                command: Command::RouteInput {
+                    terminal_id: wire_pane_id.clone(),
+                    event: InputEvent::Key(ascii_key('b', PhysicalKey::B)),
+                },
+            },
+        )
+        .await;
         send_frame(
             &mut stream,
             &FrameKind::InputKey {
                 terminal_id: wire_pane_id.clone(),
+                event: ascii_key('c', PhysicalKey::C),
+            },
+        )
+        .await;
+        send_frame(
+            &mut stream,
+            &FrameKind::InputKey {
+                terminal_id: wire_pane_id,
                 event: enter_key(),
             },
         )
         .await;
 
-        // The PTY driver echoes the input (and `cat` echoes the line
-        // after Enter). Either way, `b'a'` must appear in some
-        // TERMINAL_OUTPUT chunk. If the dispatch arm is missing, NO
-        // TERMINAL_OUTPUT will arrive at all and this drains to timeout.
-        let acc = await_echo(&mut stream, b'a').await;
+        let deadline = tokio::time::Instant::now() + WIRE_RECV_TIMEOUT;
+        let mut acc = Vec::new();
+        let mut route_acked = false;
+        while tokio::time::Instant::now() < deadline
+            && (!acc.windows(3).any(|window| window == b"abc") || !route_acked)
+        {
+            let remaining = deadline - tokio::time::Instant::now();
+            let Ok((_type_byte, frame)) = timeout(remaining, recv_typed(&mut stream)).await else {
+                break;
+            };
+            match frame {
+                FrameKind::TerminalOutput { bytes, .. } => acc.extend_from_slice(&bytes),
+                FrameKind::CommandResult {
+                    request_id: 7,
+                    result,
+                } => {
+                    assert_eq!(result, CommandResult::Ok, "ROUTE_INPUT must succeed");
+                    route_acked = true;
+                }
+                _ => {}
+            }
+        }
         assert!(
-            acc.contains(&b'a'),
-            "INPUT_KEY('a') must round-trip through the TerminalActor PTY and back as TERMINAL_OUTPUT (got {} bytes: {:?})",
+            route_acked,
+            "ROUTE_INPUT must receive its correlated Ok result"
+        );
+        assert!(
+            acc.windows(3).any(|window| window == b"abc"),
+            "mixed INPUT_KEY/ROUTE_INPUT frames must reach the PTY in wire order (got {} bytes: {:?})",
             acc.len(),
             acc,
         );

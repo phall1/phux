@@ -66,7 +66,10 @@ pub(crate) fn print_watch_event(ev: &WatchEvent, json: bool) {
     // A stable, scriptable name for each event kind (matches the spec
     // taxonomy in §7.5.1).
     let kind = watch_event_kind(&ev.event);
-    let terminal = ev.terminal.as_ref().map(format_wire_terminal_id);
+    let terminal = ev
+        .terminal
+        .as_ref()
+        .map(crate::selector::format_terminal_id);
 
     if json {
         match watch_event_json(ev, kind, terminal.as_deref()) {
@@ -172,18 +175,6 @@ pub(crate) fn watch_event_json(
         _ => {}
     }
     serde_json::to_string(&serde_json::Value::Object(obj))
-}
-
-/// Render a wire [`phux_protocol::ids::TerminalId`] as the `@id` selector
-/// form the rest of the CLI uses (e.g. `@3`). Satellite ids carry their
-/// host (`host/@id`) so a federated event is still legible.
-fn format_wire_terminal_id(id: &phux_protocol::ids::TerminalId) -> String {
-    match id {
-        phux_protocol::ids::TerminalId::Local { id } => format!("@{id}"),
-        phux_protocol::ids::TerminalId::Satellite { host, id } => {
-            format!("{}/@{id}", host.as_str())
-        }
-    }
 }
 
 #[cfg(test)]

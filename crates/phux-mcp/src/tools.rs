@@ -16,11 +16,10 @@ use phux_client::attach::AttachError;
 use phux_client::attach::connection::Connection;
 use phux_client::run::RunOutcome;
 use phux_client::selector::{self, Selector};
+use phux_client::state;
 use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, StateScope,
-};
+use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, FrameKind};
 use phux_protocol::wire::info::SessionSnapshot;
 use serde_json::{Value, json};
 
@@ -49,7 +48,7 @@ impl From<AttachError> for ToolError {
 /// (`docs/consumers/tui.md` §3), resolved client-side against a `GET_STATE`
 /// snapshot exactly as the CLI resolves it (ADR-0021).
 const TARGET_DESC: &str = "Target selector: session, session:window, \
-    session:window.pane, @paneid, or `.`/`=` for the focused session. Omit \
+    session:window.pane, @paneid, host/@paneid, or `.`/`=` for the focused session. Omit \
     for the focused/last session.";
 
 /// The MCP tool catalog: name, description, and JSON-Schema input shape.
@@ -200,7 +199,7 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
 /// `phux_ls` — list sessions via `GET_STATE`.
 async fn phux_ls(args: &Value) -> Result<Value, ToolError> {
     let socket = socket::resolve(str_arg(args, "socket"));
-    let snapshot = get_state(&socket).await?;
+    let snapshot = state::get_state(&socket).await?;
     let mut sessions: Vec<Value> = snapshot
         .sessions
         .iter()
@@ -213,7 +212,12 @@ async fn phux_ls(args: &Value) -> Result<Value, ToolError> {
         })
         .collect();
     sessions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Ok(json!({ "sessions": sessions }))
+    let terminals: Vec<String> = snapshot
+        .panes
+        .iter()
+        .map(|pane| selector::format_terminal_id(&pane.id))
+        .collect();
+    Ok(json!({ "sessions": sessions, "terminals": terminals }))
 }
 
 /// `phux_snapshot` — read a pane as structured data.
@@ -226,8 +230,8 @@ async fn phux_snapshot(args: &Value) -> Result<Value, ToolError> {
     let selector = parse_target(args)?;
     let scrollback = u32_arg(args, "scrollback");
     let cells = bool_arg(args, "cells").unwrap_or(false);
-    let snapshot = get_state(&socket).await?;
-    let terminal_id = resolve_one(&selector, &snapshot)?;
+    let snapshot = state::get_state(&socket).await?;
+    let terminal_id = resolve_one(&socket, &selector, &snapshot).await?;
     let screen =
         phux_client::snapshot::get_screen_scrollback(&socket, terminal_id, scrollback, cells)
             .await?;
@@ -245,8 +249,8 @@ async fn phux_send_keys(args: &Value) -> Result<Value, ToolError> {
             "`keys` must be a non-empty array of strings",
         ));
     }
-    let snapshot = get_state(&socket).await?;
-    let pane = resolve_one(&selector, &snapshot)?;
+    let snapshot = state::get_state(&socket).await?;
+    let pane = resolve_one(&socket, &selector, &snapshot).await?;
     // `send_to` returns `()`; echo the pane we resolved ourselves.
     phux_client::send_keys::send_to(&socket, pane.clone(), &keys).await?;
     Ok(json!({ "sent": true, "pane": pane_value(&pane) }))
@@ -264,8 +268,8 @@ async fn phux_run(args: &Value) -> Result<Value, ToolError> {
         Some(0) => None,
         Some(secs) => Some(Duration::from_secs(secs)),
     };
-    let snapshot = get_state(&socket).await?;
-    let pane = resolve_one(&selector, &snapshot)?;
+    let snapshot = state::get_state(&socket).await?;
+    let pane = resolve_one(&socket, &selector, &snapshot).await?;
     let nonce = run_nonce();
     match phux_client::run::run_in(&socket, pane, command, &nonce, timeout).await? {
         RunOutcome::Completed(result) => serde_json::to_value(&result)
@@ -297,8 +301,8 @@ async fn phux_wait(args: &Value) -> Result<Value, ToolError> {
     );
     let timeout = num_arg(args, "timeout_secs").map(Duration::from_secs);
 
-    let snapshot = get_state(&socket).await?;
-    let terminal_id = resolve_one(&selector, &snapshot)?;
+    let snapshot = state::get_state(&socket).await?;
+    let terminal_id = resolve_one(&socket, &selector, &snapshot).await?;
     let result = phux_client::wait::poll_until(
         &socket,
         terminal_id,
@@ -346,8 +350,8 @@ async fn phux_new(args: &Value) -> Result<Value, ToolError> {
 async fn phux_kill(args: &Value) -> Result<Value, ToolError> {
     let socket = socket::resolve(str_arg(args, "socket"));
     let selector = required_target(args)?;
-    let snapshot = get_state(&socket).await?;
-    let ids = selector::resolve(&selector, &snapshot);
+    let snapshot = state::get_state(&socket).await?;
+    let ids = state::resolve_targets(&socket, &selector, &snapshot).await;
     if ids.is_empty() {
         return Err(ToolError::new("no such target"));
     }
@@ -394,8 +398,8 @@ async fn phux_watch(args: &Value) -> Result<Value, ToolError> {
         Some(raw) => {
             let selector = selector::parse(raw)
                 .map_err(|err| ToolError::new(format!("invalid target '{raw}': {err}")))?;
-            let snapshot = get_state(&socket).await?;
-            Some(resolve_one(&selector, &snapshot)?)
+            let snapshot = state::get_state(&socket).await?;
+            Some(resolve_one(&socket, &selector, &snapshot).await?)
         }
     };
     let max_events = num_arg(args, "max_events").and_then(|n| usize::try_from(n).ok());
@@ -445,7 +449,10 @@ fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
     if let Value::Object(map) = &mut obj {
         map.insert("event".to_owned(), Value::from(kind));
         if let Some(t) = &ev.terminal {
-            map.insert("terminal".to_owned(), Value::from(format!("{t:?}")));
+            map.insert(
+                "terminal".to_owned(),
+                Value::from(selector::format_terminal_id(t)),
+            );
         }
     }
     obj
@@ -459,35 +466,9 @@ fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
 /// Matches `phux run`'s default so the surfaces agree.
 const RUN_DEFAULT_TIMEOUT_SECS: u64 = 600;
 
-/// Open a connection and fetch the server-wide state snapshot via
-/// `GET_STATE`.
-async fn get_state(socket: &std::path::Path) -> Result<SessionSnapshot, ToolError> {
-    let mut conn = Connection::connect(socket).await?;
-    conn.send(&FrameKind::Command {
-        request_id: 1,
-        command: WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    })
-    .await?;
-    loop {
-        if let FrameKind::CommandResult { request_id, result } = conn.recv().await?
-            && request_id == 1
-        {
-            return match result {
-                CommandResult::OkWith(CommandValue::State(snap)) => Ok(snap),
-                CommandResult::Error { message, .. } => Err(ToolError::new(message)),
-                other => Err(ToolError::new(format!(
-                    "unexpected GET_STATE result: {other:?}"
-                ))),
-            };
-        }
-    }
-}
-
 /// Open a connection and issue a `CREATE_SESSION` command, returning its
 /// [`CommandResult`]. Self-contained over the low-level [`Connection`] — the
-/// same wire-call pattern as [`get_state`], reaching the daemon without any
+/// same wire-call pattern as [`phux_client::state::get_state`], reaching the daemon without any
 /// `phux-client` agent API.
 /// Create a named session via the conventional `SESSION_CREATE_KEY` L3
 /// write, then read the seed-pane id back from `SESSION_CREATE_RESULT_KEY`.
@@ -506,7 +487,7 @@ async fn create_session(
 
     // Reject a duplicate name before writing (the server refuses it too, but
     // silently — SET_METADATA has no reply frame).
-    let snap = get_state_on(&mut conn).await?;
+    let snap = state::get_state_on(&mut conn).await?;
     if snap.sessions.iter().any(|s| s.name == name) {
         return Err(ToolError::new(format!("session {name:?} already exists")));
     }
@@ -547,31 +528,6 @@ async fn create_session(
     Ok(json!({ "session": name, "terminal_id": terminal_id }))
 }
 
-/// Send `GET_STATE` over an existing connection and return the snapshot.
-async fn get_state_on(conn: &mut Connection) -> Result<SessionSnapshot, ToolError> {
-    conn.send(&FrameKind::Command {
-        request_id: 100,
-        command: WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    })
-    .await?;
-    loop {
-        if let FrameKind::CommandResult {
-            request_id: 100,
-            result,
-        } = conn.recv().await?
-        {
-            return match result {
-                CommandResult::OkWith(CommandValue::State(snap)) => Ok(snap),
-                other => Err(ToolError::new(format!(
-                    "unexpected GET_STATE result: {other:?}"
-                ))),
-            };
-        }
-    }
-}
-
 /// Parse the optional `target` argument into a [`Selector`], defaulting to
 /// the focused/last session when absent. Mirrors the CLI's `parse_selector`
 /// front door (phux-n95).
@@ -605,18 +561,19 @@ fn required_target(args: &Value) -> Result<Selector, ToolError> {
 /// # Errors
 ///
 /// Returns [`ToolError`] when the selector matches no pane.
-fn resolve_one(selector: &Selector, snapshot: &SessionSnapshot) -> Result<TerminalId, ToolError> {
-    let candidates = selector::resolve(selector, snapshot);
+async fn resolve_one(
+    socket: &std::path::Path,
+    selector: &Selector,
+    snapshot: &SessionSnapshot,
+) -> Result<TerminalId, ToolError> {
+    let candidates = state::resolve_targets(socket, selector, snapshot).await;
     selector::pick_target_pane(&candidates, &snapshot.focused_pane)
         .ok_or_else(|| ToolError::new("no such target"))
 }
 
-/// A JSON rendering of a `TerminalId` for tool output.
+/// A JSON rendering of a `TerminalId` using the canonical direct selector.
 fn pane_value(id: &TerminalId) -> Value {
-    // TODO(phux-93b): TerminalId has no Serialize impl in phux-protocol
-    // (it avoids serde to keep a near-empty publish profile); render it via
-    // Debug for now. A stable numeric projection would be nicer.
-    json!(format!("{id:?}"))
+    json!(selector::format_terminal_id(id))
 }
 
 /// A per-call sentinel nonce for `phux_run`, matching `phux run`'s
@@ -704,8 +661,12 @@ fn string_array_opt(args: &Value, key: &str) -> Result<Option<Vec<String>>, Tool
 #[cfg(test)]
 mod tests {
     use super::*;
+    use bytes::BytesMut;
     use phux_protocol::ids::{SessionId, WindowId};
+    use phux_protocol::wire::frame::{FrameKind, Scope, TERMINAL_TAGS_KEY};
     use phux_protocol::wire::info::{SessionInfo, TerminalInfo, WindowInfo};
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    use tokio::net::UnixListener;
 
     #[test]
     fn catalog_lists_all_tools_with_object_schemas() {
@@ -855,6 +816,17 @@ mod tests {
         assert_eq!(tv["event"], json!("title_changed"));
         assert_eq!(tv["title"], json!("vim"));
 
+        let satellite = WatchEvent {
+            terminal: Some(TerminalId::satellite("devbox", 7)),
+            event: AgentEvent::Dirty,
+        };
+        assert_eq!(agent_event_json(&satellite)["terminal"], json!("devbox/@7"));
+        assert_eq!(pane_value(&TerminalId::local(3)), json!("@3"));
+        assert_eq!(
+            pane_value(&TerminalId::satellite("devbox", 7)),
+            json!("devbox/@7"),
+        );
+
         let asked = WatchEvent {
             terminal: None,
             event: AgentEvent::Asked {
@@ -916,6 +888,13 @@ mod tests {
             parse_target(&json!({ "target": "@100" })).unwrap(),
             Selector::TerminalId(100),
         );
+        assert_eq!(
+            parse_target(&json!({ "target": "devbox/@7" })).unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 7,
+            },
+        );
         // Malformed → error (no server round trip).
         assert!(parse_target(&json!({ "target": "@nope" })).is_err());
     }
@@ -935,32 +914,124 @@ mod tests {
     /// `resolve_one` maps each selector form to the expected pane against a
     /// multi-session/window/pane snapshot, exactly as the CLI does, and
     /// errors on a miss.
-    #[test]
-    fn resolve_one_maps_every_selector_form() {
+    #[tokio::test]
+    async fn resolve_one_maps_every_selector_form() {
         let snap = fixture();
-        let one = |target: &str| resolve_one(&selector::parse(target).unwrap(), &snap);
+        let socket = std::path::Path::new("unused-for-non-tag-selectors");
 
         // Bare session → focused-or-first pane of the session.
-        assert_eq!(one("work").unwrap(), TerminalId::local(100));
+        assert_eq!(
+            resolve_one(socket, &selector::parse("work").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::local(100),
+        );
         // Window by index and by tag → the window's first pane.
-        assert_eq!(one("work:1").unwrap(), TerminalId::local(101));
-        assert_eq!(one("work:editor").unwrap(), TerminalId::local(101));
-        // Exact pane.
-        assert_eq!(one("work:1.1").unwrap(), TerminalId::local(102));
-        // Opaque terminal id.
-        assert_eq!(one("@200").unwrap(), TerminalId::local(200));
+        assert_eq!(
+            resolve_one(socket, &selector::parse("work:1").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::local(101),
+        );
+        assert_eq!(
+            resolve_one(socket, &selector::parse("work:editor").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::local(101),
+        );
+        // Exact pane and opaque Terminal ids.
+        assert_eq!(
+            resolve_one(socket, &selector::parse("work:1.1").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::local(102),
+        );
+        assert_eq!(
+            resolve_one(socket, &selector::parse("@200").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::local(200),
+        );
+        assert_eq!(
+            resolve_one(socket, &selector::parse("devbox/@7").unwrap(), &snap)
+                .await
+                .unwrap(),
+            TerminalId::satellite("devbox", 7),
+        );
         // `.`/`=` → the focused session's focused pane.
         assert_eq!(
-            resolve_one(&Selector::Current, &snap).unwrap(),
+            resolve_one(socket, &Selector::Current, &snap)
+                .await
+                .unwrap(),
             TerminalId::local(100),
         );
         assert_eq!(
-            resolve_one(&Selector::Last, &snap).unwrap(),
+            resolve_one(socket, &Selector::Last, &snap).await.unwrap(),
             TerminalId::local(100),
         );
         // Misses error.
-        assert!(one("ghost").is_err());
-        assert!(one("@999").is_err());
+        assert!(
+            resolve_one(socket, &selector::parse("ghost").unwrap(), &snap)
+                .await
+                .is_err()
+        );
+        assert!(
+            resolve_one(socket, &selector::parse("@999").unwrap(), &snap)
+                .await
+                .is_err()
+        );
+    }
+
+    /// MCP `#tag` resolution fetches the shared L3 tag index and retains
+    /// snapshot ordering before applying focused-pane preference.
+    #[tokio::test]
+    async fn resolve_one_fetches_tag_fixture() {
+        let dir = tempfile::tempdir().unwrap();
+        let socket = dir.path().join("mcp-tag.sock");
+        let listener = UnixListener::bind(&socket).unwrap();
+        let server = tokio::spawn(async move {
+            let (mut stream, _) = listener.accept().await.unwrap();
+            for _ in 0..4 {
+                let frame = read_frame(&mut stream).await;
+                let FrameKind::GetMetadata {
+                    request_id,
+                    scope: Scope::Terminal(terminal_id),
+                    key,
+                } = frame
+                else {
+                    panic!("expected terminal GET_METADATA, got {frame:?}");
+                };
+                assert_eq!(key, TERMINAL_TAGS_KEY);
+                let value = matches!(terminal_id.local_id(), Some(100 | 200))
+                    .then(|| serde_json::to_vec(&vec!["build"]).unwrap());
+                write_frame(&mut stream, &FrameKind::MetadataValue { request_id, value }).await;
+            }
+        });
+
+        let pane = resolve_one(&socket, &selector::parse("#build").unwrap(), &fixture())
+            .await
+            .unwrap();
+        assert_eq!(pane, TerminalId::local(100));
+        server.await.unwrap();
+    }
+
+    async fn read_frame(stream: &mut tokio::net::UnixStream) -> FrameKind {
+        let mut header = [0_u8; 4];
+        stream.read_exact(&mut header).await.unwrap();
+        let body_len = usize::try_from(u32::from_be_bytes(header)).unwrap();
+        let mut encoded = Vec::with_capacity(4 + body_len);
+        encoded.extend_from_slice(&header);
+        encoded.resize(4 + body_len, 0);
+        stream.read_exact(&mut encoded[4..]).await.unwrap();
+        let (frame, tail) = FrameKind::decode(&encoded).unwrap();
+        assert!(tail.is_empty());
+        frame
+    }
+
+    async fn write_frame(stream: &mut tokio::net::UnixStream, frame: &FrameKind) {
+        let mut encoded = BytesMut::new();
+        frame.encode(&mut encoded);
+        stream.write_all(&encoded).await.unwrap();
     }
 
     /// Build a snapshot: session "work" (id 1, focused, pane 100 focused)
@@ -985,6 +1056,14 @@ mod tests {
             TerminalInfo::new(TerminalId::local(101), w1, 80, 24),
             TerminalInfo::new(TerminalId::local(102), w1, 80, 24),
             TerminalInfo::new(TerminalId::local(200), p0, 80, 24),
+            // Aggregated federation inventory carries satellite panes without
+            // inventing hub-local session/window joins.
+            TerminalInfo::new(
+                TerminalId::satellite("devbox", 7),
+                WindowId::new(999),
+                80,
+                24,
+            ),
         ];
         SessionSnapshot::new(work, w0, TerminalId::local(100))
             .with_sessions(sessions)
