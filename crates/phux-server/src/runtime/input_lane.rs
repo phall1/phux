@@ -31,10 +31,10 @@
 //! ## Ordering and lease correctness
 //!
 //! * **Per-client input order** is preserved end to end: a client's read loop
-//!   enqueues its `INPUT_*` frames onto the lane channel in wire order, the
-//!   tokio mpsc channel is FIFO, the single lane thread drains it FIFO, and the
-//!   pane mailbox it forwards into is FIFO. `K1` before `K2` stays `K1` before
-//!   `K2` at the PTY.
+//!   enqueues its local `INPUT_*` and `ROUTE_INPUT` frames onto the same lane
+//!   channel in wire order, the tokio mpsc channel is FIFO, the single lane
+//!   thread drains it FIFO, and the pane mailbox it forwards into is FIFO.
+//!   Mixed data-plane and control-plane input therefore cannot overtake.
 //! * **Lease exclusion** (ADR-0033 "take the wheel") is unchanged: the lane
 //!   calls the *same* `handle_terminal_input`,
 //!   which re-evaluates the subscription and lease gates atomically under the
@@ -52,11 +52,16 @@
 //! Only **local** pane ids are routed through the lane. Satellite-tagged ids
 //! (federation-hub relay, phux-v45.4) stay on the main thread: their delivery
 //! is a hub-link forward, not a mailbox `try_send`, and keeping it inline
-//! avoids widening the lane's contract to the relay registry.
+//! avoids widening the lane's contract to the relay registry. Local
+//! `ROUTE_INPUT` carries a one-shot reply so its established correlated
+//! command result is emitted only after the lane applies the lease/mailbox
+//! operation.
 
-use tokio::sync::mpsc;
+use phux_protocol::input::InputEvent;
+use phux_protocol::wire::frame::{CommandResult, ErrorCode};
+use tokio::sync::{mpsc, oneshot};
 
-use super::handle_terminal_input;
+use super::{handle_route_input, handle_terminal_input};
 use crate::state::{ClientId, SharedState, TerminalInput};
 
 /// Bound on the lane's inbound queue. Input events are tiny and low-rate, so a
@@ -65,9 +70,9 @@ use crate::state::{ClientId, SharedState, TerminalInput};
 /// backpressure already applied at the pane mailbox (SPEC §9).
 const INPUT_LANE_CAPACITY: usize = 1024;
 
-/// A local `INPUT_*` event lifted off the main runtime for lease/subscription
-/// gating and delivery to the owning pane actor. Every field is `Send`; the
-/// `!Send` `Terminal` is never referenced here.
+/// One local input operation lifted off the main runtime. Both wire input
+/// surfaces share this queue so a client's mixed `INPUT_*` / `ROUTE_INPUT`
+/// stream reaches a pane in wire order.
 #[derive(Debug)]
 pub(crate) struct RoutedInput {
     /// Originating client, for the subscription and lease gates.
@@ -75,10 +80,38 @@ pub(crate) struct RoutedInput {
     /// Wire pane id. Always local (`is_local()`); satellite ids never reach
     /// the lane.
     pub(crate) terminal_id: phux_protocol::ids::TerminalId,
-    /// The decoded, not-yet-encoded input event.
-    pub(crate) input: TerminalInput,
-    /// Frame label for logs (`"INPUT_KEY"`, ...), matching the inline path.
-    pub(crate) frame_label: &'static str,
+    /// The authority policy and reply behavior for this wire surface.
+    pub(crate) kind: RoutedInputKind,
+}
+
+#[derive(Debug)]
+pub(crate) enum RoutedInputKind {
+    /// Attached data-plane input: enforce subscription plus lease authority.
+    Attached {
+        input: TerminalInput,
+        frame_label: &'static str,
+    },
+    /// Attach-free control-plane input: enforce the lease and return its
+    /// correlated command result after routing.
+    Headless {
+        event: InputEvent,
+        reply: oneshot::Sender<CommandResult>,
+    },
+}
+
+impl RoutedInput {
+    pub(crate) const fn attached(
+        client_id: ClientId,
+        terminal_id: phux_protocol::ids::TerminalId,
+        input: TerminalInput,
+        frame_label: &'static str,
+    ) -> Self {
+        Self {
+            client_id,
+            terminal_id,
+            kind: RoutedInputKind::Attached { input, frame_label },
+        }
+    }
 }
 
 /// Cloneable handle a client task uses to hand input to the lane. Cloning is
@@ -99,17 +132,82 @@ impl InputLaneHandle {
                 tracing::warn!(
                     client_id = ?routed.client_id,
                     terminal_id = ?routed.terminal_id,
-                    frame_label = routed.frame_label,
+                    frame_label = routed.kind.frame_label(),
                     "input lane queue full; dropping (fire-and-forget per SPEC §9)",
                 );
+                routed.kind.reply_dropped(CommandResult::Ok);
             }
             Err(mpsc::error::TrySendError::Closed(routed)) => {
                 tracing::debug!(
                     client_id = ?routed.client_id,
-                    frame_label = routed.frame_label,
+                    frame_label = routed.kind.frame_label(),
                     "input lane closed; dropping input",
                 );
+                routed.kind.reply_dropped(CommandResult::Error {
+                    code: ErrorCode::InternalError,
+                    message: "input lane unavailable for ROUTE_INPUT".to_owned(),
+                });
             }
+        }
+    }
+
+    /// Route attach-free command input through the same FIFO as `INPUT_*` and
+    /// wait for the lane's lease/mailbox result.
+    pub(crate) async fn route_command(
+        &self,
+        client_id: ClientId,
+        terminal_id: phux_protocol::ids::TerminalId,
+        event: InputEvent,
+    ) -> CommandResult {
+        let (reply, result) = oneshot::channel();
+        let routed = RoutedInput {
+            client_id,
+            terminal_id,
+            kind: RoutedInputKind::Headless { event, reply },
+        };
+        // A command has a correlated result (including TerminalNotFound and
+        // InputLeaseHeld), so unlike fire-and-forget INPUT_* it waits for lane
+        // capacity rather than losing the authority check on queue overflow.
+        if self.tx.send(routed).await.is_err() {
+            return CommandResult::Error {
+                code: ErrorCode::InternalError,
+                message: "input lane unavailable for ROUTE_INPUT".to_owned(),
+            };
+        }
+        result.await.unwrap_or_else(|_| CommandResult::Error {
+            code: ErrorCode::InternalError,
+            message: "input lane stopped before ROUTE_INPUT completed".to_owned(),
+        })
+    }
+
+    #[cfg(test)]
+    fn enqueue_command(
+        &self,
+        client_id: ClientId,
+        terminal_id: phux_protocol::ids::TerminalId,
+        event: InputEvent,
+    ) -> oneshot::Receiver<CommandResult> {
+        let (reply, result) = oneshot::channel();
+        self.route(RoutedInput {
+            client_id,
+            terminal_id,
+            kind: RoutedInputKind::Headless { event, reply },
+        });
+        result
+    }
+}
+
+impl RoutedInputKind {
+    const fn frame_label(&self) -> &'static str {
+        match self {
+            Self::Attached { frame_label, .. } => frame_label,
+            Self::Headless { .. } => "ROUTE_INPUT",
+        }
+    }
+
+    fn reply_dropped(self, result: CommandResult) {
+        if let Self::Headless { reply, .. } = self {
+            let _ = reply.send(result);
         }
     }
 }
@@ -152,9 +250,9 @@ impl Drop for InputLane {
 /// Spawn the dedicated input-lane thread and return its owner.
 ///
 /// The thread blocks on the channel and, for each [`RoutedInput`], runs the
-/// same [`handle_terminal_input`] the inline path uses — off the main runtime,
-/// so routing never waits behind an output-broadcast tick. The thread exits
-/// when the channel closes (all senders dropped), releasing its `SharedState`
+/// existing attached-input or headless-input handler off the main runtime, so
+/// routing never waits behind an output-broadcast tick. The thread exits when
+/// the channel closes (all senders dropped), releasing its `SharedState`
 /// clone.
 ///
 /// # Errors
@@ -173,13 +271,26 @@ pub(crate) fn spawn_input_lane(state: SharedState) -> std::io::Result<InputLane>
             // never awaiting. The mailbox waker fires the actor task back on
             // the main runtime.
             while let Some(routed) = rx.blocking_recv() {
-                handle_terminal_input(
-                    &state,
-                    routed.client_id,
-                    &routed.terminal_id,
-                    routed.input,
-                    routed.frame_label,
-                );
+                match routed.kind {
+                    RoutedInputKind::Attached { input, frame_label } => {
+                        handle_terminal_input(
+                            &state,
+                            routed.client_id,
+                            &routed.terminal_id,
+                            input,
+                            frame_label,
+                        );
+                    }
+                    RoutedInputKind::Headless { event, reply } => {
+                        let result = handle_route_input(
+                            &state,
+                            routed.client_id,
+                            &routed.terminal_id,
+                            event,
+                        );
+                        let _ = reply.send(result);
+                    }
+                }
             }
             tracing::debug!("input lane thread exiting (channel closed)");
         })?;
@@ -197,16 +308,20 @@ mod tests {
     use tokio_util::sync::CancellationToken;
 
     use super::*;
-    use crate::terminal_actor::{MAX_PTY_COALESCE_BYTES, PaneOutput, PtyEvent, TerminalActor};
+    use crate::terminal_actor::TerminalActor;
 
     /// A trusted paste of `bytes`. With DEC 2004 bracketed-paste off (a fresh
     /// `Terminal`'s default) the pane's paste encoder emits exactly `bytes` on
     /// the PTY writer channel, so the routed input is byte-identifiable.
-    fn paste(bytes: &[u8]) -> TerminalInput {
-        TerminalInput::Paste(PasteEvent {
+    fn paste_event(bytes: &[u8]) -> PasteEvent {
+        PasteEvent {
             trust: PasteTrust::Trusted,
             data: bytes.to_vec(),
-        })
+        }
+    }
+
+    fn paste(bytes: &[u8]) -> TerminalInput {
+        TerminalInput::Paste(paste_event(bytes))
     }
 
     /// A registered pane actor plus two subscribed clients, wired into a fresh
@@ -219,9 +334,7 @@ mod tests {
         pane: phux_core::ids::TerminalId,
         client_a: ClientId,
         client_b: ClientId,
-        pty_evt_tx: mpsc::UnboundedSender<PtyEvent>,
         writer_rx: mpsc::UnboundedReceiver<Vec<u8>>,
-        output_rx: tokio::sync::broadcast::Receiver<PaneOutput>,
         token: CancellationToken,
     }
 
@@ -232,8 +345,7 @@ mod tests {
         let handle = bundle.handle.clone();
         let token = bundle.token.clone();
         let mut actor = bundle.actor;
-        let (pty_evt_tx, writer_rx) = actor.install_test_pty_channels();
-        let output_rx = handle.output.subscribe();
+        let (_pty_evt_tx, writer_rx) = actor.install_test_pty_channels();
 
         let state = SharedState::new();
         let (wire, pane, client_a, client_b) = state.with_mut(|s| {
@@ -256,9 +368,7 @@ mod tests {
             pane,
             client_a,
             client_b,
-            pty_evt_tx,
             writer_rx,
-            output_rx,
             token,
         }
     }
@@ -275,12 +385,12 @@ mod tests {
                 let lane = spawn_input_lane(fx.state.clone()).expect("spawn lane");
 
                 for byte in [&b"a"[..], b"b", b"c"] {
-                    lane.handle().route(RoutedInput {
-                        client_id: fx.client_a,
-                        terminal_id: fx.wire.clone(),
-                        input: paste(byte),
-                        frame_label: "INPUT_PASTE",
-                    });
+                    lane.handle().route(RoutedInput::attached(
+                        fx.client_a,
+                        fx.wire.clone(),
+                        paste(byte),
+                        "INPUT_PASTE",
+                    ));
                 }
 
                 for expected in [&b"a"[..], b"b", b"c"] {
@@ -311,20 +421,39 @@ mod tests {
                     .with_mut(|s| s.set_input_lease(fx.pane, fx.client_b));
 
                 let lane = spawn_input_lane(fx.state.clone()).expect("spawn lane");
-                // A is blocked; its input must be dropped, not encoded.
-                lane.handle().route(RoutedInput {
-                    client_id: fx.client_a,
-                    terminal_id: fx.wire.clone(),
-                    input: paste(b"a"),
-                    frame_label: "INPUT_PASTE",
-                });
+                // A is blocked on both input surfaces. Attached input is
+                // silently dropped; ROUTE_INPUT keeps its typed lease error.
+                lane.handle().route(RoutedInput::attached(
+                    fx.client_a,
+                    fx.wire.clone(),
+                    paste(b"a"),
+                    "INPUT_PASTE",
+                ));
+                let route_result = lane
+                    .handle()
+                    .route_command(
+                        fx.client_a,
+                        fx.wire.clone(),
+                        InputEvent::Paste(paste_event(b"r")),
+                    )
+                    .await;
+                assert!(
+                    matches!(
+                        route_result,
+                        CommandResult::Error {
+                            code: ErrorCode::InputLeaseHeld,
+                            ..
+                        }
+                    ),
+                    "ROUTE_INPUT must retain its lease error on the lane",
+                );
                 // B holds the wheel; its input must be delivered.
-                lane.handle().route(RoutedInput {
-                    client_id: fx.client_b,
-                    terminal_id: fx.wire.clone(),
-                    input: paste(b"B"),
-                    frame_label: "INPUT_PASTE",
-                });
+                lane.handle().route(RoutedInput::attached(
+                    fx.client_b,
+                    fx.wire.clone(),
+                    paste(b"B"),
+                    "INPUT_PASTE",
+                ));
 
                 let got = tokio::time::timeout(Duration::from_secs(2), fx.writer_rx.recv())
                     .await
@@ -347,77 +476,94 @@ mod tests {
             .await;
     }
 
-    /// Lane-routed input is not starved by a large pending PTY-output burst.
-    /// Mirrors `input_interleaves_with_a_large_pty_output_burst` but drives the
-    /// keystroke through the dedicated lane (a separate thread) rather than the
-    /// actor's mailbox directly: the lane populates the mailbox off the main
-    /// runtime, and the actor's fair `select!` (284fcbd) services it while the
-    /// ~800KB burst is still draining, so the cumulative broadcast bytes seen
-    /// when the input lands are far below the full burst.
+    /// A `ROUTE_INPUT` completes while the current-thread runtime is
+    /// synchronously occupied. The result receiver is inspected without an
+    /// `.await`, so only the dedicated OS thread can have run the lease check
+    /// and mailbox send during the sleep; an inline/main-thread route cannot
+    /// satisfy this test.
     #[tokio::test(flavor = "current_thread")]
-    async fn lane_routed_input_interleaves_with_a_large_pty_output_burst() {
-        const CHUNK_LEN: usize = 4096;
-        const CHUNK_COUNT: usize = 200;
-        const BURST_BYTES: usize = CHUNK_LEN * CHUNK_COUNT;
+    async fn route_input_routes_while_main_runtime_is_not_polling() {
+        let local = tokio::task::LocalSet::new();
+        local
+            .run_until(async {
+                let fx = spawn_fixture();
+                let lane = spawn_input_lane(fx.state.clone()).expect("spawn lane");
+                // Hold the authority mutex while enqueueing so the lane cannot
+                // finish before this task stops polling. Once the closure
+                // releases the lock, the synchronous loop below occupies the
+                // runtime thread; only the lane thread can produce the reply.
+                let handle = lane.handle();
+                let mut result = fx.state.with(|_| {
+                    let mut result = handle.enqueue_command(
+                        fx.client_a,
+                        fx.wire.clone(),
+                        InputEvent::Paste(paste_event(b"k")),
+                    );
+                    assert!(
+                        matches!(result.try_recv(), Err(oneshot::error::TryRecvError::Empty)),
+                        "lane must be blocked on the held state mutex",
+                    );
+                    result
+                });
 
+                let deadline = std::time::Instant::now() + Duration::from_secs(2);
+                let routed = loop {
+                    match result.try_recv() {
+                        Ok(result) => break result,
+                        Err(oneshot::error::TryRecvError::Empty)
+                            if std::time::Instant::now() < deadline =>
+                        {
+                            std::thread::sleep(Duration::from_millis(1));
+                        }
+                        other => {
+                            panic!("lane did not route while main runtime was blocked: {other:?}")
+                        }
+                    }
+                };
+                assert_eq!(routed, CommandResult::Ok);
+                fx.token.cancel();
+            })
+            .await;
+    }
+
+    /// `INPUT_*` and `ROUTE_INPUT` use one lane FIFO. Distinct paste payloads
+    /// make the pane writer's observed order unambiguous.
+    #[tokio::test(flavor = "current_thread")]
+    async fn mixed_attached_and_route_input_preserve_fifo() {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
                 let mut fx = spawn_fixture();
                 let lane = spawn_input_lane(fx.state.clone()).expect("spawn lane");
+                let handle = lane.handle();
 
-                // Pre-queue a burst far larger than MAX_PTY_COALESCE_BYTES so it
-                // spans many capped vt_writes.
-                let chunk = vec![b'x'; CHUNK_LEN];
-                for _ in 0..CHUNK_COUNT {
-                    fx.pty_evt_tx
-                        .send(PtyEvent::Bytes(chunk.clone()))
-                        .expect("queue burst");
-                }
-                // Route ONE keystroke through the lane.
-                lane.handle().route(RoutedInput {
-                    client_id: fx.client_a,
-                    terminal_id: fx.wire.clone(),
-                    input: paste(b"k"),
-                    frame_label: "INPUT_PASTE",
-                });
-
-                let got = tokio::time::timeout(Duration::from_secs(2), fx.writer_rx.recv())
-                    .await
-                    .expect("lane-routed input must be serviced mid-burst, not after it")
-                    .expect("writer channel open");
-                assert_eq!(
-                    got, b"k",
-                    "the lane-routed keystroke should reach the PTY writer while the burst drains",
+                handle.route(RoutedInput::attached(
+                    fx.client_a,
+                    fx.wire.clone(),
+                    paste(b"a"),
+                    "INPUT_PASTE",
+                ));
+                let route_result = handle.enqueue_command(
+                    fx.client_a,
+                    fx.wire.clone(),
+                    InputEvent::Paste(paste_event(b"b")),
                 );
+                handle.route(RoutedInput::attached(
+                    fx.client_a,
+                    fx.wire.clone(),
+                    paste(b"c"),
+                    "INPUT_PASTE",
+                ));
 
-                // Cumulative broadcast bytes so far must be below the full
-                // burst — the input interleaved rather than waiting it out.
-                // Account Lagged-skipped frames (bounded broadcast channel)
-                // toward the total so the gate cannot under-report.
-                let mut emitted: usize = 0;
-                loop {
-                    match fx.output_rx.try_recv() {
-                        Ok(PaneOutput::Live(bytes) | PaneOutput::Resync { bytes, .. }) => {
-                            emitted += bytes.len();
-                        }
-                        Err(tokio::sync::broadcast::error::TryRecvError::Lagged(n)) => {
-                            // Each lagged frame is one coalesced payload of at
-                            // most MAX_PTY_COALESCE_BYTES; bound the skipped
-                            // volume by that cap so the assertion stays
-                            // conservative and never under-reports.
-                            let skipped = usize::try_from(n).unwrap_or(usize::MAX);
-                            emitted += skipped.saturating_mul(MAX_PTY_COALESCE_BYTES);
-                        }
-                        Err(_) => break,
-                    }
+                assert_eq!(route_result.await.expect("lane reply"), CommandResult::Ok);
+                for expected in [&b"a"[..], b"b", b"c"] {
+                    let got = tokio::time::timeout(Duration::from_secs(2), fx.writer_rx.recv())
+                        .await
+                        .expect("mixed input must reach PTY")
+                        .expect("writer channel open");
+                    assert_eq!(got, expected, "mixed lane routing must stay FIFO");
                 }
                 fx.token.cancel();
-                assert!(
-                    emitted < BURST_BYTES,
-                    "lane-routed input must land mid-burst: cumulative output {emitted} \
-                     should be below the full burst {BURST_BYTES}",
-                );
             })
             .await;
     }
