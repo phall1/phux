@@ -11,9 +11,10 @@ import { PhuxCli } from "./adapter.js";
 import type { ScreenState } from "./schemas.js";
 import { PhuxTargetStore, type PhuxTargetSelection } from "./target-store.js";
 
-const TARGET = Type.Optional(Type.String({ minLength: 1, pattern: ".*\\S.*", description: "Explicit phux target selector; otherwise use the selected /phux target" }));
+const TARGET = Type.Optional(Type.String({ minLength: 1, maxLength: 512, pattern: ".*\\S.*", description: "Explicit phux target selector; otherwise use the selected /phux target" }));
 const LOCAL_TIMEOUT = Type.Optional(Type.Integer({ minimum: 1, maximum: 3_600_000, description: "Local subprocess timeout in milliseconds" }));
-const PHUX_TIMEOUT = Type.Optional(Type.Integer({ minimum: 0, maximum: 86_400, description: "phux operation timeout in seconds; 0 waits indefinitely" }));
+const RUN_TIMEOUT = Type.Optional(Type.Integer({ minimum: 0, maximum: 86_400, description: "phux run timeout in seconds; 0 waits indefinitely" }));
+const WAIT_TIMEOUT = Type.Optional(Type.Integer({ minimum: 1, maximum: 86_400, description: "phux wait timeout in seconds; omit to wait indefinitely" }));
 const NONEMPTY_ARGV = Type.Array(Type.String(), { minItems: 1, maxItems: 256 });
 const STRICT = { additionalProperties: false } as const;
 
@@ -37,20 +38,22 @@ export const PhuxSendKeysParams = Type.Object({
 }, STRICT);
 export const PhuxRunParams = Type.Object({
   target: TARGET,
-  command: NONEMPTY_ARGV,
-  timeout_seconds: PHUX_TIMEOUT,
+  command: Type.String({ minLength: 1, pattern: ".*\\S.*", description: "One shell command line, passed to phux as a single argument" }),
+  timeout_seconds: RUN_TIMEOUT,
   local_timeout_ms: LOCAL_TIMEOUT,
 }, STRICT);
 export const PhuxWaitParams = Type.Object({
   target: TARGET,
   until: Type.Optional(Type.String({ minLength: 1 })),
   idle_ms: Type.Optional(Type.Integer({ minimum: 0, maximum: 86_400_000 })),
-  timeout_seconds: PHUX_TIMEOUT,
+  timeout_seconds: WAIT_TIMEOUT,
   local_timeout_ms: LOCAL_TIMEOUT,
-}, STRICT);
+}, { ...STRICT, not: { required: ["until", "idle_ms"] } });
 
-const MAX_MODEL_BYTES = 12 * 1024;
-const MAX_MODEL_LINES = 200;
+export const MAX_MODEL_BYTES = 12 * 1024;
+export const MAX_MODEL_LINES = 200;
+const MODEL_TRUNCATION_NOTICE = `[Pi adapter truncated terminal output to the last ${String(MAX_MODEL_LINES)} lines within ${String(MAX_MODEL_BYTES)} bytes]`;
+const PHUX_TRUNCATION_NOTICE = "[phux reported that terminal output was already truncated]";
 
 export interface PhuxToolDetails {
   readonly operation: "list" | "create" | "snapshot" | "send_keys" | "run" | "wait";
@@ -79,7 +82,7 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
       const result = await cli.ls(execution(params, signal));
       const lines = result.sessions.map((session) =>
         `${session.name}\twindows=${String(session.windows)}\tattached=${String(session.attached)}`);
-      const output = bounded(lines.join("\n") || "No phux sessions.");
+      const output = boundedResult(`sessions=${String(result.sessions.length)}`, lines.join("\n") || "No phux sessions.");
       return toolResult(output.text, {
         operation: "list",
         summary: `${String(result.sessions.length)} session(s)`,
@@ -161,17 +164,17 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
   pi.registerTool({
     name: "phux_run",
     label: "phux run",
-    description: "Run an argv command in a phux pane through phux's documented run sentinel. Uses an explicit target or requires the available selected /phux target. Output is bounded to 200 lines and 12 KiB.",
+    description: "Run one shell command line in a phux pane through phux's documented run sentinel. The command is passed as one argument. Uses an explicit target or requires the available selected /phux target. Output is bounded to 200 lines and 12 KiB.",
     promptSnippet: "Run a command in a shared phux terminal",
     parameters: PhuxRunParams,
     async execute(_id, params, signal) {
       const target = resolveTarget(params.target, store);
-      const result = await cli.run(target, params.command, {
+      const result = await cli.run(target, [params.command], {
         ...(params.timeout_seconds === undefined ? {} : { phuxTimeoutSeconds: params.timeout_seconds }),
         ...execution(params, signal),
       });
-      const header = `exit=${String(result.exit_code)} duration_ms=${String(result.duration_ms)} target=${target}`;
-      const output = bounded(`${header}${result.output.length === 0 ? "" : `\n${result.output}`}`);
+      const header = `run exit=${String(result.exit_code)} duration_ms=${String(result.duration_ms)} target=${target}`;
+      const output = boundedResult(header, result.output, result.truncated);
       return toolResult(output.text, {
         operation: "run",
         summary: `exit ${String(result.exit_code)} in ${String(result.duration_ms)} ms on ${target}`,
@@ -182,7 +185,7 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
         phuxOutputTruncated: result.truncated,
       });
     },
-    renderCall: (args, theme) => callText(theme, `run ${args.command[0] ?? "command"} on ${args.target ?? "selected target"}`),
+    renderCall: (args, theme) => callText(theme, `run ${args.command} on ${args.target ?? "selected target"}`),
     renderResult: renderSummary,
   });
 
@@ -193,12 +196,16 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
     promptSnippet: "Wait for a condition in a shared phux terminal",
     parameters: PhuxWaitParams,
     async execute(_id, params, signal) {
+      if (params.until !== undefined && params.idle_ms !== undefined) {
+        throw new Error("phux_wait accepts either until or idle_ms, not both");
+      }
       const target = resolveTarget(params.target, store);
+      const timeout = operationTimeout(params.timeout_seconds);
       const result = await cli.wait({
         target,
         ...(params.until === undefined ? {} : { until: params.until }),
         ...(params.idle_ms === undefined ? {} : { idleMs: params.idle_ms }),
-        ...(params.timeout_seconds === undefined ? {} : { phuxTimeoutSeconds: params.timeout_seconds }),
+        ...(timeout === undefined ? {} : { phuxTimeoutSeconds: timeout }),
         ...execution(params, signal),
       });
       return screenResult("wait", target, result.screen, result.outcome);
@@ -235,7 +242,7 @@ function screenResult(
 ): AgentToolResult<PhuxToolDetails> {
   const terminal = [...screen.scrollback, ...screen.lines].join("\n");
   const header = `${operation}${outcome === undefined ? "" : ` ${outcome}`} target=${target} pane=@${String(screen.pane)} size=${String(screen.cols)}x${String(screen.rows)}`;
-  const output = bounded(`${header}${terminal.length === 0 ? "" : `\n${terminal}`}`);
+  const output = boundedResult(header, terminal);
   return toolResult(output.text, {
     operation,
     summary: `${operation}${outcome === undefined ? "" : ` ${outcome}`} on ${target} (${String(screen.cols)}x${String(screen.rows)})`,
@@ -247,17 +254,53 @@ function screenResult(
   });
 }
 
-function bounded(text: string): { readonly text: string; readonly truncated: boolean } {
-  const result = truncateTail(text, { maxBytes: MAX_MODEL_BYTES, maxLines: MAX_MODEL_LINES });
-  return { text: result.content, truncated: result.truncated };
+function operationTimeout(value: number | undefined): number | undefined {
+  if (value === undefined) return undefined;
+  if (!Number.isSafeInteger(value) || value < 1) {
+    throw new RangeError("timeout_seconds must be a positive integer; omit it to wait indefinitely");
+  }
+  return value;
+}
+
+/** Bound only terminal body text so the result header and truncation notices remain visible. */
+export function boundedResult(
+  header: string,
+  body: string,
+  phuxTruncated = false,
+): { readonly text: string; readonly truncated: boolean } {
+  const reservedNotices = [MODEL_TRUNCATION_NOTICE, ...(phuxTruncated ? [PHUX_TRUNCATION_NOTICE] : [])];
+  const separators = 1 + reservedNotices.length;
+  const reservedBytes = Buffer.byteLength(header) +
+    reservedNotices.reduce((total, notice) => total + Buffer.byteLength(notice), 0) + separators;
+  const bodyResult = truncateTail(body, {
+    maxBytes: Math.max(0, MAX_MODEL_BYTES - reservedBytes),
+    maxLines: Math.max(0, MAX_MODEL_LINES - 1 - reservedNotices.length),
+  });
+  const notices = [
+    ...(bodyResult.truncated ? [MODEL_TRUNCATION_NOTICE] : []),
+    ...(phuxTruncated ? [PHUX_TRUNCATION_NOTICE] : []),
+  ];
+  return {
+    text: [header, ...(bodyResult.content.length === 0 ? [] : [bodyResult.content]), ...notices].join("\n"),
+    truncated: bodyResult.truncated,
+  };
 }
 
 function toolResult(text: string, details: PhuxToolDetails): AgentToolResult<PhuxToolDetails> {
   return { content: [{ type: "text", text }], details };
 }
 
+export function sanitizeRenderText(text: string): string {
+  return text
+    .replace(/\x1B\][^\x07]*(?:\x07|\x1B\\)/g, "")
+    .replace(/(?:\x1B\[|\x9B)[0-?]*[ -/]*[@-~]/g, "")
+    .replace(/\x1B[@-_]/g, "")
+    .replace(/[\x00-\x1F\x7F-\x9F]/g, " ");
+}
+
 function callText(theme: Theme, text: string): Text {
-  return new Text(theme.fg("toolTitle", theme.bold(`phux ${text}`)), 0, 0);
+  const safe = sanitizeRenderText(`phux ${text}`);
+  return new Text(theme.fg("toolTitle", theme.bold(safe)), 0, 0);
 }
 
 function renderSummary(
@@ -268,5 +311,6 @@ function renderSummary(
   const details = result.details;
   if (details === undefined) return new Text(theme.fg("error", "phux tool failed"), 0, 0);
   const suffix = details.modelOutputTruncated ? " (model output truncated)" : "";
-  return new Text(theme.fg(details.exitCode === undefined || details.exitCode === 0 ? "success" : "warning", `${details.summary}${suffix}`), 0, 0);
+  const safe = sanitizeRenderText(`${details.summary}${suffix}`);
+  return new Text(theme.fg(details.exitCode === undefined || details.exitCode === 0 ? "success" : "warning", safe), 0, 0);
 }

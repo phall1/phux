@@ -7,14 +7,18 @@ import { PhuxCli } from "../src/adapter.js";
 import type { ProcessResult, RunRequest } from "../src/runner.js";
 import { PhuxTargetStore } from "../src/target-store.js";
 import {
+  MAX_MODEL_BYTES,
+  MAX_MODEL_LINES,
   PhuxCreateParams,
   PhuxListParams,
   PhuxRunParams,
   PhuxSendKeysParams,
   PhuxSnapshotParams,
   PhuxWaitParams,
+  boundedResult,
   registerPhuxTools,
   resolveTarget,
+  sanitizeRenderText,
   type PhuxToolDetails,
 } from "../src/tools.js";
 
@@ -28,7 +32,12 @@ interface CapturedTool {
 
 interface ObjectSchema {
   readonly additionalProperties?: boolean;
-  readonly properties?: Record<string, { readonly minItems?: number }>;
+  readonly not?: { readonly required?: readonly string[] };
+  readonly properties?: Record<string, {
+    readonly type?: string;
+    readonly minItems?: number;
+    readonly minimum?: number;
+  }>;
 }
 
 const completed = (stdout: string, exitCode = 0): ProcessResult => ({
@@ -38,7 +47,11 @@ const completed = (stdout: string, exitCode = 0): ProcessResult => ({
   stderr: "",
 });
 
-function fixture(): {
+function fixture(options: {
+  readonly runOutput?: string;
+  readonly runTruncated?: boolean;
+  readonly snapshotScrollback?: readonly string[];
+} = {}): {
   readonly tools: Map<string, CapturedTool>;
   readonly requests: RunRequest[];
   readonly store: PhuxTargetStore;
@@ -58,11 +71,12 @@ function fixture(): {
           rows: 1,
           cursor: null,
           lines: ["ready"],
-          scrollback: [],
+          scrollback: options.snapshotScrollback ?? [],
         }));
         case "send-keys": return completed("");
         case "run": return completed(JSON.stringify({
-          command: "echo ok", exit_code: 0, output: "ok", duration_ms: 4, truncated: false,
+          command: "echo ok", exit_code: 0, output: options.runOutput ?? "ok", duration_ms: 4,
+          truncated: options.runTruncated ?? false,
         }));
         case "wait": return completed(JSON.stringify({
           schema_version: 3,
@@ -100,7 +114,7 @@ const theme = {
   bold: (value: string) => value,
 } as unknown as Theme;
 
-test("all tool schemas are strict and argv arrays are non-empty", () => {
+test("all tool schemas are strict with bounded integers and non-empty command inputs", () => {
   for (const schema of [
     PhuxListParams, PhuxCreateParams, PhuxSnapshotParams,
     PhuxSendKeysParams, PhuxRunParams, PhuxWaitParams,
@@ -109,7 +123,10 @@ test("all tool schemas are strict and argv arrays are non-empty", () => {
   }
   assert.equal((PhuxCreateParams as ObjectSchema).properties?.command?.minItems, 1);
   assert.equal((PhuxSendKeysParams as ObjectSchema).properties?.keys?.minItems, 1);
-  assert.equal((PhuxRunParams as ObjectSchema).properties?.command?.minItems, 1);
+  assert.equal((PhuxRunParams as ObjectSchema).properties?.command?.type, "string");
+  assert.equal((PhuxRunParams as ObjectSchema).properties?.timeout_seconds?.minimum, 0);
+  assert.equal((PhuxWaitParams as ObjectSchema).properties?.timeout_seconds?.minimum, 1);
+  assert.deepEqual((PhuxWaitParams as ObjectSchema).not?.required, ["until", "idle_ms"]);
 });
 
 test("create uses new --json, selects the @id, and records reconstruction details", async () => {
@@ -149,31 +166,102 @@ test("send, run, and wait map documented argv and propagate cancellation/timeout
     target: "@9", keys: ["C-c", "Enter"], local_timeout_ms: 500,
   }, controller.signal);
   await tool(tools, "phux_run").execute("5", {
-    target: "@9", command: ["echo", "ok"], timeout_seconds: 30,
+    target: "@9", command: "echo ok", timeout_seconds: 30,
   }, controller.signal);
   const waited = await tool(tools, "phux_wait").execute("6", {
-    target: "@9", until: "done", idle_ms: 100, timeout_seconds: 2,
+    target: "@9", until: "done", timeout_seconds: 2,
   }, controller.signal);
 
   assert.deepEqual(requests[0]?.args, ["send-keys", "--socket", "/tmp/phux.sock", "@9", "C-c", "Enter"]);
   assert.equal(requests[0]?.timeoutMs, 500);
   assert.equal(requests[0]?.signal, controller.signal);
   assert.deepEqual(requests[1]?.args, [
-    "run", "--json", "--timeout", "30", "--socket", "/tmp/phux.sock", "@9", "echo", "ok",
+    "run", "--json", "--timeout", "30", "--socket", "/tmp/phux.sock", "@9", "echo ok",
   ]);
   assert.deepEqual(requests[2]?.args, [
-    "wait", "--json", "--until", "done", "--idle", "100", "--timeout", "2",
+    "wait", "--json", "--until", "done", "--timeout", "2",
     "--socket", "/tmp/phux.sock", "@9",
   ]);
   assert.equal(waited.details?.outcome, "satisfied");
 });
 
+test("wait omission is indefinite while zero and competing conditions are rejected", async () => {
+  const indefinite = fixture();
+  await tool(indefinite.tools, "phux_wait").execute("7", { target: "@9", until: "done" });
+  assert.deepEqual(indefinite.requests[0]?.args, [
+    "wait", "--json", "--until", "done", "--socket", "/tmp/phux.sock", "@9",
+  ]);
+
+  const rejected = fixture();
+  await assert.rejects(
+    tool(rejected.tools, "phux_wait").execute("8", { target: "@9", timeout_seconds: 0 }),
+    /positive integer; omit it to wait indefinitely/,
+  );
+  await assert.rejects(
+    tool(rejected.tools, "phux_wait").execute("9", { target: "@9", until: "done", idle_ms: 10 }),
+    /either until or idle_ms, not both/,
+  );
+  assert.equal(rejected.requests.length, 0);
+});
+
+test("bounded terminal results preserve headers and expose line, byte, and phux truncation", () => {
+  const byLines = boundedResult("stable header", Array.from({ length: 500 }, (_, index) => `line-${String(index)}`).join("\n"), true);
+  assert.equal(byLines.text.split("\n")[0], "stable header");
+  assert.match(byLines.text, /Pi adapter truncated terminal output/);
+  assert.match(byLines.text, /phux reported that terminal output was already truncated/);
+  assert.equal(byLines.truncated, true);
+  assert.ok(byLines.text.split("\n").length <= MAX_MODEL_LINES);
+  assert.ok(Buffer.byteLength(byLines.text) <= MAX_MODEL_BYTES);
+
+  const byBytes = boundedResult("byte header", "x".repeat(MAX_MODEL_BYTES * 2));
+  assert.equal(byBytes.text.split("\n")[0], "byte header");
+  assert.match(byBytes.text, /Pi adapter truncated terminal output/);
+  assert.ok(Buffer.byteLength(byBytes.text) <= MAX_MODEL_BYTES);
+  assert.ok(byBytes.text.split("\n").length <= MAX_MODEL_LINES);
+
+  const complete = boundedResult("complete header", "complete body");
+  assert.equal(complete.text, "complete header\ncomplete body");
+  assert.doesNotMatch(complete.text, /truncated/);
+});
+
+test("run exposes both adapter and phux truncation notices to the model", async () => {
+  const { tools } = fixture({ runOutput: "x".repeat(MAX_MODEL_BYTES * 2), runTruncated: true });
+  const result = await tool(tools, "phux_run").execute("10", { target: "@9", command: "printf lots" });
+  const text = result.content[0]?.type === "text" ? result.content[0].text : "";
+
+  assert.match(text.split("\n")[0] ?? "", /^run exit=0 duration_ms=4 target=@9$/);
+  assert.match(text, /Pi adapter truncated terminal output/);
+  assert.match(text, /phux reported that terminal output was already truncated/);
+  assert.ok(Buffer.byteLength(text) <= MAX_MODEL_BYTES);
+  assert.ok(text.split("\n").length <= MAX_MODEL_LINES);
+});
+
 test("custom renderers show compact call and result summaries", async () => {
   const { tools } = fixture();
   const definition = tool(tools, "phux_create");
-  const result = await definition.execute("7", { name: "fresh" });
+  const result = await definition.execute("11", { name: "fresh" });
 
   assert.match(definition.renderCall?.({ name: "fresh" }, theme, {}).render(80).join("\n") ?? "", /phux create fresh/);
   assert.match(definition.renderResult?.(result, {}, theme, {}).render(80).join("\n") ?? "", /created fresh:window-0 @9/);
   assert.doesNotMatch(definition.renderResult?.(result, {}, theme, {}).render(80).join("\n") ?? "", /terminal output/);
+});
+
+test("renderers sanitize ANSI, C0, and C1 controls in dynamic fields", () => {
+  const { tools } = fixture();
+  const definition = tool(tools, "phux_run");
+  const malicious = "bad\x1b[31mRED\x1b[0m\nNEXT\x9b31mC1\x07";
+  const call = definition.renderCall?.(
+    { command: malicious, target: "@9\rspoof" }, theme, {},
+  ).render(200).join("\n") ?? "";
+  const result = definition.renderResult?.({
+    content: [{ type: "text", text: "not rendered" }],
+    details: { operation: "run", summary: malicious },
+  }, {}, theme, {}).render(200).join("\n") ?? "";
+
+  assert.equal(sanitizeRenderText(malicious), "badRED NEXTC1 ");
+  for (const rendered of [call, result]) {
+    assert.doesNotMatch(rendered, /\x1b|\x9b|\x07|\r/);
+    assert.doesNotMatch(rendered, /\[31m/);
+    assert.doesNotMatch(rendered, /\nNEXT/);
+  }
 });
