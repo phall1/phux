@@ -7,8 +7,9 @@ last-reviewed: 2026-07-10
 # The phux agent CLI
 
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
-`phux ls / snapshot / send-keys / run / wait / watch / ask`, plus `new` to
-create a session, `plugin` to manage configured plugin manifests, `config run`
+`phux ls / snapshot / send-keys / run / wait / watch / ask`, existing-pane
+spatial edits, plus `new` to create a session, `plugin` to manage configured
+plugin manifests, `config run`
 to invoke configured plugin actions, `workspace` to map git worktrees before
 spawning agent panes, and `satellite` to manage hub-side federation entries.
 This file is the agent contract. Per ADR-0030, the structured agent state —
@@ -195,6 +196,19 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   satellite-capable verb can address through the hub. Does not auto-start
   a server. Typed failures (unknown/unrouted satellite, unreachable link)
   exit nonzero with the diagnostic on stderr. Shape in §4.11.
+- **`phux insert-pane TARGET NEW_PANE [--horizontal|--vertical] [--ratio R]
+  [--json] [--socket P]`** — insert an already-created local pane beside an
+  existing layout leaf. This never spawns: create `NEW_PANE` separately first.
+  Both selectors must each match exactly one pane in the same session.
+  `--vertical` means a vertical divider (side-by-side panes); `--horizontal`
+  means a horizontal divider (stacked panes) and is the default. Shape in §4.12.
+- **`phux move-pane SOURCE TARGET [--horizontal|--vertical] [--ratio R]
+  [--json] [--socket P]`** — collapse `SOURCE` out of its old position and
+  insert it beside `TARGET` in the same session. Shape in §4.12.
+- **`phux swap-pane FIRST SECOND [--json] [--socket P]`** — exchange two leaf
+  positions without changing split geometry. Shape in §4.12. All three spatial
+  verbs reject multi-match, satellite, and cross-session selectors and do not
+  change an attached client's local focus.
 - **`phux plugin <list|link|unlink|enable|disable|validate> [--json]`** —
   manage declarative plugin manifest entries in the local config registry.
   This never contacts a running server and never executes plugin commands.
@@ -228,10 +242,10 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   `--json` emits the satellite registry document (§4.10); failure paths leave
   stdout empty and report diagnostics on stderr.
 
-`split` and `detach` are interactive TUI actions, not headless subcommands; that
-boundary is intentional. The shipped verbs are listed in
-[`tui.md`](./tui.md) §1; the agent-relevant subset is the catalog above plus
-`kill` and `attach`.
+`insert-pane` is intentionally not named `split`: it edits topology around a
+pane that already exists and performs no implicit spawn. Spawn-and-place remains
+a separate operation. `detach` is still an interactive TUI action. The shipped
+verbs are listed in [`tui.md`](./tui.md) §1.
 
 **How `new` decomposes on the wire.** Session create is no longer an L1
 session verb. Per
@@ -252,8 +266,8 @@ then the `PHUX_SOCKET` environment variable, then the daemon default:
 ## 3. Targeting: the selector grammar
 
 One grammar, every targeted command — `kill`, `snapshot`, `wait`, `send-keys`,
-`run`, and `ask` all share `TARGET`. It is resolved client-side against a server
-snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
+`run`, `ask`, `insert-pane`, `move-pane`, and `swap-pane` all share `TARGET`.
+It is resolved client-side against a server snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
 never parses a selector.
 
 The full grammar table and CLI examples live in [`tui.md`](./tui.md) §3. In one
@@ -265,7 +279,9 @@ A selector that names several panes (a whole session or window) narrows to a
 single pane: the focused pane when it is among the matches, else the first in
 snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
 Optionality differs per verb: `snapshot` and `wait` default `TARGET` to the
-focused session; `send-keys`, `run`, and `ask` require it.
+focused session; `send-keys`, `run`, `ask`, and every spatial verb require it.
+Spatial verbs are stricter than the selected-pane tiebreak: each selector must
+match exactly one local pane.
 
 ## 4. JSON contracts (the per-verb machine shapes)
 
@@ -669,6 +685,34 @@ for a local spawn (address it as `@7`). Failures — no route to the named
 satellite, unreachable satellite link, server-side spawn failure — exit
 nonzero with stdout empty and the typed diagnostic on stderr.
 
+### 4.12 Spatial layout edits
+
+Each successful `--json` spatial edit emits a `schema_version: 1` document.
+Common fields are `operation` and `session_id`; insert adds
+`target_terminal_id`, `new_terminal_id`, `direction`, and `ratio`; move adds
+`source_terminal_id`, `target_terminal_id`, `direction`, and `ratio`; swap adds
+`first_terminal_id` and `second_terminal_id`. `direction` retains the CLI's
+user-facing divider meaning (`vertical` = side-by-side, `horizontal` = stacked),
+not the layout tree's internal child-axis enum.
+
+```json
+{
+  "schema_version": 1,
+  "operation": "insert-pane",
+  "session_id": 3,
+  "target_terminal_id": 7,
+  "new_terminal_id": 9,
+  "direction": "vertical",
+  "ratio": 0.3
+}
+```
+
+With `--json`, failures emit a versioned JSON error on stderr and leave stdout
+empty: `{ "schema_version": 1, "error": { "code": "...", "message": "..." } }`.
+Stable codes include `invalid_selector`, `selector_miss`,
+`selector_not_single`, `satellite_target`, `cross_session`, `invalid_ratio`,
+`layout_missing`, `pane_not_in_layout`, and `pane_already_in_layout`.
+
 ## 5. The read-act-wait loop and exit-code mirroring
 
 ### 5.1 The loop
@@ -713,6 +757,7 @@ Exit codes are not uniform across verbs:
 | `plugin` | `0` ok; `1` invalid/missing manifest, invalid config, refused registry write, or unknown plugin id. |
 | `workspace` | `0` ok; `1` missing git repo, invalid git output, no server for save/restore, invalid archive, or JSON render failure. |
 | `satellite` | `0` ok; `1` invalid name/endpoint, duplicate configured name, invalid config, refused registry write, or unknown satellite name. |
+| `insert-pane` / `move-pane` / `swap-pane` | `0` ok; `1` transport failure; `2` selector, ratio, session, or layout refusal. |
 | `kill` | `0` ok; `1` selector miss / no server / parse; `2` server-side refusal. |
 
 **Why `run` uses 125, not 124.** `run` mirrors the child's own code into

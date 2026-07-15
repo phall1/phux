@@ -67,6 +67,9 @@ mod help_inventory;
         DRIVE\n  \
           new        Create a session\n  \
           kill       Kill a session, window, or pane\n  \
+          insert-pane Insert an already-created pane into a layout\n  \
+          move-pane  Move an existing pane within a session layout\n  \
+          swap-pane  Swap two existing pane leaves\n  \
           rename     Rename a session\n  \
           send-keys  Send keys to a pane\n  \
           run        Run a command in a pane and capture its exit code\n  \
@@ -292,6 +295,30 @@ fn main() -> ExitCode {
             &extra,
         ),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
+        Some(Command::InsertPane {
+            target,
+            new_pane,
+            horizontal: _,
+            vertical,
+            ratio,
+            json,
+            socket,
+        }) => commands::spatial::run_insert_pane(&target, &new_pane, vertical, ratio, json, socket),
+        Some(Command::MovePane {
+            source,
+            target,
+            horizontal: _,
+            vertical,
+            ratio,
+            json,
+            socket,
+        }) => commands::spatial::run_move_pane(&source, &target, vertical, ratio, json, socket),
+        Some(Command::SwapPane {
+            first,
+            second,
+            json,
+            socket,
+        }) => commands::spatial::run_swap_pane(&first, &second, json, socket),
         Some(Command::Take { target, socket }) => commands::supervise::run_take(&target, socket),
         Some(Command::Give { target, socket }) => commands::supervise::run_give(&target, socket),
         Some(Command::Signal {
@@ -494,6 +521,54 @@ mod tests {
         assert_eq!(
             socket.as_deref(),
             Some(std::path::Path::new("/tmp/phux.sock"))
+        );
+    }
+
+    #[test]
+    fn spatial_verbs_parse_existing_pane_arguments_and_geometry() {
+        let cli = Cli::try_parse_from([
+            "phux",
+            "insert-pane",
+            "@1",
+            "@2",
+            "--vertical",
+            "--ratio",
+            "0.3",
+            "--json",
+        ])
+        .expect("insert-pane must parse");
+        let Some(Command::InsertPane {
+            target,
+            new_pane,
+            vertical,
+            ratio,
+            json,
+            ..
+        }) = cli.command
+        else {
+            panic!("expected InsertPane");
+        };
+        assert_eq!(target, "@1");
+        assert_eq!(new_pane, "@2");
+        assert!(vertical);
+        assert!((ratio - 0.3).abs() < f32::EPSILON);
+        assert!(json);
+
+        assert!(
+            Cli::try_parse_from([
+                "phux",
+                "move-pane",
+                "@1",
+                "@2",
+                "--horizontal",
+                "--vertical",
+            ])
+            .is_err(),
+            "directions are mutually exclusive"
+        );
+        assert!(
+            Cli::try_parse_from(["phux", "swap-pane", "@1"]).is_err(),
+            "swap-pane requires exactly two selector arguments"
         );
     }
 }
