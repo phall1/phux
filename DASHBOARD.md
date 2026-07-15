@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T19:53:24Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T19:53:40Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 133 | 60% | 13m29s | 17m15s | 1655 |
+| ci | 134 | 60% | 13m29s | 17m15s | 1676 |
 | observatory | 5 | 80% | 11m56s | 12m25s | 118 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 20 | 100% | 41s | 54s | 28 |
@@ -19,33 +19,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 132 | 2s | 13m19s | 17m06s |
-| check | 130 | 2s | 2m37s | 4m29s |
-| detect docs-only | 133 | 2s | 5s | 7s |
+| test | 133 | 2s | 13m19s | 17m06s |
+| check | 131 | 2s | 2m39s | 4m29s |
+| detect docs-only | 134 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 15m44s | 17 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 19 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 20 |
-| test | Run Swatinem/rust-cache@v2 | 19s | 20 |
+| test | tests (unit + e2e) | 15m35s | 18 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 20 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 21 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 21 |
 | test | agents smoke | 12s | 1 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 20 |
-| check | docs-check | 9s | 18 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 20 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 21 |
+| check | docs-check | 9s | 19 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 21 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m02s | 69 |
-| ci / check | doc | 14s | 69 |
-| ci / check | deny | 4s | 69 |
-| ci / check | fmt | 1s | 72 |
-| ci / test | unit | 14m04s | 59 |
-| ci / test | e2e | 9s | 58 |
+| ci / check | clippy | 2m02s | 70 |
+| ci / check | doc | 14s | 70 |
+| ci / check | deny | 4s | 70 |
+| ci / check | fmt | 1s | 73 |
+| ci / test | unit | 14m04s | 60 |
+| ci / test | e2e | 9s | 59 |
 | ci / test | agents-smoke | 1s | 1 |
 | observatory / timings | build-dev | 10m47s | 4 |
 | observatory / timings | build-release | 5m00s | 5 |
@@ -55,8 +55,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 31% | 75 |
-| ci / test | 36% | 72 |
+| ci / check | 30% | 76 |
+| ci / test | 36% | 73 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 19:36 | ci | pull_request | feat/phux-detach | success | 16m33s | 20m26s |
 | 2026-07-15 19:36 | release-please | push | main | success | 54s | 49s |
 | 2026-07-15 19:36 | observatory | push | main | success | 12m38s | 24m20s |
+| 2026-07-15 19:36 | ci | push | main | success | 16m46s | 21m01s |
 | 2026-07-15 19:24 | conventional-commits | pull_request | fix/hook-env-socket | success | 14s | 11s |
 | 2026-07-15 19:24 | ci | pull_request | fix/hook-env-socket | success | 16m47s | 19m20s |
 | 2026-07-15 19:19 | conventional-commits | pull_request | feat/phux-pair-qr | success | 16s | 12s |
@@ -148,7 +149,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:53 | conventional-commits | pull_request | train/wave-2026-07-15 | success | 14s | 12s |
 | 2026-07-15 18:53 | conventional-commits | pull_request | train/wave-2026-07-15 | success | 13s | 10s |
 | 2026-07-15 18:53 | ci | pull_request | train/wave-2026-07-15 | success | 16m19s | 19m30s |
-| 2026-07-15 18:50 | conventional-commits | pull_request | train/wave-2026-07-15 | success | 24s | 20s |
 
 ---
 
