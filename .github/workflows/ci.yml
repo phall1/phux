@@ -52,6 +52,11 @@
 # non-PR event all resolve to "run everything." The jobs themselves still
 # run (and report green), so the gate never breaks a required status check;
 # only the expensive lanes are elided. `docs-check` always runs.
+#
+# Draft fast path: draft PRs skip ALL of ci (the `changes` gate carries a
+# job-level draft condition and check/test follow via `needs`). Marking the
+# PR "Ready for review" runs everything — that event is in the trigger
+# types. Rationale and safety analysis on the `changes` job comment.
 
 name: ci
 
@@ -59,6 +64,12 @@ on:
   push:
     branches: [main]
   pull_request:
+    # The default types plus ready_for_review: DRAFT PRs skip the compile
+    # lanes entirely (see the `changes` gate below), and marking a draft
+    # "Ready for review" is the trigger that runs them. Without
+    # ready_for_review in this list, undrafting would raise no event and
+    # the PR would sit with skipped checks until the next push.
+    types: [opened, synchronize, reopened, ready_for_review]
 
 # Cancel superseded runs on the same ref to keep queue times sane.
 concurrency:
@@ -72,8 +83,19 @@ jobs:
   # Cheap gate: decide whether this change is docs-only so the compile lanes
   # can skip their expensive steps. Fail-safe — defaults to docs_only=false
   # (run everything) on anything it can't positively prove is docs-only.
+  #
+  # DRAFT PRs skip this job — and, through `needs`, the whole check/test
+  # chain — so a draft never pays the nix + zig + workspace build. This is
+  # what makes release-please's draft release PRs (draft-pull-request: true
+  # in release-please-config.json) free while they idle between releasable
+  # commits: undraft the PR to run CI, merge to ship. GitHub counts skipped
+  # required checks as satisfied, so drafts don't wedge; the merge is still
+  # safe because (a) draft PRs cannot be merged at all, and (b) the
+  # ruleset's strict up-to-date rule forces a branch update — and therefore
+  # a real CI run — before any merge once the base has moved.
   changes:
     name: detect docs-only
+    if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
     runs-on: ubuntu-latest
     outputs:
       docs_only: ${{ steps.detect.outputs.docs_only }}
