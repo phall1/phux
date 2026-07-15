@@ -79,6 +79,8 @@ export interface PhuxProbe {
   readonly reason?: string;
 }
 
+export const MINIMUM_PHUX_VERSION = "0.1.0";
+
 const VERSION_PATTERN = /^phux\s+v?(\d+\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?)$/;
 
 export class PhuxCli {
@@ -118,7 +120,16 @@ export class PhuxCli {
           reason: `unexpected version output; expected "phux X.Y.Z", got ${JSON.stringify(rawVersion)}`,
         };
       }
-      return { available: true, version: match[1], rawVersion };
+      const version = match[1];
+      if (!isCompatiblePhuxVersion(version)) {
+        return {
+          available: false,
+          version,
+          rawVersion,
+          reason: `@phux/pi requires phux >= ${MINIMUM_PHUX_VERSION}; found ${version}`,
+        };
+      }
+      return { available: true, version, rawVersion };
     } catch (error) {
       if (error instanceof PhuxError &&
           (error.code === "aborted" || error.code === "timeout" || error.code === "output_limit")) {
@@ -419,6 +430,16 @@ function diagnosticSuffix(stderr: string): string {
 
 function failureMessage(result: ProcessResult): string {
   return `phux --version exited ${String(result.exitCode)}${diagnosticSuffix(result.stderr)}`;
+}
+
+function isCompatiblePhuxVersion(version: string): boolean {
+  const core = version.split(/[+-]/, 1)[0]?.split(".").map(Number);
+  if (core === undefined || core.length !== 3) return false;
+  const [major = 0, minor = 0, patch = 0] = core;
+  if (major !== 0) return major > 0;
+  if (minor !== 1) return minor > 1;
+  if (patch !== 0) return patch > 0;
+  return !version.includes("-");
 }
 
 function isMissingExecutable(error: unknown): boolean {

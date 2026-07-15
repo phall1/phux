@@ -71,5 +71,7 @@ JSON in the output-extraction snippets). `phux` itself needs neither.
   the JSON-driven CLI-wrapping playbook that points at these scripts.
 - [`../../docs/consumers/tui.md`](../../docs/consumers/tui.md) — the full
   CLI shape.
+- [`../../docs/consumers/pi.md`](../../docs/consumers/pi.md) — package setup
+  when Pi should drive the same CLI surface.
 - [`../../ADR/0022-tool-for-agents.md`](../../ADR/0022-tool-for-agents.md) —
   why the CLI is the agent surface.

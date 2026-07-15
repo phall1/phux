@@ -241,13 +241,23 @@ test("CLI parsers reject similar MCP response shapes", async () => {
   await assert.rejects(mcpRun.run("work", ["sleep", "10"]), expectCode("invalid_response"));
 });
 
-test("probe reports a validated version and missing executables without throwing", async () => {
+test("probe reports compatible versions and rejects versions below the package minimum", async () => {
   const present = new PhuxCli({ runner: fakeRunner(completed("phux 0.1.0\n")).runner });
   assert.deepEqual(await present.probe(), {
     available: true,
     version: "0.1.0",
     rawVersion: "phux 0.1.0",
   });
+
+  for (const version of ["0.0.99", "0.1.0-alpha.1"]) {
+    const old = new PhuxCli({ runner: fakeRunner(completed(`phux ${version}\n`)).runner });
+    assert.deepEqual(await old.probe(), {
+      available: false,
+      version,
+      rawVersion: `phux ${version}`,
+      reason: `@phux/pi requires phux >= 0.1.0; found ${version}`,
+    });
+  }
 
   const missing: ProcessRunner = async () => {
     const error = Object.assign(new Error("spawn phux ENOENT"), { code: "ENOENT" });

@@ -2,6 +2,7 @@
   "name": "@phux/pi",
   "version": "0.1.0",
   "description": "Pi integration for controlling shared phux terminals",
+  "private": true,
   "type": "module",
   "license": "MIT OR Apache-2.0",
   "repository": {
@@ -38,9 +39,13 @@
   "scripts": {
     "clean": "node -e \"require('node:fs').rmSync('dist',{recursive:true,force:true})\"",
     "build": "npm run clean && tsc -p tsconfig.build.json",
-    "test": "npm run build:test && node --test dist/test/*.test.js",
     "build:test": "npm run clean && tsc -p tsconfig.test.json",
+    "test": "npm run test:unit && npm run pack:check && npm run smoke:load",
+    "test:unit": "npm run build:test && node --test dist/test/*.test.js",
     "typecheck": "tsc -p tsconfig.json --noEmit",
+    "pack:check": "npm run build && node scripts/test-pack.mjs",
+    "smoke:load": "npm run build && node scripts/test-extension-load.mjs",
+    "smoke:real": "node scripts/smoke-real.mjs",
     "prepack": "npm run build"
   },
   "peerDependencies": {
