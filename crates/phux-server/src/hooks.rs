@@ -14,7 +14,10 @@
 //! Execution is **child-process argv only** (the no-in-process-host rule),
 //! via [`phux_plugin::run_command_spec`]: env injection, `kill_on_drop`,
 //! and a per-hook timeout. Event context rides environment variables —
-//! `PHUX_EVENT` plus one `PHUX_*` variable per context key.
+//! `PHUX_EVENT` plus one `PHUX_*` variable per context key, plus
+//! `PHUX_SOCKET` (the server's listening UDS path, phux-d4rf) so a hook
+//! script's bare `phux` invocation targets the firing server even when it
+//! listens off the default socket path.
 //!
 //! # Threading
 //!
@@ -319,13 +322,22 @@ pub(crate) fn fire_hook(state: &crate::state::SharedState, event: HookEvent) {
 /// semaphore, with [`HOOK_TIMEOUT`] and `kill_on_drop` (via
 /// [`phux_plugin::run_command_spec`]). The task exits when every
 /// [`HookDispatcher`] clone is dropped.
+///
+/// `server_socket` is the UDS path this server listens on, injected into
+/// every hook child as `PHUX_SOCKET` (phux-d4rf) — the hook analogue of
+/// [`crate::terminal_actor::apply_server_socket`] (phux-cufw). `None`
+/// (test-only wiring) leaves the environment untouched, preserving any
+/// `PHUX_SOCKET` the daemon itself inherited.
 #[must_use]
-pub fn spawn_hook_dispatcher(catalog: HookCatalog) -> HookDispatcher {
+pub fn spawn_hook_dispatcher(
+    catalog: HookCatalog,
+    server_socket: Option<PathBuf>,
+) -> HookDispatcher {
     let (tx, mut rx) = mpsc::channel::<HookEvent>(HOOK_EVENT_QUEUE);
     tokio::task::spawn_local(async move {
         let semaphore = Arc::new(Semaphore::new(MAX_CONCURRENT_HOOKS));
         while let Some(event) = rx.recv().await {
-            for run in matched_runs(&catalog, &event) {
+            for run in matched_runs(&catalog, &event, server_socket.as_deref()) {
                 let semaphore = Arc::clone(&semaphore);
                 tokio::task::spawn_local(async move {
                     // `acquire_owned` fails only if the semaphore is closed,
@@ -352,8 +364,12 @@ struct HookRun {
 /// Resolve every command `event` should fire: the first matching config
 /// entry (first-match-wins per §9) plus every plugin event hook whose `on`
 /// names the event.
-fn matched_runs(catalog: &HookCatalog, event: &HookEvent) -> Vec<HookRun> {
-    let env = event_env(event);
+fn matched_runs(
+    catalog: &HookCatalog,
+    event: &HookEvent,
+    server_socket: Option<&Path>,
+) -> Vec<HookRun> {
+    let env = event_env(event, server_socket);
     let mut runs = Vec::new();
 
     if let Some(entries) = catalog.config_hooks.get(&event.name) {
@@ -412,10 +428,17 @@ fn matched_runs(catalog: &HookCatalog, event: &HookEvent) -> Vec<HookRun> {
 
 /// The environment injected into every hook child: `PHUX_EVENT` plus one
 /// `PHUX_<KEY>` entry per context key (`-` → `_`, upper-cased).
-fn event_env(event: &HookEvent) -> Vec<(String, String)> {
+///
+/// When `server_socket` is known, `PHUX_SOCKET` is injected too (phux-d4rf),
+/// mirroring [`crate::terminal_actor::apply_server_socket`]'s `Option`
+/// handling: absent means the environment is left untouched.
+fn event_env(event: &HookEvent, server_socket: Option<&Path>) -> Vec<(String, String)> {
     let mut env = vec![("PHUX_EVENT".to_owned(), event.name.clone())];
     for (key, value) in &event.context {
         env.push((env_var_name(key), value.clone()));
+    }
+    if let Some(path) = server_socket {
+        env.push(("PHUX_SOCKET".to_owned(), path.display().to_string()));
     }
     env
 }
@@ -676,11 +699,11 @@ mod tests {
             "#,
         );
         let clean = HookEvent::new(PANE_EXIT, [("exit-code".to_owned(), "0".to_owned())]);
-        assert!(matched_runs(&catalog, &clean).is_empty());
+        assert!(matched_runs(&catalog, &clean, None).is_empty());
 
         // A non-zero exit skips entry 0 and lands on the catch-all.
         let dirty = HookEvent::new(PANE_EXIT, [("exit-code".to_owned(), "1".to_owned())]);
-        let runs = matched_runs(&catalog, &dirty);
+        let runs = matched_runs(&catalog, &dirty, None);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].label, "hooks.pane-exit[1]");
     }
@@ -700,12 +723,33 @@ mod tests {
                 ("terminal-id".to_owned(), "7".to_owned()),
             ],
         );
-        let runs = matched_runs(&catalog, &event);
+        let runs = matched_runs(&catalog, &event, None);
         assert_eq!(runs.len(), 1);
         let env = &runs[0].spec.env;
         assert!(env.contains(&("PHUX_EVENT".to_owned(), "pane-exit".to_owned())));
         assert!(env.contains(&("PHUX_EXIT_CODE".to_owned(), "0".to_owned())));
         assert!(env.contains(&("PHUX_TERMINAL_ID".to_owned(), "7".to_owned())));
+        // No server socket configured: the env carries no PHUX_SOCKET at
+        // all, preserving anything the daemon itself inherited (phux-d4rf).
+        assert!(env.iter().all(|(key, _)| key != "PHUX_SOCKET"));
+    }
+
+    #[test]
+    fn matched_runs_injects_server_socket_when_known() {
+        let catalog = catalog_from_toml(
+            r#"
+            [[hooks.pane-exit]]
+            action = { kind = "run", command = "true" }
+            "#,
+        );
+        let event = HookEvent::new(PANE_EXIT, []);
+        let socket = Path::new("/tmp/phux-test/alt.sock");
+        let runs = matched_runs(&catalog, &event, Some(socket));
+        assert_eq!(runs.len(), 1);
+        assert!(runs[0].spec.env.contains(&(
+            "PHUX_SOCKET".to_owned(),
+            "/tmp/phux-test/alt.sock".to_owned()
+        )));
     }
 
     #[test]
@@ -726,7 +770,7 @@ mod tests {
             ],
         };
         let event = HookEvent::new(AFTER_NEW_PANE, []);
-        let runs = matched_runs(&catalog, &event);
+        let runs = matched_runs(&catalog, &event, None);
         assert_eq!(runs.len(), 2, "both after-new-pane plugin hooks fire");
         assert!(runs.iter().all(|run| {
             run.spec
@@ -788,7 +832,7 @@ mod tests {
         // Dispatcher-level proof: a disabled plugin's event never fires
         // because it is simply not in the catalog.
         let event = HookEvent::new(AFTER_NEW_PANE, []);
-        let runs = matched_runs(&catalog, &event);
+        let runs = matched_runs(&catalog, &event, None);
         assert_eq!(runs.len(), 1);
         assert_eq!(runs[0].label, "plugin.plugin-on.greet");
     }
@@ -832,13 +876,15 @@ mod tests {
     }
 
     /// End-to-end through the real dispatcher task: a config `run` hook
-    /// executes as a child process with the event env injected.
+    /// executes as a child process with the event env injected, including
+    /// the server's socket path as `PHUX_SOCKET` (phux-d4rf).
     #[tokio::test(flavor = "current_thread")]
     async fn dispatcher_executes_config_hook_with_env_injection() {
         let dir = tempfile::tempdir().expect("tempdir");
         let marker = dir.path().join("marker");
+        let socket = dir.path().join("phux.sock");
         let command = format!(
-            "printf '%s %s' \"$PHUX_EVENT\" \"$PHUX_TERMINAL_ID\" > {}",
+            "printf '%s %s %s' \"$PHUX_EVENT\" \"$PHUX_TERMINAL_ID\" \"$PHUX_SOCKET\" > {}",
             marker.display()
         );
         // Built programmatically: the shell command mixes quote styles
@@ -859,7 +905,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let dispatcher = spawn_hook_dispatcher(catalog);
+                let dispatcher = spawn_hook_dispatcher(catalog, Some(socket.clone()));
                 dispatcher.fire(HookEvent::new(
                     AFTER_NEW_PANE,
                     [("terminal-id".to_owned(), "42".to_owned())],
@@ -868,7 +914,7 @@ mod tests {
             })
             .await;
         let contents = std::fs::read_to_string(&marker).expect("marker written");
-        assert_eq!(contents, "after-new-pane 42");
+        assert_eq!(contents, format!("after-new-pane 42 {}", socket.display()));
     }
 
     /// A plugin `[[events]]` hook runs with the plugin root as cwd and the
@@ -897,7 +943,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let dispatcher = spawn_hook_dispatcher(catalog);
+                let dispatcher = spawn_hook_dispatcher(catalog, None);
                 dispatcher.fire(HookEvent::new(
                     PANE_EXIT,
                     [("exit-code".to_owned(), "0".to_owned())],
@@ -922,7 +968,7 @@ mod tests {
         let local = tokio::task::LocalSet::new();
         local
             .run_until(async {
-                let dispatcher = spawn_hook_dispatcher(catalog);
+                let dispatcher = spawn_hook_dispatcher(catalog, None);
                 let started = Instant::now();
                 dispatcher.fire(HookEvent::new(PANE_EXIT, []));
                 assert!(
