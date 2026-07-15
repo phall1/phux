@@ -5,8 +5,10 @@ export interface SessionSummary {
 }
 
 export interface SessionList {
-  readonly schema_version: 1;
+  readonly schema_version: 1 | 2;
   readonly sessions: readonly SessionSummary[];
+  /** Canonical selectors for every addressable terminal (v2; empty for v1). */
+  readonly terminals: readonly string[];
 }
 
 export interface CursorState {
@@ -169,9 +171,10 @@ function strings(value: unknown, path: string): string[] {
 
 export function parseSessionList(value: unknown): SessionList {
   const root = record(value, "$ (phux ls --json CLI shape)");
-  if (root.schema_version !== 1) {
-    throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  if (root.schema_version !== 1 && root.schema_version !== 2) {
+    throw new SchemaValidationError("$.schema_version", "a supported value (1 or 2)");
   }
+  const schema = root.schema_version;
   if (!Array.isArray(root.sessions)) {
     throw new SchemaValidationError("$.sessions", "an array");
   }
@@ -185,7 +188,10 @@ export function parseSessionList(value: unknown): SessionList {
       attached: boolean(row.attached, `$.sessions[${index}].attached`),
     };
   });
-  return { schema_version: 1, sessions };
+  const terminals = schema === 1 && root.terminals === undefined
+    ? []
+    : strings(root.terminals, "$.terminals");
+  return { schema_version: schema, sessions, terminals };
 }
 
 function parseColor(value: unknown, path: string): CellColor {

@@ -510,7 +510,7 @@ pub(crate) enum Command {
     #[command(name = "send-keys", about = "Send keys to a pane")]
     SendKeys {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// Keys to send: named keys and/or literal strings, in order.
@@ -609,7 +609,7 @@ pub(crate) enum Command {
     #[command(about = "Report an agent ask event for a pane")]
     Ask {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// Stable question id for answer correlation.
@@ -664,7 +664,7 @@ pub(crate) enum Command {
     #[command(about = "Run a command in a pane and capture its exit code")]
     Run {
         /// Target selector: session, session:window, session:window.pane,
-        /// @id, `.` (focused), or `=` (last-focused).
+        /// @id, host/@id, `.` (focused), or `=` (last-focused).
         target: String,
 
         /// The command line: all trailing args, joined with spaces.
@@ -1217,6 +1217,13 @@ mod tests {
         assert_eq!(
             parse_selector(Some("@42")).unwrap(),
             Selector::TerminalId(42),
+        );
+        assert_eq!(
+            parse_selector(Some("devbox/@42")).unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 42,
+            },
         );
     }
 

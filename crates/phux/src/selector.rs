@@ -7,7 +7,8 @@
 //! binary already references throughout `main.rs`.
 
 pub(crate) use phux_client::selector::{
-    Selector, TagIndex, parse, pick_target_pane, resolve, resolve_with_tags, whole_session_name,
+    Selector, TagIndex, format_terminal_id, parse, pick_target_pane, resolve, resolve_with_tags,
+    whole_session_name,
 };
 
 // `WindowRef` is re-exported for the binary's tests (parse-grammar

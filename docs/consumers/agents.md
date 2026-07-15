@@ -273,20 +273,24 @@ Each struct carries its own `schema_version`, tracked independently.
 
 ### 4.1 `SessionListJson` — `phux ls --json`
 
-Defined in `crates/phux-core/src/session_list.rs` (`LS_SCHEMA_VERSION = 1`).
-Shape, name-sorted:
+Defined in `crates/phux-core/src/session_list.rs` (`LS_SCHEMA_VERSION = 2`).
+Version 2 adds the aggregate `terminals` inventory. Shape, name-sorted:
 
 ```json
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "sessions": [
     { "name": "work", "windows": 3, "attached": true }
-  ]
+  ],
+  "terminals": ["@3", "devbox/@7"]
 }
 ```
 
 `windows` is the window count; `attached` is a bool — whether any client is
-attached. **Cross-surface gotcha:** the MCP `phux_ls` tool ([`mcp.md`](./mcp.md)
+attached. `terminals` is the complete addressable inventory in snapshot order,
+using the canonical direct selector syntax. Satellite entries intentionally do
+not imply a hub-local session/window join. **Cross-surface gotcha:** the MCP
+`phux_ls` tool ([`mcp.md`](./mcp.md)
 §3.1) surfaces the raw wire fields `window_count` / `attached_client_count`;
 the CLI's `--json` projects them to `windows` / `attached`. The two surfaces do
 not share identical keys — do not carry a parser across them.

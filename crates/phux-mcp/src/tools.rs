@@ -49,7 +49,7 @@ impl From<AttachError> for ToolError {
 /// (`docs/consumers/tui.md` §3), resolved client-side against a `GET_STATE`
 /// snapshot exactly as the CLI resolves it (ADR-0021).
 const TARGET_DESC: &str = "Target selector: session, session:window, \
-    session:window.pane, @paneid, or `.`/`=` for the focused session. Omit \
+    session:window.pane, @paneid, host/@paneid, or `.`/`=` for the focused session. Omit \
     for the focused/last session.";
 
 /// The MCP tool catalog: name, description, and JSON-Schema input shape.
@@ -213,7 +213,12 @@ async fn phux_ls(args: &Value) -> Result<Value, ToolError> {
         })
         .collect();
     sessions.sort_by(|a, b| a["name"].as_str().cmp(&b["name"].as_str()));
-    Ok(json!({ "sessions": sessions }))
+    let terminals: Vec<String> = snapshot
+        .panes
+        .iter()
+        .map(|pane| selector::format_terminal_id(&pane.id))
+        .collect();
+    Ok(json!({ "sessions": sessions, "terminals": terminals }))
 }
 
 /// `phux_snapshot` — read a pane as structured data.
@@ -445,7 +450,10 @@ fn agent_event_json(ev: &phux_client::watch::WatchEvent) -> Value {
     if let Value::Object(map) = &mut obj {
         map.insert("event".to_owned(), Value::from(kind));
         if let Some(t) = &ev.terminal {
-            map.insert("terminal".to_owned(), Value::from(format!("{t:?}")));
+            map.insert(
+                "terminal".to_owned(),
+                Value::from(selector::format_terminal_id(t)),
+            );
         }
     }
     obj
@@ -611,12 +619,9 @@ fn resolve_one(selector: &Selector, snapshot: &SessionSnapshot) -> Result<Termin
         .ok_or_else(|| ToolError::new("no such target"))
 }
 
-/// A JSON rendering of a `TerminalId` for tool output.
+/// A JSON rendering of a `TerminalId` using the canonical direct selector.
 fn pane_value(id: &TerminalId) -> Value {
-    // TODO(phux-93b): TerminalId has no Serialize impl in phux-protocol
-    // (it avoids serde to keep a near-empty publish profile); render it via
-    // Debug for now. A stable numeric projection would be nicer.
-    json!(format!("{id:?}"))
+    json!(selector::format_terminal_id(id))
 }
 
 /// A per-call sentinel nonce for `phux_run`, matching `phux run`'s
@@ -855,6 +860,17 @@ mod tests {
         assert_eq!(tv["event"], json!("title_changed"));
         assert_eq!(tv["title"], json!("vim"));
 
+        let satellite = WatchEvent {
+            terminal: Some(TerminalId::satellite("devbox", 7)),
+            event: AgentEvent::Dirty,
+        };
+        assert_eq!(agent_event_json(&satellite)["terminal"], json!("devbox/@7"));
+        assert_eq!(pane_value(&TerminalId::local(3)), json!("@3"));
+        assert_eq!(
+            pane_value(&TerminalId::satellite("devbox", 7)),
+            json!("devbox/@7"),
+        );
+
         let asked = WatchEvent {
             terminal: None,
             event: AgentEvent::Asked {
@@ -916,6 +932,13 @@ mod tests {
             parse_target(&json!({ "target": "@100" })).unwrap(),
             Selector::TerminalId(100),
         );
+        assert_eq!(
+            parse_target(&json!({ "target": "devbox/@7" })).unwrap(),
+            Selector::SatelliteTerminalId {
+                host: "devbox".to_owned(),
+                id: 7,
+            },
+        );
         // Malformed → error (no server round trip).
         assert!(parse_target(&json!({ "target": "@nope" })).is_err());
     }
@@ -947,8 +970,12 @@ mod tests {
         assert_eq!(one("work:editor").unwrap(), TerminalId::local(101));
         // Exact pane.
         assert_eq!(one("work:1.1").unwrap(), TerminalId::local(102));
-        // Opaque terminal id.
+        // Opaque local and hub-qualified satellite Terminal ids.
         assert_eq!(one("@200").unwrap(), TerminalId::local(200));
+        assert_eq!(
+            one("devbox/@7").unwrap(),
+            TerminalId::satellite("devbox", 7),
+        );
         // `.`/`=` → the focused session's focused pane.
         assert_eq!(
             resolve_one(&Selector::Current, &snap).unwrap(),
@@ -985,6 +1012,14 @@ mod tests {
             TerminalInfo::new(TerminalId::local(101), w1, 80, 24),
             TerminalInfo::new(TerminalId::local(102), w1, 80, 24),
             TerminalInfo::new(TerminalId::local(200), p0, 80, 24),
+            // Aggregated federation inventory carries satellite panes without
+            // inventing hub-local session/window joins.
+            TerminalInfo::new(
+                TerminalId::satellite("devbox", 7),
+                WindowId::new(999),
+                80,
+                24,
+            ),
         ];
         SessionSnapshot::new(work, w0, TerminalId::local(100))
             .with_sessions(sessions)
