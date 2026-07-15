@@ -82,7 +82,9 @@ test("registers Pi-native commands and tolerates custom UI being unavailable", a
   assert.deepEqual(tools, [
     "phux_list", "phux_create", "phux_snapshot", "phux_send_keys", "phux_run", "phux_wait",
   ]);
-  assert.deepEqual(events, ["session_start", "session_tree"]);
+  assert.deepEqual(events, [
+    "session_start", "session_tree", "session_start", "agent_start", "agent_settled", "session_shutdown",
+  ]);
 
   let customCalls = 0;
   const ctx = {

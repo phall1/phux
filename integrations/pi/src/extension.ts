@@ -5,6 +5,7 @@ import type {
 
 import { PhuxCli } from "./adapter.js";
 import { PhuxTargetPicker } from "./components.js";
+import { registerPhuxLifecycle } from "./lifecycle.js";
 import type { AgentPane } from "./schemas.js";
 import { registerPhuxTools } from "./tools.js";
 import {
@@ -85,6 +86,14 @@ export function registerPhuxExtension(
         return;
       }
       ctx.ui.notify(formatAttachHandoff(store.snapshot), "info");
+    },
+  });
+
+  registerPhuxLifecycle(pi, store, {
+    cli,
+    onError: (error) => {
+      const message = error instanceof Error ? error.message : String(error);
+      console.warn(`[phux] lifecycle: ${message}`);
     },
   });
 
