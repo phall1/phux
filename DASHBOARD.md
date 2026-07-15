@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:15:32Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T09:16:36Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | stress | 4 | 50% | 1s | 21m11s | 43 |
 | release-please | 8 | 100% | 21s | 44s | 20 |
-| conventional-commits | 23 | 91% | 16s | 19s | 4 |
+| conventional-commits | 24 | 92% | 16s | 19s | 5 |
 
 ## ci jobs, last 30 days
 
@@ -115,6 +115,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 09:16 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 19s | 16s |
 | 2026-07-15 09:02 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 15s | 11s |
 | 2026-07-15 09:02 | ci | pull_request | fix/watch-dirty-idle-starvation | success | 13m15s | 17m16s |
 | 2026-07-15 08:59 | conventional-commits | pull_request | feat/pi-extension | success | 21s | 16s |
@@ -144,7 +145,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 04:08 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-15 04:08 | release-please | push | main | success | 37s | 32s |
 | 2026-07-15 04:08 | ci | push | main | success | 13m29s | 17m25s |
-| 2026-07-15 03:56 | ci | pull_request | feat/ci-observability | success | 14m03s | 17m54s |
 
 ---
 
