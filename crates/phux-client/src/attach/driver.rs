@@ -1158,7 +1158,7 @@ async fn attach_session<W: super::RenderSink>(
     // on unwinding; the signal-handler path inside `main_loop` runs
     // `write_terminal_reset` explicitly to cover SIGINT/SIGTERM/SIGHUP.
     //
-    // ADR-0035: read the `mouse` config (default on) to decide whether the
+    // ADR-0048: read the `mouse` config (default on) to decide whether the
     // guard also enables the client's own outer-terminal mouse tracking, so
     // divider drag-to-resize works by default. A load failure or an
     // explicit `mouse = false` falls back to pass-through-only — no DECSET,
@@ -1671,13 +1671,13 @@ async fn main_loop<W: super::RenderSink>(
     // route to the overlay (no pane forwarding) and pane stdout flushes
     // are suppressed (ADR-0020 §Decision invariant 5).
     let mut overlays = OverlayState::new();
-    // ADR-0035: the in-flight divider drag. `None` between drags; a press
+    // ADR-0048: the in-flight divider drag. `None` between drags; a press
     // on a divider records the grabbed split, motion re-tunes it, release
     // clears it. Lives across dispatch batches (press and release land in
     // different `select!` wakeups), so it is owned here and lent to
     // `DispatchCtx` by reference each batch.
     let mut drag: Option<super::input_dispatch::DragGrab> = None;
-    // phux-npb3 (ADR-0035 decision 3 follow-up): per-pane mouse opt-out.
+    // phux-npb3 (ADR-0048 decision 3 follow-up): per-pane mouse opt-out.
     // `set-pane mouse off` puts the focused pane in this set; the dispatcher
     // then never synthesizes INPUT_MOUSE for it, and the sync at the top of
     // each loop iteration drops the outer-terminal mouse-tracking DECSET
@@ -4213,7 +4213,7 @@ impl RawModeGuard {
     /// sequence to real stdout. Convenience wrapper around
     /// [`Self::install_with_stdout`] for the common path; tests use
     /// the writer-injecting variant. Enables mouse capture by default
-    /// (ADR-0035).
+    /// (ADR-0048).
     pub fn install() -> Result<Self, AttachError> {
         Self::install_with_stdout(&mut io::stdout(), true)
     }
@@ -4224,7 +4224,7 @@ impl RawModeGuard {
     /// guard for `phux-roz`.
     ///
     /// `mouse` gates the client's own outer-terminal mouse tracking
-    /// (ADR-0035): when `true` the entry sequence also emits DECSET
+    /// (ADR-0048): when `true` the entry sequence also emits DECSET
     /// `?1002h?1006h` so divider drags work without an inner program
     /// turning mouse mode on; when `false` the client emits no mouse DECSET
     /// and only sees mouse when an inner program enables tracking (the host's
@@ -4272,7 +4272,7 @@ impl RawModeGuard {
         // Enter the alt screen + hide the cursor up front so the first
         // frame paint doesn't briefly show on the normal screen. With
         // `mouse` on, also enable our own outer-terminal mouse tracking so
-        // divider drags work by default (ADR-0035).
+        // divider drags work by default (ADR-0048).
         write_enter_alt_screen(out, mouse).map_err(AttachError::Io)?;
 
         // Remember that we entered the alt screen so signal handlers
@@ -4334,7 +4334,7 @@ impl Drop for RawModeGuard {
 static ALT_SCREEN_ACTIVE: AtomicBool = AtomicBool::new(false);
 
 /// Whether the client enabled its OWN outer-terminal mouse tracking
-/// (DECSET `?1002h` button-motion + `?1006h` SGR) on attach (ADR-0035).
+/// (DECSET `?1002h` button-motion + `?1006h` SGR) on attach (ADR-0048).
 ///
 /// Set by [`write_enter_alt_screen`] when the `mouse` config is on, so the
 /// client receives pointer reports over a divider even when the inner
@@ -4393,7 +4393,7 @@ fn take_termios_snapshot() -> Option<Termios> {
 static PANIC_HOOK_INSTALLED: AtomicBool = AtomicBool::new(false);
 
 /// Write the alt-screen-enter + cursor-hide sequence, plus — when
-/// `mouse` is on — the client's own mouse-tracking DECSET (ADR-0035).
+/// `mouse` is on — the client's own mouse-tracking DECSET (ADR-0048).
 /// Factored out so the install path and any future re-entry path share
 /// one byte definition.
 ///
@@ -4419,7 +4419,7 @@ fn write_enter_alt_screen<W: Write>(out: &mut W, mouse: bool) -> io::Result<()> 
 /// [`write_enter_alt_screen`] sets and [`write_terminal_reset`] consumes —
 /// so a detach or signal reset while an opted-out pane holds focus never
 /// emits a redundant leave sequence. No-op when the state already
-/// matches; otherwise emits the ADR-0035 enter pair (`?1002h?1006h`) or
+/// matches; otherwise emits the ADR-0048 enter pair (`?1002h?1006h`) or
 /// its reverse-order leave (`?1006l?1002l`).
 /// Whether the client's outer-terminal mouse capture should currently be
 /// on (phux-npb3): the global `mouse` config gate must be on AND the
@@ -4454,7 +4454,7 @@ fn sync_mouse_capture<W: Write>(out: &mut W, want: bool) -> io::Result<()> {
 /// `ALT_SCREEN_ACTIVE == false` and skips the leave sequence.
 pub fn write_terminal_reset<W: Write>(out: &mut W) -> io::Result<()> {
     write_reset(out)?;
-    // ADR-0035: drop our own mouse tracking BEFORE leaving the alt screen,
+    // ADR-0048: drop our own mouse tracking BEFORE leaving the alt screen,
     // so the host terminal's native click-drag selection is restored on
     // detach. `?1006l` then `?1002l` undoes the entry pair in reverse.
     if MOUSE_CAPTURE_ACTIVE.swap(false, Ordering::SeqCst) {
@@ -5740,7 +5740,7 @@ mod tests {
     /// driving a real PTY; this `#[ignore]`-stub keeps the procedure
     /// next to the code and surfaces in `cargo test -- --ignored` if
     /// someone wires up an integration harness later.
-    /// ADR-0035: with mouse capture on, the alt-screen entry sequence also
+    /// ADR-0048: with mouse capture on, the alt-screen entry sequence also
     /// enables the client's own outer-terminal mouse tracking
     /// (`?1002h` button-motion + `?1006h` SGR), and the reset undoes it
     /// (`?1006l?1002l`) BEFORE leaving the alt screen so the host's native
@@ -5789,7 +5789,7 @@ mod tests {
         );
     }
 
-    /// ADR-0035: `mouse = false` skips the DECSET entirely — the entry
+    /// ADR-0048: `mouse = false` skips the DECSET entirely — the entry
     /// sequence emits no mouse tracking, host native selection untouched.
     #[test]
     fn mouse_capture_disabled_emits_no_decset() {

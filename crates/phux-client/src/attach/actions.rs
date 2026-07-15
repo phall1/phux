@@ -7,9 +7,9 @@
 //! * Local mutations: focus moves, ratio adjustments on resize, leaf
 //!   removal/insertion.
 //! * Wire side-effects: `SET_METADATA` to broadcast the new layout to other
-//!   attached clients (ADR-0019 decision 2 — focus is per-client and never
-//!   travels over the wire; everything else lives under
-//!   `phux.tui.layout/v1` in the default `Group` scope).
+//!   attached clients (ADR-0019 decision 2). The compatibility envelope still
+//!   contains focus fields, but ADR-0049 makes them non-authoritative: receivers
+//!   preserve client-local focus while adopting topology.
 //!
 //! The pure functions in this module take a `&LayoutState` and return a
 //! transformed `LayoutState` (or `Option<LayoutState>` / `Result`). They
@@ -383,11 +383,11 @@ fn violates_min_cell(
 }
 
 // -----------------------------------------------------------------------------
-// drag-to-resize (ADR-0035): node-targeted resize from an absolute pointer
+// drag-to-resize (ADR-0048): node-targeted resize from an absolute pointer
 // -----------------------------------------------------------------------------
 
 /// Set the split addressed by `node_path` so its divider sits under the
-/// pointer at absolute outer-viewport cell `pointer` (ADR-0035 drag).
+/// pointer at absolute outer-viewport cell `pointer` (ADR-0048 drag).
 ///
 /// Unlike [`apply_resize`] — which walks up from the focused leaf and
 /// nudges a split by a relative `amount` — this targets a specific split
@@ -819,7 +819,7 @@ mod tests {
         assert!(matches!(err, ActionError::NoResizableBoundary));
     }
 
-    // ---------- apply_divider_resize (ADR-0035 drag) ----------
+    // ---------- apply_divider_resize (ADR-0048 drag) ----------
 
     #[test]
     fn divider_resize_sets_ratio_from_absolute_pointer() {
