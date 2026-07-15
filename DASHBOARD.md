@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T04:26:40Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T04:27:04Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,29 +9,30 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 20 | 60% | 12m54s | 16m03s | 240 |
-| conventional-commits | 16 | 94% | 16s | 19s | 3 |
-| release-please | 5 | 100% | 20s | 21s | 2 |
+| ci | 33 | 67% | 13m29s | 16m29s | 451 |
+| stress | 3 | 67% | 21m11s | 21m11s | 43 |
+| conventional-commits | 17 | 94% | 16s | 19s | 3 |
+| release-please | 6 | 100% | 20s | 37s | 2 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 20 | 2s | 12m43s | 15m54s |
-| check | 20 | 2s | 2m35s | 4m02s |
-| detect docs-only | 20 | 2s | 5s | 7s |
+| test | 33 | 2s | 13m19s | 15m56s |
+| check | 33 | 2s | 2m36s | 4m09s |
+| detect docs-only | 33 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 12m41s | 13 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m42s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 22s | 16 |
-| test | Run Swatinem/rust-cache@v2 | 22s | 15 |
-| check | docs-check | 9s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 17 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 17 |
+| test | tests (unit + e2e) | 12m40s | 18 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m46s | 19 |
+| test | Run Swatinem/rust-cache@v2 | 23s | 21 |
+| check | Run Swatinem/rust-cache@v2 | 22s | 21 |
+| check | docs-check | 9s | 19 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 22 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 23 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
