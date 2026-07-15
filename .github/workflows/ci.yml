@@ -14,7 +14,10 @@
 #   * `test`  — unit tests + the `#[ignore]`d e2e/stress lane, sharing one
 #     target dir (one zig build for the test profile). Merging these two was
 #     pure waste before: `e2e` recompiled the exact test binaries `test`
-#     had already built, just to run the ignored ones.
+#     had already built, just to run the ignored ones. The hermetic
+#     examples/agents smoke (`just agents-fleet-smoke`) rides this job too:
+#     it stubs `phux` with a fake, so it adds zero compilation — never a
+#     third compiling job.
 # Within each job the cargo steps share a SINGLE `nix develop` invocation
 # (one flake eval) instead of paying the eval per check.
 # We deliberately do NOT split build-from-run across runners (e.g. `nextest
@@ -285,6 +288,19 @@ jobs:
           source scripts/ci/timed.sh
           timed unit env NEXTEST_PROFILE=ci cargo nextest run --workspace
           timed e2e  just e2e
+          EOF
+      # Hermetic argv/control-flow smoke for the agent-facing example scripts
+      # (phux-2inh): a fake `phux` binary, no server, no TTY, no compilation —
+      # seconds of wall. The script bounds its own watch streams, but a
+      # coreutils `timeout` caps the whole run so a wedged subprocess cannot
+      # hang the lane. The live variant (`just agents-fleet-live`) spawns a
+      # real server and stays out of CI by design.
+      - name: agents smoke
+        if: needs.changes.outputs.docs_only != 'true'
+        run: |
+          nix develop -c bash -euo pipefail <<'EOF'
+          source scripts/ci/timed.sh
+          timed agents-smoke timeout 120 just agents-fleet-smoke
           EOF
       - name: sccache stats
         if: always()
