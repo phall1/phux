@@ -16,13 +16,11 @@ use phux_client::agent_meta::{
 };
 use phux_client::attach::connection::Connection;
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, Scope, StateScope,
-};
+use phux_protocol::wire::frame::{FrameKind, Scope};
 use phux_protocol::wire::info::SessionSnapshot;
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{cli_runtime, command_on, report_no_server, resolve_targets};
+use crate::commands::{cli_runtime, report_no_server, resolve_targets};
 
 /// `phux agent set [TARGET] --name ... [--kind] [--state] [--attention]
 /// [--session]` — declare the target pane's agent identity by writing the
@@ -128,20 +126,8 @@ where
             Ok(conn) => conn,
             Err(err) => return report_no_server(&err, &socket_path, verb),
         };
-        let snapshot = match command_on(
-            &mut conn,
-            0,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )
-        .await
-        {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-            Ok(other) => {
-                eprintln!("phux: unexpected GET_STATE result: {other:?}");
-                return ExitCode::FAILURE;
-            }
+        let snapshot = match phux_client::state::get_state_on(&mut conn).await {
+            Ok(snapshot) => snapshot,
             Err(err) => return report_no_server(&err, &socket_path, verb),
         };
         let candidates = resolve_targets(&socket_path, &selector, &snapshot).await;

@@ -23,11 +23,9 @@ use std::path::Path;
 use phux_client::agent_meta::{AgentAttention, AgentMetaState, AgentRecord};
 use phux_config::plugin::{PluginAgentAttention, PluginAgentState, PluginManifestAgent};
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{Command as WireCommand, CommandResult, CommandValue, StateScope};
 use serde::Serialize;
 
 use crate::commands::agent::{fetch_agent_index, format_terminal};
-use crate::commands::request_command;
 
 /// Everything the projection can learn from a running server.
 #[derive(Debug, Default)]
@@ -45,14 +43,7 @@ pub(super) struct LiveAgentFeed {
 /// surfaces transport errors: a partially readable server degrades to
 /// whatever was collected.
 pub(super) async fn fetch_live_feed(socket_path: &Path) -> Option<LiveAgentFeed> {
-    let Ok(CommandResult::OkWith(CommandValue::State(snapshot))) = request_command(
-        socket_path,
-        WireCommand::GetState {
-            scope: StateScope::Server,
-        },
-    )
-    .await
-    else {
+    let Ok(snapshot) = phux_client::state::get_state(socket_path).await else {
         return None;
     };
     let records = fetch_agent_index(socket_path, &snapshot).await;
