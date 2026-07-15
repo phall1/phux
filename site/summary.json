@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T18:16:29Z",
+  "generated_at": "2026-07-15T18:18:23Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -118,6 +118,15 @@
       "created_at": "2026-07-15T18:04:34Z",
       "duration_s": 43,
       "runner_s": 37
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T18:04:33Z",
+      "duration_s": 811,
+      "runner_s": 1088
     },
     {
       "workflow": "ci",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T13:55:52Z",
       "duration_s": 13,
       "runner_s": 9
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/overlay-reachability-first-class",
-      "conclusion": "success",
-      "created_at": "2026-07-15T13:55:50Z",
-      "duration_s": 798,
-      "runner_s": 1032
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 105,
+      "runs": 106,
       "success_rate": 58,
       "median_s": 795,
       "p95_s": 1014,
-      "runner_minutes": 1249
+      "runner_minutes": 1267
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 104,
+      "runs": 105,
       "median_queue_s": 2,
-      "median_s": 783,
+      "median_s": 784,
       "p95_s": 1001
     },
     {
       "job": "check",
-      "runs": 103,
+      "runs": 104,
       "median_queue_s": 2,
       "median_s": 156,
-      "p95_s": 264
+      "p95_s": 266
     },
     {
       "job": "detect docs-only",
-      "runs": 105,
+      "runs": 106,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,58 +342,58 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 900,
-      "n": 11
+      "median_s": 844,
+      "n": 12
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 201,
-      "n": 13
+      "median_s": 206,
+      "n": 12
     },
     {
       "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 18,
-      "n": 13
-    },
-    {
-      "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 18,
       "n": 12
     },
     {
+      "job": "test",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 18,
+      "n": 13
+    },
+    {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 12
+      "n": 11
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 13
+      "n": 14
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 53,
-      "hit_rate": 32
+      "samples": 54,
+      "hit_rate": 31
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 51,
-      "hit_rate": 45
+      "samples": 52,
+      "hit_rate": 46
     },
     {
       "workflow": "stress",
@@ -408,42 +408,42 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 128,
-      "n": 48
+      "n": 49
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 48
+      "n": 49
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 48
+      "n": 49
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 50
+      "n": 51
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 724,
-      "n": 40
+      "n": 41
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 9,
-      "n": 39
+      "n": 40
     },
     {
       "workflow": "observatory",
@@ -468,57 +468,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "6fb3e60e4",
+    "sha": "c537b6dc5",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 94.062
+        "seconds": 86.235
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 23.768
+        "seconds": 23.667
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.014
+        "seconds": 6.019
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.813
+        "seconds": 3.819
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.812
+        "seconds": 3.815
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.513
+        "seconds": 3.518
       },
       {
         "binary": "phux-server::agent_events",
         "test": "unattached_subscriber_receives_events",
-        "seconds": 3.013
+        "seconds": 3.015
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.512
+        "seconds": 2.515
       },
       {
         "binary": "phux::bin/phux",
         "test": "commands::overlay::tests::wedged_tailscale_binary_is_killed_at_the_deadline",
-        "seconds": 2.014
+        "seconds": 2.020
       },
       {
         "binary": "phux-server::l2_adversarial",
         "test": "test_subscribe_events_no_loss",
-        "seconds": 2.014
+        "seconds": 2.016
       }
     ]
   },
