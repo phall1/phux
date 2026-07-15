@@ -10,6 +10,7 @@ use tokio::sync::oneshot;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, error, info, trace, warn};
 
+use super::input_lane::InputLaneHandle;
 use super::{
     AttachPrepared, spawn_agent_state_drain, spawn_pane_event_drain, spawn_terminal_exit_watcher,
 };
@@ -456,6 +457,7 @@ pub(crate) async fn handle_command(
     request_id: u32,
     command: Command,
     out_tx: &tokio::sync::mpsc::Sender<Outbound>,
+    input_lane: Option<&InputLaneHandle>,
 ) {
     // UPGRADE is handled out-of-band: `handle_upgrade` acks the client itself
     // and then re-execs the process, so it never returns a `CommandResult` for
@@ -494,9 +496,10 @@ pub(crate) async fn handle_command(
             request_scrollback,
             cells,
         } => handle_get_screen(state, &terminal_id, request_scrollback, cells).await,
-        Command::RouteInput { terminal_id, event } => {
-            handle_route_input(state, client_id, &terminal_id, event)
-        }
+        Command::RouteInput { terminal_id, event } => match input_lane {
+            Some(lane) => lane.route_command(client_id, terminal_id, event).await,
+            None => handle_route_input(state, client_id, &terminal_id, event),
+        },
         Command::KillTerminals { ids } => handle_kill_terminals(state, &ids),
         Command::KillTerminal { terminal_id } => handle_kill_terminal(state, &terminal_id),
         Command::GetTerminalState {
