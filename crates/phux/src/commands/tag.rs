@@ -60,7 +60,7 @@ pub(crate) fn run_tag(action: &TagAction, socket: Option<std::path::PathBuf>) ->
             TagAction::Ls { .. } => {
                 for id in &targets {
                     let tags = index.get(id).cloned().unwrap_or_default();
-                    println!("@{}\t{}", local_id(id), tags.join(" "));
+                    println!("{}", render_tags(id, &tags));
                 }
                 ExitCode::SUCCESS
             }
@@ -99,10 +99,9 @@ fn normalize(tags: &[String]) -> Vec<String> {
     out
 }
 
-/// The `u32` of a `TerminalId::Local`, for display. Satellite ids (federation,
-/// out of scope here) fall back to `0`.
-fn local_id(id: &TerminalId) -> u32 {
-    id.local_id().unwrap_or(0)
+/// One tag output line, prefixed by a canonical, reusable Terminal selector.
+fn render_tags(id: &TerminalId, tags: &[String]) -> String {
+    format!("{}\t{}", selector::format_terminal_id(id), tags.join(" "))
 }
 
 /// Read every `targets` Terminal's current tags from `index`, apply `mutate`,
@@ -165,7 +164,23 @@ async fn edit_tags<F: Fn(&mut Vec<String>)>(
                 Err(err) => return report_no_server(&err, socket_path, "tag"),
             }
         };
-        println!("@{}\t{}", local_id(id), confirmed.join(" "));
+        println!("{}", render_tags(id, &confirmed));
     }
     ExitCode::SUCCESS
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn satellite_tag_output_uses_canonical_selector() {
+        assert_eq!(
+            render_tags(
+                &TerminalId::satellite("region/@build", 7),
+                &["ci".to_owned(), "urgent".to_owned()],
+            ),
+            "region/@build/@7\tci urgent"
+        );
+    }
 }

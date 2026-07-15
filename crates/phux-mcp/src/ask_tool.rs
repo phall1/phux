@@ -23,14 +23,7 @@ pub(crate) async fn call(args: &Value) -> Result<Value, ToolError> {
     };
 
     phux_client::ask::report(&socket, pane.clone(), payload.clone()).await?;
-    Ok(json!({
-        "event": "asked",
-        "terminal": format!("@{}", pane.local_id().unwrap_or(0)),
-        "id": payload.id,
-        "question": payload.question,
-        "suggestions": payload.suggestions,
-        "elapsed_seconds": payload.elapsed_seconds,
-    }))
+    Ok(success_value(&pane, &payload))
 }
 
 pub(crate) fn schema() -> Value {
@@ -40,7 +33,7 @@ pub(crate) fn schema() -> Value {
         "inputSchema": {
             "type": "object",
             "properties": {
-                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, or `.`/`=` for the focused session." },
+                "target": { "type": "string", "description": "Target selector: session, session:window, session:window.pane, @paneid, host/@paneid, or `.`/`=` for the focused session." },
                 "id": { "type": "string", "description": "Stable question id for answer correlation." },
                 "question": { "type": "string", "description": "Human-facing question text." },
                 "suggestions": { "type": "array", "items": { "type": "string" }, "description": "Suggested answers in display order." },
@@ -49,6 +42,17 @@ pub(crate) fn schema() -> Value {
             },
             "required": ["target", "id", "question"]
         }
+    })
+}
+
+fn success_value(pane: &TerminalId, payload: &AskedPayload) -> Value {
+    json!({
+        "event": "asked",
+        "terminal": selector::format_terminal_id(pane),
+        "id": payload.id,
+        "question": payload.question,
+        "suggestions": payload.suggestions,
+        "elapsed_seconds": payload.elapsed_seconds,
     })
 }
 
@@ -107,6 +111,25 @@ mod tests {
             schema["inputSchema"]["properties"]["suggestions"]["items"]["type"],
             json!("string")
         );
+        assert!(
+            schema["inputSchema"]["properties"]["target"]["description"]
+                .as_str()
+                .is_some_and(|description| description.contains("host/@paneid"))
+        );
+    }
+
+    #[test]
+    fn satellite_success_output_uses_canonical_selector() {
+        let payload = AskedPayload {
+            id: "q1".to_owned(),
+            question: "Continue?".to_owned(),
+            suggestions: vec!["yes".to_owned()],
+            elapsed_seconds: Some(5),
+        };
+        let value = success_value(&TerminalId::satellite("region/@build", 7), &payload);
+        assert_eq!(value["terminal"], json!("region/@build/@7"));
+        assert_eq!(value["event"], json!("asked"));
+        assert_eq!(value["id"], json!("q1"));
     }
 
     #[test]

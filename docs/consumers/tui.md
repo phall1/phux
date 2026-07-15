@@ -244,8 +244,8 @@ CLI arguments, keybinding actions, and hook arguments.
 | `name:N`              | session `name`, window index `N`                 |
 | `name:N.M`            | session `name`, window `N`, pane index `M`       |
 | `name:tag`            | session `name`, window whose name is `tag`       |
-| `@N`                  | opaque ID (pane/window/session) — stable for the |
-|                       | server's lifetime                                |
+| `@N`                  | opaque local Terminal ID — stable for the server's lifetime |
+| `host/@N`             | opaque satellite Terminal ID routed by hub token `host` |
 | `=`                   | last (most recently focused)                     |
 | `#tag`                | every Terminal carrying L3 tag `tag`             |
 
@@ -260,10 +260,13 @@ phux kill #build                   # kill every Terminal tagged 'build'
 phux tag rm @7 ci                  # untag
 ```
 
-One grammar, every command. `kill`, `snapshot`, `wait`, `send-keys`, `run`, and
-`ask` all accept the same `TARGET` (phux-n95) and resolve it client-side
-against a `GET_STATE` snapshot (ADR-0021) — the server never parses a
-selector. A selector that names several panes (a whole session or window)
+One grammar, every command. `kill`, `snapshot`, `wait`, `watch`, `send-keys`,
+`run`, `ask`, and the supervisory verbs accept the same `TARGET` (phux-n95)
+and resolve it client-side against a `GET_STATE` snapshot (ADR-0021) — the
+server never parses a selector. `host/@N` resolves only against an aggregate
+pane inventory entry with that exact host and id; it does not synthesize a
+hub-local session/window join for the satellite. A selector that names several
+panes (a whole session or window)
 resolves to a single **selected pane**: the focused pane if it is among
 the matches, else the first in snapshot order. So `phux send-keys work …`
 targets the pane you are looking at in session `work`, while
@@ -277,7 +280,8 @@ ambiguity matters, prefer the most specific form. Example:
 
 ```sh
 phux kill work:edit.2         # second pane in window "edit" of session "work"
-phux send-keys @42 "ls" Enter # send to the pane with stable id 42
+phux send-keys @42 "ls" Enter # send to the local pane with stable id 42
+phux snapshot devbox/@7       # read satellite pane 7 through the hub
 phux run work:1.0 "cargo test"# run in window 1, pane 0 of session "work"
 phux kill =                   # kill last-focused (within whatever the command targets)
 ```

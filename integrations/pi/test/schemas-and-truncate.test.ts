@@ -5,10 +5,32 @@ import {
   parseLaunchResult,
   parseRenderedFrame,
   parseScreenState,
+  parseSessionList,
   parseWatchEvent,
   SchemaValidationError,
 } from "../src/schemas.js";
 import { truncateLines, truncateText } from "../src/truncate.js";
+
+test("session-list parser accepts v2 terminal inventory and normalizes v1", () => {
+  assert.deepEqual(parseSessionList({ schema_version: 1, sessions: [] }), {
+    schema_version: 1,
+    sessions: [],
+    terminals: [],
+  });
+  assert.deepEqual(parseSessionList({
+    schema_version: 2,
+    sessions: [{ name: "work", windows: 1, attached: false }],
+    terminals: ["@3", "devbox/@7"],
+  }), {
+    schema_version: 2,
+    sessions: [{ name: "work", windows: 1, attached: false }],
+    terminals: ["@3", "devbox/@7"],
+  });
+  assert.throws(
+    () => parseSessionList({ schema_version: 2, sessions: [] }),
+    SchemaValidationError,
+  );
+});
 
 test("screen parser validates dimensions and normalizes additive fields", () => {
   const screen = parseScreenState({

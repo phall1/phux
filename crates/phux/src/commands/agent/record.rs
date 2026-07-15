@@ -168,15 +168,15 @@ async fn get_record(
     }
 }
 
-/// `@N<TAB>record-json` (or `@N<TAB>-` for a cleared record) — one line,
-/// machine-splittable, mirroring `phux tag`'s confirmation output.
+/// `SELECTOR<TAB>record-json` (or `SELECTOR<TAB>-` for a cleared record) —
+/// one line, machine-splittable, mirroring `phux tag`'s confirmation output.
 fn render_record(pane: &TerminalId, record: Option<&AgentRecord>) -> String {
-    let id = pane.local_id().unwrap_or(0);
+    let selector = crate::selector::format_terminal_id(pane);
     record.map_or_else(
-        || format!("@{id}\t-"),
+        || format!("{selector}\t-"),
         |rec| {
             format!(
-                "@{id}\t{}",
+                "{selector}\t{}",
                 String::from_utf8(rec.encode()).unwrap_or_default()
             )
         },
@@ -238,4 +238,26 @@ pub(crate) async fn fetch_agent_index(
         }
     }
     index
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn satellite_set_and_clear_confirmations_use_canonical_selector() {
+        let pane = TerminalId::satellite("region/@build", 7);
+        assert_eq!(render_record(&pane, None), "region/@build/@7\t-");
+
+        let record = AgentRecord {
+            name: "codex".to_owned(),
+            kind: None,
+            state: AgentMetaState::Working,
+            attention: None,
+            session: None,
+        };
+        let rendered = render_record(&pane, Some(&record));
+        assert!(rendered.starts_with("region/@build/@7\t{"));
+        assert!(rendered.contains("\"name\":\"codex\""));
+    }
 }
