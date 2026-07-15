@@ -105,6 +105,8 @@ mod help_inventory;
         \x20                 HOST:PORT. Equivalent to `phux server --webtransport`.\n  \
         PHUX_SSH           OpenSSH-compatible program a federation hub spawns to\n  \
         \x20                 dial ssh:// satellites (default: `ssh` on PATH).\n  \
+        PHUX_TAILSCALE     Tailscale-compatible CLI `phux pair` runs to detect the\n  \
+        \x20                 overlay address (default: `tailscale` on PATH).\n  \
         PHUX_LOG           Write logs to this file (server tees; client writes here).\n  \
         PHUX_LOG_FORMAT    text (default) or json — log line format.\n  \
         RUST_LOG           tracing level filter, e.g. phux=debug.\n\n\

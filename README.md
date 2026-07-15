@@ -334,6 +334,7 @@ Anything not in the first two lists is a direction, not a feature.
 | Run your first session | [Quickstart](./docs/QUICKSTART.md) |
 | Install phux | [Install](./docs/INSTALL.md) |
 | Customize keys and config | [Configuration](./docs/CONFIG.md) |
+| Reach it from another network | [Remote access](./docs/remote-access.md) |
 | Decide if phux fits | [When to use phux](./docs/when-to-use.md) |
 | Understand the model | [Concepts](./docs/CONCEPTS.md) |
 | Drive it from an agent | [Agents](./docs/consumers/agents.md) |

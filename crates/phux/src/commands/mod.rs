@@ -45,6 +45,7 @@ pub(crate) mod kill;
 pub(crate) mod launch;
 pub(crate) mod ls;
 pub(crate) mod new;
+pub(crate) mod overlay;
 pub(crate) mod pair;
 pub(crate) mod plugin;
 pub(crate) mod rename;
@@ -88,13 +89,14 @@ pub(crate) enum Command {
         socket: Option<std::path::PathBuf>,
 
         /// Attach over QUIC to a remote `phux server --quic` listener at this
-        /// `HOST:PORT` instead of the local Unix socket. QUIC is always TLS
-        /// 1.3-encrypted. A loopback address
-        /// trusts the server's self-signed cert for local dev; any routable
-        /// address requires `--cert-fingerprint` (the value `phux pair`
-        /// prints on the server host).
+        /// `HOST:PORT` instead of the local Unix socket. HOST may be an IP
+        /// literal or a DNS name (e.g. a Tailscale `MagicDNS` name), resolved
+        /// before dialing. QUIC is always TLS 1.3-encrypted. A target
+        /// resolving to loopback trusts the server's self-signed cert for
+        /// local dev; any routable address requires `--cert-fingerprint`
+        /// (the value `phux pair` prints on the server host).
         #[arg(long, value_name = "HOST:PORT", conflicts_with = "socket")]
-        quic: Option<std::net::SocketAddr>,
+        quic: Option<String>,
 
         /// Attach over WebSocket to a `phux server --listen` endpoint. Use
         /// `ws://HOST:PORT` for loopback dev, or `wss://HOST:PORT` with
@@ -767,7 +769,9 @@ pub(crate) enum Command {
     /// server certificate's SHA-256 fingerprint. Pair both into the device:
     /// the token is the credential, and verifying the fingerprint on first
     /// connect defeats a man-in-the-middle. Revoke a device by deleting its
-    /// line from the token file.
+    /// line from the token file. When an overlay network address
+    /// (Tailscale/WireGuard) is detected, it is printed alongside the
+    /// credentials.
     ///
     /// This never contacts a running server — it only writes the token file.
     Pair {

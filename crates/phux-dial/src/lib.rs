@@ -49,4 +49,59 @@ pub enum DialError {
     /// pin), or a refused/oversized auth preamble.
     #[error("transport connect error: {0}")]
     Connect(String),
+
+    /// The remote host did not answer or its name could not be resolved:
+    /// connection refused, no route to host, network unreachable or down,
+    /// a handshake that timed out, or a name-resolution failure (on an
+    /// overlay, `MagicDNS` being down looks exactly like this).
+    /// Distinguished from [`Self::Connect`] so consumers can hint at
+    /// reachability (an overlay that is down) rather than at credentials —
+    /// certificate-pin and auth failures stay in [`Self::Connect`].
+    #[error("transport connect error: {0}")]
+    Unreachable(String),
+}
+
+/// Whether an I/O error means the remote host never answered — the
+/// reachability class that maps to [`DialError::Unreachable`] rather than
+/// [`DialError::Connect`].
+pub(crate) fn is_reachability_io(err: &std::io::Error) -> bool {
+    matches!(
+        err.kind(),
+        std::io::ErrorKind::ConnectionRefused
+            | std::io::ErrorKind::HostUnreachable
+            | std::io::ErrorKind::NetworkUnreachable
+            | std::io::ErrorKind::NetworkDown
+            | std::io::ErrorKind::TimedOut
+    )
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reachability_io_matches_unanswered_hosts_only() {
+        for kind in [
+            std::io::ErrorKind::ConnectionRefused,
+            std::io::ErrorKind::HostUnreachable,
+            std::io::ErrorKind::NetworkUnreachable,
+            std::io::ErrorKind::NetworkDown,
+            std::io::ErrorKind::TimedOut,
+        ] {
+            assert!(
+                is_reachability_io(&std::io::Error::from(kind)),
+                "{kind:?} is a reachability failure"
+            );
+        }
+        for kind in [
+            std::io::ErrorKind::PermissionDenied,
+            std::io::ErrorKind::NotFound,
+            std::io::ErrorKind::InvalidData,
+        ] {
+            assert!(
+                !is_reachability_io(&std::io::Error::from(kind)),
+                "{kind:?} is not a reachability failure"
+            );
+        }
+    }
 }
