@@ -117,6 +117,12 @@ If your change conflicts with these, open a [Discussion] before a PR.
   not the WIP messages underneath it — decides the version bump and the
   changelog entry. A `feat:` bumps the minor, a `fix:` the patch, and a
   non-conventional subject is silently omitted from both.
+- **Conventional commits are machine-enforced.** The `commitlint` check
+  (required by main's ruleset) lints every commit in a PR *and* the PR
+  title against [`commitlint.config.mjs`](./commitlint.config.mjs). A PR
+  cannot merge until both conform, closing the "silently omitted from the
+  release" hole above. Subjects may run to 120 chars; body lines are
+  unlimited.
 - **Never `--no-verify`.** Pre-commit hooks are load-bearing. If a
   hook fails, fix the root cause.
 
