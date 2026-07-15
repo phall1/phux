@@ -53,6 +53,7 @@ pub(crate) mod satellite;
 pub(crate) mod send_keys;
 pub(crate) mod server;
 pub(crate) mod snapshot;
+pub(crate) mod spatial;
 pub(crate) mod spawn;
 pub(crate) mod stdio_bridge;
 pub(crate) mod supervise;
@@ -352,6 +353,79 @@ pub(crate) enum Command {
         /// What to kill (selector).
         target: String,
 
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Insert an already-created pane into a session layout.
+    ///
+    /// Both selectors must each resolve to exactly one local pane in the same
+    /// session. This command does not spawn: create `NEW_PANE` first with
+    /// `phux spawn`, then insert it. Omitted direction defaults horizontal.
+    #[command(name = "insert-pane")]
+    InsertPane {
+        /// Existing layout leaf beside which `NEW_PANE` is inserted.
+        target: String,
+        /// Already-created pane to insert; no implicit spawn occurs.
+        new_pane: String,
+        /// Use a horizontal split (stacked panes; the default).
+        #[arg(long, conflicts_with = "vertical")]
+        horizontal: bool,
+        /// Use a vertical split (side-by-side panes).
+        #[arg(long, conflicts_with = "horizontal")]
+        vertical: bool,
+        /// Fraction assigned to TARGET; must be strictly between 0 and 1.
+        #[arg(long, default_value_t = 0.5)]
+        ratio: f32,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Move one existing pane beside another in the same session.
+    ///
+    /// SOURCE is collapsed out of its current tree position and inserted
+    /// beside TARGET. Both selectors must resolve to exactly one local pane.
+    #[command(name = "move-pane")]
+    MovePane {
+        /// Pane to relocate.
+        source: String,
+        /// Existing destination pane.
+        target: String,
+        /// Use a horizontal destination split (the default).
+        #[arg(long, conflicts_with = "vertical")]
+        horizontal: bool,
+        /// Use a vertical destination split.
+        #[arg(long, conflicts_with = "horizontal")]
+        vertical: bool,
+        /// Fraction assigned to TARGET; must be strictly between 0 and 1.
+        #[arg(long, default_value_t = 0.5)]
+        ratio: f32,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
+        /// Override the UDS path.
+        #[arg(long)]
+        socket: Option<std::path::PathBuf>,
+    },
+
+    /// Swap two existing pane leaves in the same session layout.
+    ///
+    /// Both selectors must each resolve to exactly one local pane. Split
+    /// geometry is preserved and attached clients retain their local focus.
+    #[command(name = "swap-pane")]
+    SwapPane {
+        /// First pane selector.
+        first: String,
+        /// Second pane selector.
+        second: String,
+        /// Emit a schema-versioned JSON result or error.
+        #[arg(long)]
+        json: bool,
         /// Override the UDS path.
         #[arg(long)]
         socket: Option<std::path::PathBuf>,

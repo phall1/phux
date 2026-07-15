@@ -131,6 +131,9 @@ phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
                               # server-free dry run of the resolved argv
 phux ls                       # list sessions (alias: list)
 phux kill TARGET              # kill session/window/pane by selector
+phux insert-pane TARGET NEW    # insert an already-created pane (no spawn)
+phux move-pane SOURCE TARGET   # relocate a pane beside another
+phux swap-pane FIRST SECOND    # exchange two pane leaves
 phux rename SESSION NEW-NAME  # rename a session
 phux snapshot [TARGET]        # dump pane grid (for piping/scripting)
 phux snapshot --rendered      # dump the client's composited multi-pane view
@@ -152,7 +155,8 @@ phux help [COMMAND]
 ```
 
 The agent-facing verbs — `ls`, `snapshot`, `send-keys`, `run`, `wait`,
-`watch`, `ask` (and `new`'s create-only `--json` mode) — have their JSON
+`watch`, `ask`, the spatial verbs above (and `new`'s create-only `--json`
+mode) — have their JSON
 contracts and exit-code semantics documented in [`agents.md`](./agents.md);
 this file does not restate them.
 
@@ -173,15 +177,26 @@ they decompose onto the substrate, with no change to what the user types:
 The command words, flags, and output are exactly as before; only the
 wire path beneath them changed.
 
-### 1.3 No CLI verbs for split/detach — they are interactive actions
+### 1.3 Headless spatial edits operate on existing panes
 
-Split-pane (`C-a |`) and detach (`C-a d`) **are implemented** as
-interactive TUI keybinding actions (§5.4). There are deliberately no
-headless `phux split` / `phux detach` CLI verbs: splitting a pane and
-detaching from a session are interactive view actions performed against
-a live attached TUI, not headless operations a script invokes. This is a
-settled design decision, not pending work — a headless `phux split`/`phux
-detach` would have no attached viewport to act on.
+`insert-pane`, `move-pane`, and `swap-pane` edit the session's persisted L3
+layout envelope; they do not attach and do not change another client's local
+focus. Every positional selector must resolve to exactly one local pane, and
+all panes named by one operation must belong to the same session. Satellite
+and cross-session topology edits are rejected.
+
+`insert-pane TARGET NEW_PANE [--horizontal|--vertical] [--ratio R]` is named
+for what it honestly does: `NEW_PANE` must already exist (for example from
+`phux spawn`) and must not already be in the layout. It does **not** implicitly
+spawn. The omitted direction is horizontal (a horizontal divider, so panes are
+stacked); `--vertical` means a vertical divider and side-by-side panes. `R`
+defaults to `0.5`; ratios must be finite and strictly between zero and one.
+`move-pane SOURCE TARGET` accepts the same user-facing direction and ratio
+flags. `swap-pane FIRST SECOND` preserves
+the existing split geometry. All three accept `--json` and `--socket`.
+
+Detach (`C-a d`) remains an interactive TUI-only action because it acts on the
+calling client's attachment.
 
 > **Status (design intent, not shipped):** `windows`, `panes`, and
 > `messages` are listed in earlier drafts as future read verbs; none

@@ -99,9 +99,11 @@ phux config reload
 phux config run
 phux config show
 phux give
+phux insert-pane
 phux kill
 phux launch
 phux ls
+phux move-pane
 phux new
 phux pair
 phux plugin
@@ -125,6 +127,7 @@ phux signal
 phux snapshot
 phux spawn
 phux stdio-bridge
+phux swap-pane
 phux tag
 phux tag add
 phux tag ls
