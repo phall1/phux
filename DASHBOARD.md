@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T17:38:43Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T17:46:40Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,40 +9,40 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 97 | 61% | 13m18s | 17m05s | 1198 |
+| ci | 98 | 60% | 13m17s | 17m05s | 1211 |
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 16 | 100% | 38s | 52s | 25 |
-| conventional-commits | 87 | 89% | 15s | 19s | 16 |
+| conventional-commits | 88 | 89% | 15s | 19s | 16 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 96 | 2s | 13m08s | 16m55s |
-| check | 95 | 2s | 2m37s | 4m26s |
-| detect docs-only | 97 | 2s | 5s | 7s |
+| test | 97 | 2s | 13m08s | 16m55s |
+| check | 96 | 2s | 2m37s | 4m26s |
+| detect docs-only | 98 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 15m00s | 15 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m09s | 17 |
-| test | Run Swatinem/rust-cache@v2 | 20s | 18 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m20s | 17 |
 | check | Run Swatinem/rust-cache@v2 | 19s | 17 |
-| check | docs-check | 9s | 17 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 18 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 18 |
+| check | docs-check | 9s | 16 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 19 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 18 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m02s | 45 |
-| ci / check | doc | 14s | 45 |
-| ci / check | deny | 3s | 45 |
-| ci / check | fmt | 1s | 47 |
+| ci / check | clippy | 2m02s | 46 |
+| ci / check | doc | 14s | 46 |
+| ci / check | deny | 3s | 46 |
+| ci / check | fmt | 1s | 48 |
 | ci / test | unit | 12m02s | 38 |
 | ci / test | e2e | 9s | 37 |
 | observatory / timings | build-dev | 10m47s | 3 |
@@ -53,8 +53,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 34% | 50 |
-| ci / test | 48% | 48 |
+| ci / check | 33% | 51 |
+| ci / test | 47% | 49 |
 | stress / stress | 0% | 1 |
 
 ## Cold build (observatory)
@@ -117,7 +117,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 17:46 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 18s | 13s |
 | 2026-07-15 17:38 | conventional-commits | pull_request | feat/dialout-connector-adr-spike | success | 16s | 12s |
+| 2026-07-15 17:38 | ci | pull_request | feat/dialout-connector-adr-spike | cancelled | 8m18s | 12m28s |
 | 2026-07-15 14:10 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 14:10 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 15s |
 | 2026-07-15 14:09 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 11:00 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 11:00 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
 | 2026-07-15 10:59 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
-| 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 
 ---
 
