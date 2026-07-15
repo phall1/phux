@@ -922,6 +922,7 @@ where
                 env,
                 term,
                 satellite,
+                owner_terminal,
             } => {
                 handle_spawn_terminal(
                     &state,
@@ -934,6 +935,7 @@ where
                         env,
                         term,
                         satellite,
+                        owner_terminal,
                     },
                     &out_tx,
                     &root_token,

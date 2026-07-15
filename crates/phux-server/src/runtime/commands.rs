@@ -165,14 +165,30 @@ pub fn spawn_pane_with_pty(
     history_limit: u32,
     root_token: &CancellationToken,
 ) -> Result<Option<phux_core::ids::TerminalId>, crate::terminal_actor::TerminalActorError> {
-    spawn_pane_with_pty_and_colors(state, session, cmd, history_limit, root_token, None)
+    spawn_pane_with_pty_and_colors(
+        state,
+        &SpawnOwnership::Session(session),
+        cmd,
+        history_limit,
+        root_token,
+        None,
+    )
+}
+
+/// Registry ownership address for a newly spawned pane.
+#[derive(Debug)]
+pub(crate) enum SpawnOwnership {
+    /// Legacy session ownership (first window in v0.x).
+    Session(phux_core::ids::SessionId),
+    /// Exact window ownership derived from an existing wire Terminal id.
+    Terminal(phux_protocol::ids::TerminalId),
 }
 
 /// Palette-seeded split variant. The spawning client's advertised defaults
 /// are installed before the child PTY is parsed.
-pub fn spawn_pane_with_pty_and_colors(
+pub(crate) fn spawn_pane_with_pty_and_colors(
     state: &SharedState,
-    session: phux_core::ids::SessionId,
+    ownership: &SpawnOwnership,
     mut cmd: portable_pty::CommandBuilder,
     history_limit: u32,
     root_token: &CancellationToken,
@@ -182,7 +198,10 @@ pub fn spawn_pane_with_pty_and_colors(
     // phux-p4vp: same spawn-time cwd capture as `seed_session_with_pty`.
     let spawn_cwd = spawn_cwd_of(&cmd);
     let Some(terminal): Option<TerminalId> = state.with_mut(|s| {
-        let terminal = s.add_pane_to_session(session)?;
+        let terminal = match ownership {
+            SpawnOwnership::Session(session) => s.add_pane_to_session(*session)?,
+            SpawnOwnership::Terminal(owner) => s.add_pane_to_terminal_owner(owner)?,
+        };
         stamp_spawn_cwd(s, terminal, spawn_cwd);
         // phux-w7mj: inject the pane's own local wire id as PHUX_TERMINAL_ID
         // (see `seed_session_with_pty_and_colors`). Idempotent interning —
@@ -224,7 +243,11 @@ pub fn spawn_pane_with_pty_and_colors(
     spawn_agent_state_drain(state.clone(), wire_terminal_id.clone(), agent_rx);
     spawn_terminal_exit_watcher(state.clone(), terminal, exit_notify, root_token.clone());
     // docs/consumers/tui.md §9 (phux-r82.1): the split pane's actor is live.
-    let session_name = state.with(|s| s.registry.session(session).map(|sess| sess.name.clone()));
+    let session_name = state.with(|s| {
+        let window = s.registry.terminal(terminal)?.window;
+        let session = s.registry.window(window)?.session;
+        s.registry.session(session).map(|sess| sess.name.clone())
+    });
     crate::hooks::fire_hook(
         state,
         crate::hooks::HookEvent::after_new_pane(&wire_terminal_id, session_name.as_deref()),

@@ -258,20 +258,39 @@ fn main() -> ExitCode {
         }) => commands::new::run_new(name, session, cwd, socket, json, command),
         Some(Command::Spawn {
             satellite,
+            target,
+            split,
+            ratio,
             cwd,
             json,
             socket,
             command,
-        }) => commands::spawn::run_spawn(satellite, cwd, json, socket, command),
+        }) => {
+            commands::spawn::run_spawn(satellite, target, split, ratio, cwd, json, socket, command)
+        }
         Some(Command::Launch {
             integration,
             list,
             print,
             json,
+            target,
+            split,
+            ratio,
             cwd,
             socket,
             extra,
-        }) => commands::launch::run_launch(integration, list, print, json, cwd, socket, &extra),
+        }) => commands::launch::run_launch(
+            integration,
+            list,
+            print,
+            json,
+            target,
+            split,
+            ratio,
+            cwd,
+            socket,
+            &extra,
+        ),
         Some(Command::Kill { target, socket }) => commands::kill::run_kill(&target, socket),
         Some(Command::Take { target, socket }) => commands::supervise::run_take(&target, socket),
         Some(Command::Give { target, socket }) => commands::supervise::run_give(&target, socket),
@@ -425,6 +444,31 @@ mod tests {
 
     /// phux-foz.5: `phux config reload` parses, with and without an
     /// explicit `--socket`.
+    #[test]
+    fn spawn_and_launch_placement_flags_validate() {
+        let cli = Cli::try_parse_from([
+            "phux", "spawn", "--target", ".", "--split", "vertical", "--ratio", "0.3",
+        ])
+        .expect("explicit spawn placement parses");
+        let Some(Command::Spawn { target, ratio, .. }) = cli.command else {
+            panic!("expected Spawn");
+        };
+        assert_eq!(target.as_deref(), Some("."));
+        assert!((ratio - 0.3).abs() < f32::EPSILON);
+
+        assert!(Cli::try_parse_from(["phux", "spawn", "--ratio", "0.3"]).is_err());
+        assert!(Cli::try_parse_from(["phux", "spawn", "--target", ".", "--ratio", "1.0"]).is_err());
+        assert!(
+            Cli::try_parse_from(["phux", "spawn", "--target", ".", "--satellite", "edge"]).is_err()
+        );
+        assert!(
+            Cli::try_parse_from([
+                "phux", "launch", "codex", "--target", ".", "--split", "vertical"
+            ])
+            .is_ok()
+        );
+    }
+
     #[test]
     fn config_reload_parses_with_optional_socket() {
         use crate::commands::config_action::ConfigAction;

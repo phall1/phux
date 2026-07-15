@@ -8,7 +8,8 @@ use phux_protocol::ids::GroupId;
 use phux_protocol::wire::frame::{FrameKind, SpawnResult};
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::spawn::{dispatch_spawn, report_spawn_error};
+use crate::commands::SpawnSplit;
+use crate::commands::spawn::{dispatch_spawn, dispatch_spawn_placed, report_spawn_error};
 
 /// `phux launch` (phux-ark7, ADR-0042) — resolve a named agent integration
 /// template from an enabled plugin and spawn a pane running its `[launch]`
@@ -23,11 +24,15 @@ use crate::commands::spawn::{dispatch_spawn, report_spawn_error};
 ///
 /// `--print` resolves and prints the argv without spawning (a server-free
 /// dry run); `--list` enumerates launchable integrations.
+#[allow(clippy::too_many_arguments)]
 pub(crate) fn run_launch(
     integration: Option<String>,
     list: bool,
     print: bool,
     json: bool,
+    target: Option<String>,
+    split: SpawnSplit,
+    ratio: f32,
     cwd: Option<PathBuf>,
     socket: Option<PathBuf>,
     extra: &[String],
@@ -58,10 +63,17 @@ pub(crate) fn run_launch(
     if print {
         return print_resolved(&resolved, json);
     }
-    spawn_resolved(&resolved, socket, json)
+    spawn_resolved(&resolved, socket, json, target, split, ratio)
 }
 
-fn spawn_resolved(resolved: &ResolvedLaunch, socket: Option<PathBuf>, json: bool) -> ExitCode {
+fn spawn_resolved(
+    resolved: &ResolvedLaunch,
+    socket: Option<PathBuf>,
+    json: bool,
+    target: Option<String>,
+    split: SpawnSplit,
+    ratio: f32,
+) -> ExitCode {
     let socket_path = socket.unwrap_or_else(default_socket_path);
     let request_id = 1u32;
     let frame = FrameKind::SpawnTerminal {
@@ -73,8 +85,21 @@ fn spawn_resolved(resolved: &ResolvedLaunch, socket: Option<PathBuf>, json: bool
         env: None,
         term: None,
         satellite: None,
+        owner_terminal: None,
     };
-    match dispatch_spawn(&socket_path, &frame, request_id, "launch") {
+    let result = match target {
+        Some(target) => dispatch_spawn_placed(
+            &socket_path,
+            frame,
+            request_id,
+            "launch",
+            &target,
+            split,
+            ratio,
+        ),
+        None => dispatch_spawn(&socket_path, &frame, request_id, "launch"),
+    };
+    match result {
         Ok(SpawnResult::Ok(terminal_id)) => print_launched(resolved, &terminal_id, json),
         Ok(SpawnResult::Err(err)) => {
             report_spawn_error(&err);

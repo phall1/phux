@@ -1988,6 +1988,12 @@ pub enum FrameKind {
         /// field id 7 (absent = `None`), so the field is wire-additive:
         /// a pre-phux-v45.6 body decodes as `None`.
         satellite: Option<SatelliteHost>,
+        /// Existing Terminal whose owning window must host the new Terminal.
+        /// This is an ownership address, not focus or geometry: clients still
+        /// write layout metadata to place the returned leaf. `None` preserves
+        /// the legacy attached-client / most-recent-session policy. Encoded as
+        /// additive optional field id 8.
+        owner_terminal: Option<TerminalId>,
     },
 
     /// `TERMINAL_SPAWNED` — server reply to a prior `SpawnTerminal`
@@ -2440,6 +2446,7 @@ impl FrameKind {
                 env,
                 term,
                 satellite,
+                owner_terminal,
             } => {
                 enc.write_field_with(field::spawn_terminal::REQUEST_ID, |e| {
                     e.write_u32_be(*request_id);
@@ -2466,6 +2473,11 @@ impl FrameKind {
                 }
                 if let Some(host) = satellite.as_ref() {
                     enc.write_field(field::spawn_terminal::SATELLITE, host.as_str().as_bytes());
+                }
+                if let Some(owner) = owner_terminal.as_ref() {
+                    enc.write_field_with(field::spawn_terminal::OWNER_TERMINAL, |e| {
+                        encode_terminal_id(owner, e);
+                    });
                 }
             }
             Self::TerminalSpawned { request_id, result } => {

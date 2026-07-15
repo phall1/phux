@@ -1683,6 +1683,7 @@ fn run_action(
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             };
             effects.spawn_terminal = Some((
                 request_id,
@@ -1838,6 +1839,7 @@ fn run_action(
                 env: None,
                 term: None,
                 satellite: None,
+                owner_terminal: None,
             };
             effects.spawn_window = Some((request_id, PendingWindow { name }, frame));
         }

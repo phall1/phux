@@ -24,6 +24,25 @@ pub(crate) enum SignalArg {
     Kill,
 }
 
+/// Split axis for explicit `spawn` / `launch` placement.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub(crate) enum SpawnSplit {
+    Horizontal,
+    Vertical,
+}
+
+/// Validates a split ratio as finite and strictly between zero and one.
+fn parse_spawn_ratio(value: &str) -> Result<f32, String> {
+    let ratio: f32 = value
+        .parse()
+        .map_err(|_| "ratio must be a number".to_owned())?;
+    if ratio.is_finite() && ratio > 0.0 && ratio < 1.0 {
+        Ok(ratio)
+    } else {
+        Err("ratio must be finite and strictly between 0 and 1".to_owned())
+    }
+}
+
 impl From<SignalArg> for TerminalSignal {
     fn from(arg: SignalArg) -> Self {
         match arg {
@@ -266,7 +285,8 @@ pub(crate) enum Command {
 
     /// Spawn a Terminal without attaching (`SPAWN_TERMINAL`).
     ///
-    /// The pane joins the server's most recently active session; the new
+    /// With `--target`, the pane is inserted beside an exact local owner;
+    /// otherwise it joins the server's most recently active session. The new
     /// Terminal's id prints to stdout. With `--satellite NAME` on a
     /// federation hub (`phux server --hub`), the spawn is routed over
     /// the hub's link to that satellite and the returned id is
@@ -277,6 +297,18 @@ pub(crate) enum Command {
         /// from `phux satellite list`, on a server running `--hub`).
         #[arg(long, value_name = "NAME")]
         satellite: Option<String>,
+
+        /// Existing local pane beside which to place the new pane.
+        #[arg(long, value_name = "TARGET", conflicts_with = "satellite")]
+        target: Option<String>,
+
+        /// Split axis for explicit placement (requires `--target`).
+        #[arg(long, value_enum, default_value = "horizontal", requires = "target")]
+        split: SpawnSplit,
+
+        /// Fraction of the split retained by TARGET (requires `--target`).
+        #[arg(long, default_value_t = 0.5, requires = "target", value_parser = parse_spawn_ratio)]
+        ratio: f32,
 
         /// Working directory for the new pane.
         #[arg(short = 'c', long = "cwd")]
@@ -327,6 +359,18 @@ pub(crate) enum Command {
         /// Emit the result as JSON instead of the human view.
         #[arg(long)]
         json: bool,
+
+        /// Existing local pane beside which to place the launched pane.
+        #[arg(long, value_name = "TARGET", conflicts_with_all = ["list", "print"])]
+        target: Option<String>,
+
+        /// Split axis for explicit placement (requires `--target`).
+        #[arg(long, value_enum, default_value = "horizontal", requires = "target")]
+        split: SpawnSplit,
+
+        /// Fraction of the split retained by TARGET (requires `--target`).
+        #[arg(long, default_value_t = 0.5, requires = "target", value_parser = parse_spawn_ratio)]
+        ratio: f32,
 
         /// Working directory for a `working_directory = "workspace"`
         /// template. Defaults to the current directory.

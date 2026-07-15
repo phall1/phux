@@ -121,6 +121,10 @@ pub(super) struct FrameOutcome {
     /// envelope (`MetadataValue` reply or `MetadataChanged` broadcast).
     /// The driver triggers a full repaint of the multi-pane composition.
     pub(super) layout_replaced: bool,
+    /// Layout leaves newly discovered from peer metadata. The driver attaches
+    /// each Terminal so its authoritative snapshot/output stream can populate
+    /// a pane slot; this does not alter client-local focus.
+    pub(super) attach_panes: Vec<TerminalId>,
     /// phux-4li.12: `true` ⇒ the server-side frame mutated layout in
     /// a way the *local* client originated (split landed, kill folded);
     /// the driver should broadcast the new envelope via
@@ -921,13 +925,24 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             };
             match Workspace::decode_cbor(&bytes) {
                 Ok(new_ws) => {
-                    *workspace =
-                        reconcile_loaded_workspace(new_ws, workspace, focused_pane.as_ref(), panes);
+                    let (reconciled, accepted) = reconcile_loaded_workspace_checked(
+                        new_ws,
+                        workspace,
+                        focused_pane.as_ref(),
+                        panes,
+                    );
+                    *workspace = reconciled;
+                    let attach_panes = if accepted {
+                        unknown_layout_leaves(workspace, panes)
+                    } else {
+                        Vec::new()
+                    };
                     // Re-anchor the driver's focused-pane mirror onto the
                     // active window's client-local reconciled focus.
                     *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                     Ok(FrameOutcome {
                         layout_replaced: true,
+                        attach_panes,
                         ..FrameOutcome::default()
                     })
                 }
@@ -975,15 +990,22 @@ pub(super) fn handle_server_frame<W: super::RenderSink>(
             if let Some(bytes) = value {
                 match Workspace::decode_cbor(&bytes) {
                     Ok(new_ws) => {
-                        *workspace = reconcile_loaded_workspace(
+                        let (reconciled, accepted) = reconcile_loaded_workspace_checked(
                             new_ws,
                             workspace,
                             focused_pane.as_ref(),
                             panes,
                         );
+                        *workspace = reconciled;
+                        let attach_panes = if accepted {
+                            unknown_layout_leaves(workspace, panes)
+                        } else {
+                            Vec::new()
+                        };
                         *focused_pane = workspace.active_window().and_then(|ls| ls.focus.clone());
                         Ok(FrameOutcome {
                             layout_replaced: true,
+                            attach_panes,
                             ..FrameOutcome::default()
                         })
                     }
@@ -1413,12 +1435,37 @@ fn is_layout_key(scope: &Scope, key: &str) -> bool {
 /// workspace or pane-slot set. Checking all known panes, rather than only the
 /// currently focused pane, lets a sibling legitimately remove that focused leaf
 /// without making the surviving topology look foreign.
+fn unknown_layout_leaves(
+    incoming: &Workspace,
+    panes: &HashMap<TerminalId, PaneSlot>,
+) -> Vec<TerminalId> {
+    incoming
+        .windows
+        .iter()
+        .filter_map(|window| window.state.tree.as_ref())
+        .flat_map(crate::layout::leaves)
+        .filter(|terminal| !panes.contains_key(terminal))
+        .collect()
+}
+
+#[cfg(test)]
 fn reconcile_loaded_workspace(
-    mut incoming: Workspace,
+    incoming: Workspace,
     local: &Workspace,
     bootstrap_focus: Option<&TerminalId>,
     panes: &HashMap<TerminalId, PaneSlot>,
 ) -> Workspace {
+    reconcile_loaded_workspace_checked(incoming, local, bootstrap_focus, panes).0
+}
+
+/// Reconcile topology and report whether the foreign-session guard accepted it.
+/// Callers must only discover/attach new leaves when `accepted` is true.
+fn reconcile_loaded_workspace_checked(
+    mut incoming: Workspace,
+    local: &Workspace,
+    bootstrap_focus: Option<&TerminalId>,
+    panes: &HashMap<TerminalId, PaneSlot>,
+) -> (Workspace, bool) {
     let incoming_leaves: Vec<TerminalId> = incoming
         .windows
         .iter()
@@ -1450,7 +1497,7 @@ fn reconcile_loaded_workspace(
         && !belongs_to_session
         && let Some(focus) = bootstrap_focus
     {
-        return Workspace::single(focus.clone());
+        return (Workspace::single(focus.clone()), false);
     }
 
     for (index, window) in incoming.windows.iter_mut().enumerate() {
@@ -1465,7 +1512,7 @@ fn reconcile_loaded_workspace(
     } else {
         local.active.min(incoming.windows.len() - 1)
     };
-    incoming
+    (incoming, true)
 }
 
 /// Preserve a valid local focus while adopting `state`'s tree topology.
@@ -1743,6 +1790,67 @@ mod tests {
             local.windows[1].state.tree,
             Some(LayoutNode::Split { ratio, .. }) if (ratio - 0.7).abs() < f32::EPSILON
         ));
+    }
+
+    #[test]
+    fn rejected_cross_session_layout_emits_no_attach_panes() {
+        use phux_protocol::wire::frame::Scope;
+
+        let mut local = Workspace::single(tid(9));
+        let foreign = ws1(split2(1, 2, 1));
+        let bytes = foreign.encode_cbor().expect("encode foreign workspace");
+        let mut focused = Some(tid(9));
+        let mut panes = panes_for(&[&tid(9)]);
+
+        let outcome = drive_layout_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Group(super::DEFAULT_GROUP_ID),
+                key: crate::attach::driver::layout_key(SessionId::new(1)),
+                value: Some(bytes),
+            },
+            None,
+            &mut local,
+            &mut focused,
+            &mut panes,
+        );
+
+        assert!(outcome.attach_panes.is_empty());
+        assert_eq!(window_leaves(&local, 0), vec![tid(9)]);
+        assert_eq!(focused, Some(tid(9)));
+    }
+
+    #[test]
+    fn metadata_changed_discovers_peer_added_leaf_without_moving_focus() {
+        use phux_protocol::wire::frame::Scope;
+
+        let mut local = ws1(split2(1, 2, 1));
+        let mut sibling = local.clone();
+        let tree = sibling.windows[0].state.tree.as_ref().unwrap();
+        sibling.windows[0].state.tree = Some(
+            crate::layout::split_at(tree, &tid(2), &tid(3), SplitDir::Vertical, 0.3)
+                .expect("split peer tree"),
+        );
+        sibling.windows[0].state.focus = Some(tid(3));
+        let bytes = sibling.encode_cbor().expect("encode sibling workspace");
+        let mut focused = Some(tid(1));
+        let mut panes = panes_for(&[&tid(1), &tid(2)]);
+
+        let outcome = drive_layout_frame(
+            FrameKind::MetadataChanged {
+                scope: Scope::Group(super::DEFAULT_GROUP_ID),
+                key: crate::attach::driver::layout_key(SessionId::new(1)),
+                value: Some(bytes),
+            },
+            None,
+            &mut local,
+            &mut focused,
+            &mut panes,
+        );
+
+        assert_eq!(outcome.attach_panes, vec![tid(3)]);
+        assert_eq!(focused, Some(tid(1)));
+        assert_eq!(local.windows[0].state.focus, Some(tid(1)));
+        assert_eq!(window_leaves(&local, 0), vec![tid(1), tid(2), tid(3)]);
     }
 
     /// The initial persisted-layout reply uses the same topology-only merge as
