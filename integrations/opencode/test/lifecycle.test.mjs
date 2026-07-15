@@ -56,7 +56,7 @@ test("documented session status events publish honest owner-labelled working and
   await hooks.dispose();
 });
 
-test("session deletion clears only a declaration still owned by that public session", async () => {
+test("session deletion resolves a session/window selector and clears only the owned canonical pane", async () => {
   const requests = [];
   let record;
   let exposeOwner = true;
@@ -95,7 +95,7 @@ test("session deletion clears only a declaration still owned by that public sess
     if (request.args[1] === "clear") return completed("@6\t-");
     throw new Error(`unexpected agent command: ${request.args.join(" ")}`);
   } });
-  const hooks = await PhuxPlugin({}, { cli, env: { PHUX_TARGET: "@6" } });
+  const hooks = await PhuxPlugin({}, { cli, env: { PHUX_TARGET: "shared:window-0" } });
 
   await hooks.event({ event: {
     type: "session.status",
@@ -105,8 +105,10 @@ test("session deletion clears only a declaration still owned by that public sess
     type: "session.deleted",
     properties: { info: { id: "owned" } },
   } });
-  assert.equal(requests.some((request) => request.args[1] === "show"), true);
-  assert.equal(requests.some((request) => request.args[1] === "clear"), true);
+  const show = requests.find((request) => request.args[1] === "show");
+  const clear = requests.find((request) => request.args[1] === "clear");
+  assert.equal(show.args.at(-1), "shared:window-0", "agent show receives the broad selector");
+  assert.equal(clear.args.at(-1), "@6", "agent clear receives the resolved canonical pane selector");
 
   requests.length = 0;
   exposeOwner = false;
@@ -117,6 +119,71 @@ test("session deletion clears only a declaration still owned by that public sess
   await hooks.dispose();
   assert.equal(requests.some((request) => request.args[1] === "show"), true);
   assert.equal(requests.some((request) => request.args[1] === "clear"), false, "dispose preserves a replacement owner's declaration");
+});
+
+test("dispose isolates owned sessions when the first cleanup fails", async () => {
+  const requests = [];
+  const errors = [];
+  let latestRecord;
+  let showCount = 0;
+  const cli = new PhuxCli({ runner: async (request) => {
+    requests.push(request);
+    if (request.args[0] !== "agent") throw new Error("expected agent command");
+    if (request.args[1] === "set") {
+      latestRecord = {
+        name: option(request.args, "--name"),
+        kind: option(request.args, "--kind"),
+        state: option(request.args, "--state"),
+        attention: option(request.args, "--attention"),
+        session: option(request.args, "--session"),
+      };
+      return completed(`@10\t${JSON.stringify(latestRecord)}`);
+    }
+    if (request.args[1] === "show") {
+      showCount += 1;
+      if (showCount === 1) return completed("", 1);
+      return completed(JSON.stringify({
+        schema_version: 1,
+        agents: [{
+          terminal: "@10",
+          session: "shared",
+          window: "window-0",
+          agent: { id: "declared", label: "opencode", kind: "declared" },
+          state: "working",
+          confidence: 1,
+          attention: "normal",
+          title: null,
+          cwd: null,
+          sources: [{ kind: "agent_record", signal: "declared", confidence: 1, observed: JSON.stringify(latestRecord) }],
+          explanation: "declared record",
+        }],
+      }));
+    }
+    if (request.args[1] === "clear") return completed("@10\t-");
+    throw new Error(`unexpected agent command: ${request.args.join(" ")}`);
+  } });
+  const hooks = await PhuxPlugin({}, {
+    cli,
+    env: { PHUX_TARGET: "@10" },
+    onLifecycleError: (error) => errors.push(error),
+  });
+
+  await hooks.event({ event: {
+    type: "session.status",
+    properties: { sessionID: "first", status: { type: "busy" } },
+  } });
+  await hooks.event({ event: {
+    type: "session.status",
+    properties: { sessionID: "second", status: { type: "busy" } },
+  } });
+  await hooks.dispose();
+
+  assert.equal(showCount, 2, "the second owned session is inspected after the first fails");
+  assert.equal(requests.filter((request) => request.args[1] === "clear").length, 1);
+  assert.equal(errors.length, 1);
+  const requestCount = requests.length;
+  await hooks.dispose();
+  assert.equal(requests.length, requestCount, "consumed ownership entries are not retried");
 });
 
 test("retry and unrelated public events do not invent lifecycle transitions", async () => {
