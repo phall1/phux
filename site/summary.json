@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T11:00:00Z",
+  "generated_at": "2026-07-15T11:00:12Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -19,6 +19,24 @@
       "created_at": "2026-07-15T10:59:48Z",
       "duration_s": 2,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:59:48Z",
+      "duration_s": 17,
+      "runner_s": 12
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:59:26Z",
+      "duration_s": 42,
+      "runner_s": 35
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-15T10:19:07Z",
       "duration_s": 15,
       "runner_s": 10
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "swarm/pi-parity",
-      "conclusion": "success",
-      "created_at": "2026-07-15T10:19:07Z",
-      "duration_s": 828,
-      "runner_s": 956
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "swarm/shared-state-tags",
-      "conclusion": "success",
-      "created_at": "2026-07-15T10:18:46Z",
-      "duration_s": 14,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
@@ -300,7 +300,7 @@
     },
     {
       "workflow": "release-please",
-      "runs": 13,
+      "runs": 14,
       "success_rate": 100,
       "median_s": 37,
       "p95_s": 48,
@@ -308,8 +308,8 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 73,
-      "success_rate": 90,
+      "runs": 74,
+      "success_rate": 91,
       "median_s": 16,
       "p95_s": 19,
       "runner_minutes": 14

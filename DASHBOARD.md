@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T11:00:00Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T11:00:12Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 85 | 62% | 13m36s | 16m52s | 1080 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
-| release-please | 13 | 100% | 37s | 48s | 23 |
-| conventional-commits | 73 | 90% | 16s | 19s | 14 |
+| release-please | 14 | 100% | 37s | 48s | 23 |
+| conventional-commits | 74 | 91% | 16s | 19s | 14 |
 
 ## ci jobs, last 30 days
 
@@ -119,6 +119,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-15 10:59 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-07-15 10:59 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
+| 2026-07-15 10:59 | release-please | push | main | success | 42s | 35s |
 | 2026-07-15 10:42 | conventional-commits | pull_request | swarm/foundation-train | success | 14s | 10s |
 | 2026-07-15 10:42 | ci | pull_request | swarm/foundation-train | success | 16m44s | 21m10s |
 | 2026-07-15 10:41 | conventional-commits | pull_request | swarm/input-encode-train | success | 17s | 13s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:19 | conventional-commits | pull_request | swarm/satellite-selectors | success | 15s | 10s |
 | 2026-07-15 10:19 | ci | pull_request | swarm/satellite-selectors | success | 14m06s | 17m13s |
 | 2026-07-15 10:19 | conventional-commits | pull_request | swarm/pi-parity | success | 15s | 10s |
-| 2026-07-15 10:19 | ci | pull_request | swarm/pi-parity | success | 13m48s | 15m56s |
-| 2026-07-15 10:18 | conventional-commits | pull_request | swarm/shared-state-tags | success | 14s | 11s |
 
 ---
 
