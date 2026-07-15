@@ -6,12 +6,11 @@ last-reviewed: 2026-06-06
 
 # The phux MCP adapter
 
-**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the eleven
-JSON-RPC stdio tools (`phux_ls`, `phux_snapshot`, `phux_send_keys`,
-`phux_run`, `phux_wait`, `phux_new`, `phux_kill`, `phux_watch`,
-`phux_ask`, `phux_plugin_action`, `phux_plugin_workspace`), the stdio
-transport and lifecycle, how a tool resolves a target client-side, and the
-`tools/call` envelope.
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the 21
+JSON-RPC stdio tools spanning inspection, execution, session lifecycle,
+agent identity, existing-pane layout, and bounded plugin/workspace operations;
+the stdio transport and lifecycle; target resolution; and the `tools/call`
+envelope.
 The structured shapes the tools return and the selector grammar are the
 shared agent surface and live in their owning docs; this file links them.
 
@@ -102,24 +101,31 @@ The methods:
 |---|---|
 | `initialize` | `protocolVersion`, `capabilities` (`{ "tools": {} }`), and `serverInfo` (`name` = `"phux"`, `version` = the crate version) |
 | `notifications/initialized` | none (it is a notification) |
+| `notifications/cancelled` | none; aborts the in-flight `requestId` and returns error `-32800` for that original id |
 | `tools/list` | the tool catalog (see §3) |
 | `tools/call` | dispatch by tool name (see §3, §4) |
 | `ping` | an empty result (keepalive) |
 
 Robustness: a malformed line yields a JSON-RPC parse error with a null
 id; an unknown method on a request yields a method-not-found error (an
-unknown notification, having no id, is silently ignored). Neither stops
-the loop, which runs until stdin EOF.
+unknown notification, having no id, is silently ignored). Tool calls run as
+independently abortable tasks while the server keeps reading requests. Replies are
+serialized through the transport loop and retain their original ids even when
+they complete out of order. `notifications/cancelled` aborts the matching task;
+stdin EOF aborts and drains every pending task. Dropping a CLI-backed task
+therefore triggers the subprocess adapter's `kill_on_drop` child cleanup.
 
 ---
 
 ## 2. How a tool resolves a target
 
 Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`) takes a `target` selector string in the **same
-grammar as the CLI's `TARGET`**, whose table and examples live in
-[`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `name`
-(session), `name:N` / `name:tag` (window), `name:N.M`
+`phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`, `phux_launch`,
+`phux_spawn`, `phux_signal`, `phux_tag`, and the three pane-layout tools)
+takes a `target` selector string in the **same grammar as the CLI's
+`TARGET`**, whose table and examples live in
+[`tui.md`](./tui.md) §3. In one line, the forms are: `.` (current), `=`
+(last), `name` (session), `name:N` / `name:tag` (window), `name:N.M`
 (pane), and `@N` (opaque id).
 
 Resolution is **client-side**, exactly as the CLI resolves it
@@ -134,10 +140,14 @@ attached-client focus history; callers must use `.` or an explicit target.
 `target` optionality differs per tool:
 
 - `phux_snapshot` and `phux_wait` make `target` **optional**; when absent
-  it defaults to the focused session (`Selector::Current`).
-- `phux_send_keys` and `phux_run` **require** `target`.
+  it defaults to the focused/last session (`Selector::Last`).
+- `phux_send_keys`, `phux_run`, `phux_signal`, `phux_tag`, and the spatial
+  tools require `target`. Spatial selectors must each resolve to exactly one
+  local same-session pane rather than applying the focused-pane tiebreak.
+- `phux_launch` and `phux_spawn` use optional `target` only for explicit local
+  placement. `phux_agent` uses it for pane-specific actions.
 
-Every tool also takes an optional `socket` string naming the
+Server-facing tools also take an optional `socket` string naming the
 Unix-domain socket to connect to. Precedence: an explicit `socket`
 argument, then the `PHUX_SOCKET` environment variable, then the daemon
 default (`$XDG_RUNTIME_DIR/phux/phux.sock`, falling back to
@@ -148,7 +158,7 @@ the literal `default`).
 
 ## 3. The tool catalog
 
-Eleven tools, returned verbatim by `tools/list`. Each `inputSchema` is a
+Twenty-one tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all. The return shapes are the
 shared agent shapes owned by [`agents.md`](./agents.md) §3; each tool
@@ -162,14 +172,10 @@ Lists phux sessions on the running server. No target.
 |---|---|---|---|
 | `socket` | string | no | Override the UDS path (see §2). |
 
-Result: `{ "sessions": [ { "name", "window_count", "attached_client_count" } ],
-"terminals": ["@3", "devbox/@7"] }`, with sessions sorted by name and the
-complete addressable Terminal inventory in snapshot order. The MCP tool
-surfaces the **raw wire fields**
-(`window_count` / `attached_client_count`); the CLI's `ls --json`
-projects them to `windows` / `attached`. The two surfaces do not share
-identical keys ([`agents.md`](./agents.md) §3.1) — do not carry a parser
-across them.
+Result: the canonical versioned `phux ls --json` document:
+`{ "schema_version": 1, "sessions": [ { "name", "windows", "attached" } ] }`,
+sorted by name. MCP executes and parses that CLI surface, so one parser works
+for both.
 
 ### 3.2 `phux_snapshot`
 
@@ -224,14 +230,10 @@ Result on completion: a serialized `RunResult`
 (`{ command, exit_code, output, duration_ms, truncated }`), shape owned
 by [`agents.md`](./agents.md) §3.3.
 
-**MCP-vs-CLI divergence — the timeout shape.** On timeout the MCP tool
-returns a JSON body: `{ "outcome": "timed_out", "command", "duration_ms" }`.
-The CLI's `run --json` does **not**: it emits no JSON on timeout and
-signals the timeout through exit code `125`
-([`agents.md`](./agents.md) §3.3). An agent driving MCP reads the
-`outcome` body; an agent driving the CLI reads the exit code. This is the
-one genuine shape difference between the two surfaces; everything else is
-name-for-name.
+MCP executes the canonical `phux run --json` command. Completion returns the
+same `RunResult`; timeout emits no JSON and becomes an MCP tool error from the
+CLI's exit `125`, matching the CLI contract. MCP additionally bounds
+`timeout_secs` to `1..=3600` so a tool call cannot wait forever.
 
 ### 3.5 `phux_wait`
 
@@ -253,8 +255,8 @@ Result: `{ "outcome": "met" | "timed_out", "polls": N }`.
 
 ### 3.6 `phux_new`
 
-Creates a named session on the running server without attaching. The
-server must already be running (this tool does not auto-spawn one).
+Creates a named session without attaching through canonical
+`phux new --json`; the CLI may start the local server when needed.
 
 | Param | Type | Required | Meaning |
 |---|---|---|---|
@@ -273,11 +275,12 @@ window, a pane, or `@id` — in one atomic `KILL_TERMINALS`.
 | Param | Type | Required | Meaning |
 |---|---|---|---|
 | `target` | string | yes | Selector (§2). Resolves to its full id set. |
+| `confirm` | boolean (`true`) | yes | Explicit destructive-operation confirmation; false or absent is rejected before subprocess execution. |
 | `socket` | string | no | Override the UDS path (see §2). |
 
-Result: `{ killed: N }`, the number of Terminals torn down. A clean server
-disconnect after the kill (the server self-exits once its last session is
-reaped) is reported as success.
+Result: `{ "schema_version": 1, "killed": true, "target": "..." }` after the
+canonical CLI exits successfully. A clean server disconnect after reaping its
+last session is already treated as success by that CLI path.
 
 ### 3.8 `phux_watch`
 
@@ -358,6 +361,35 @@ Result: `{ workspaces, count }`, where each item contains
 `plugin_id`, `plugin_name`, `enabled`, and the serialized plugin
 `workspace` profile. A filtered miss is an MCP tool error.
 
+### 3.12–3.21 Orchestration parity tools
+
+The remaining ten strict-schema tools execute the canonical `phux` CLI with
+argv (never a shell), parse its JSON or small documented text shape, cap each
+string at 4096 bytes and arrays at 64 entries, cap stdout/stderr at 1 MiB/64
+KiB, and kill the child on cancellation or deadline.
+
+| Tool | CLI mapping | Required safety/shape notes |
+|---|---|---|
+| `phux_launch` | `phux launch --json` | Integration or `list: true`; optional exact local `target`, split, ratio, cwd, and bounded extra argv. |
+| `phux_spawn` | `phux spawn --json` | Optional explicit placement (`target`, split, ratio) or satellite; target and satellite conflict. Command is argv, not shell text. |
+| `phux_signal` | `phux signal` | Explicit target and signal; `interrupt`, `terminate`, and `kill` require `confirm: true`. |
+| `phux_tag` | `phux tag` | `ls`/`add`/`rm`; returns a versioned projection of the CLI's tab-separated confirmation. |
+| `phux_rename` | `phux rename` | Explicit current and new session names. |
+| `phux_agent` | `phux agent` | `list`/`show`/`explain` use canonical JSON; `set`/`clear` parse the confirmed agent record. |
+| `phux_insert_pane` | `phux insert-pane --json` | Existing pane only; no implicit spawn and no focus operation. |
+| `phux_move_pane` | `phux move-pane --json` | Exact local same-session panes, bounded ratio. |
+| `phux_swap_pane` | `phux swap-pane --json` | Exact local same-session panes; preserves client-local focus. |
+| `phux_workspace` | `phux workspace` | `inspect`, `save`, or `restore`; bounded local paths and canonical JSON where the CLI provides it. |
+
+Every schema in this parity table sets `additionalProperties: false`, and
+handlers enforce that again before side effects. There are deliberately no MCP `take`/`give` tools:
+the CLI lease belongs to the short-lived subprocess connection, so advertising
+a persistent lease would be dishonest. There is no headless focus tool because
+focus is client-local. `attach`, `server`, `stdio-bridge`, and `upgrade` are
+interactive/daemon/operator lifecycles; `pair` and satellite registry mutation
+handle credentials; plugin installation and config editing mutate local trust
+configuration. Those remain intentionally outside the model-facing tool set.
+
 ---
 
 ## 4. A worked `tools/call` example
@@ -400,16 +432,14 @@ sparse per-cell `cells` array populated.
 
 ## 5. Relationship to the CLI
 
-The MCP tools are name-for-name adapters over the CLI's agent surfaces:
-`phux_ls` ↔ `phux ls`; `phux_snapshot` / `phux_send_keys` / `phux_run` /
-`phux_wait` / `phux_new` ↔ `phux snapshot` / `send-keys` / `run` / `wait` /
-`new`; `phux_ask` ↔ `phux ask`; `phux_plugin_action` ↔ `phux config run`;
-and `phux_plugin_workspace` ↔ the plugin manifest workspace profile
-([`agents.md`](./agents.md) §1). Targeted pane tools use the same client-side
-resolution and tiebreaks because the adapter wraps the same `phux-client`
-functions the CLI does. Plugin actions instead share the `phux-plugin`
-runtime with the CLI. The one shape difference is the `phux_run` timeout
-body (§3.4).
+The MCP tools are name-for-name adapters over the CLI agent surface. The base
+set maps `phux_ls`, `snapshot`, `send_keys`, `run`, `wait`, `new`, `kill`,
+`watch`, and `ask` to their hyphenated CLI verbs. The parity table in §3 maps
+launch/spawn/signal/tag/rename/agent/layout/workspace name-for-name.
+`phux_plugin_action` maps to `phux config run`; `phux_plugin_workspace` reads
+the same plugin manifest workspace profile. CLI-subprocess tools consume the
+canonical JSON directly; in-process tools reuse the same `phux-client` or
+`phux-plugin` implementation as the CLI.
 
 Per [ADR-0022](../../ADR/0022-tool-for-agents.md), the CLI and its JSON
 schema are the stable agent contract; the wire underneath stays additive
