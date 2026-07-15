@@ -8,8 +8,8 @@ last-reviewed: 2026-07-09
 
 **TL;DR.** Choose the interface that fits the job: the reference TUI for a
 person, the CLI, OpenCode, Pi, or MCP adapter for an agent, the browser client
-for the web, or the Rust client library for a new integration. They are peer
-consumers of one wire and one terminal model.
+for the web, or the in-tree Rust client functions when working inside this
+workspace. They are peer consumers of one wire and one terminal model.
 
 ---
 
@@ -23,7 +23,7 @@ consumers of one wire and one terminal model.
 | Connect Pi with target persistence and lifecycle metadata | [The Pi integration](./pi.md) |
 | Connect a tool client over MCP | [The MCP adapter](./mcp.md) |
 | Run the terminal client in a browser | [The web client](./web.md) |
-| Study the in-tree Rust client API | [The internal client library](./sdk.md) |
+| Study the in-tree Rust free-function API | [The internal client library](./sdk.md) |
 
 ## The peer principle
 
@@ -52,7 +52,7 @@ project locally, the way the web client does.
 | [opencode.md](./opencode.md) | OpenCode package: loading, six tools, target precedence, lifecycle metadata, shared adapter boundary, and safety. |
 | [pi.md](./pi.md) | Pi package: local installation, six terminal tools, target persistence, lifecycle metadata, human handoff, and current safety boundaries. |
 | [mcp.md](./mcp.md) | MCP adapter: a JSON-RPC stdio tool surface over the agent verbs, `phux_ask`, and plugin workspace profile discovery. |
-| [sdk.md](./sdk.md) | The `phux-client` library crate over the `phux-protocol` wire codec, shared by the surfaces above. |
+| [sdk.md](./sdk.md) | The workspace-internal `phux-client` free-function surface over the `phux-protocol` wire codec. |
 
 Future consumers — a native GUI, a recorder, a tmux-CC adapter — get their
 own files here when they materialize. Each file's frontmatter declares its
