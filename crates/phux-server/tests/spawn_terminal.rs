@@ -1112,6 +1112,122 @@ fn attach_create_seed_pane_injects_matching_terminal_id_env() {
     });
 }
 
+/// phux-cufw: the server injects `PHUX_SOCKET` (its own listening UDS
+/// path) into every SPAWN_TERMINAL child, so an in-pane `phux` verb
+/// targets the pane's own server rather than resolving the default
+/// socket path. The child compares `$PHUX_SOCKET` against the server's
+/// actual socket and prints a short verdict token — comparing in-pane
+/// avoids the 80-column soft-wrap that would break a needle match on
+/// the full echoed path.
+#[test]
+fn spawn_terminal_injects_server_socket_env() {
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (mut stream, shutdown_tx, server_handle) = spawn_and_attach(&tmp, "default").await;
+
+        let probe = format!(
+            "if [ \"$PHUX_SOCKET\" = '{}' ]; then printf 'SOCKOK.\\n'; \
+             else printf 'SOCKBAD=%s.\\n' \"$PHUX_SOCKET\"; fi; read _",
+            socket_path.display()
+        );
+        send_frame(
+            &mut stream,
+            &FrameKind::SpawnTerminal {
+                request_id: 56,
+                group: DEFAULT_GROUP_ID,
+                command: Some(vec!["/bin/sh".to_owned(), "-c".to_owned(), probe]),
+                cwd: None,
+                env: None,
+                term: None,
+                satellite: None,
+                owner_terminal: None,
+            },
+        )
+        .await;
+
+        let new_id = match await_terminal_spawned(&mut stream, 56).await {
+            SpawnResult::Ok(id) => id,
+            other => panic!("SPAWN_TERMINAL did not succeed: {other:?}"),
+        };
+        let acc = await_output_contains(&mut stream, &new_id, b"SOCK").await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(b"SOCKOK.".len()).any(|w| w == b"SOCKOK."),
+            "spawned child must see PHUX_SOCKET={}; got output: {body:?}",
+            socket_path.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
+/// phux-cufw: the same `PHUX_SOCKET` injection covers the seed /
+/// attach-create path (`seed_session_with_pty`), pairing with the
+/// `PHUX_TERMINAL_ID` the seed pane already receives.
+#[test]
+fn attach_create_seed_pane_injects_server_socket_env() {
+    use phux_protocol::wire::frame::{AttachTarget, TYPE_ATTACHED, ViewportInfo};
+
+    run_local(async {
+        let tmp = TempDir::new().unwrap();
+        let socket_path = tmp.path().join("phux.sock");
+        let (shutdown_tx, server_handle) = spawn_server_seed_pty_no_cmd(socket_path.clone(), None);
+        let mut stream = wait_for_socket(&socket_path, SOCKET_CONNECT_DEADLINE).await;
+
+        let probe = format!(
+            "if [ \"$PHUX_SOCKET\" = '{}' ]; then printf 'SOCKOK.\\n'; \
+             else printf 'SOCKBAD=%s.\\n' \"$PHUX_SOCKET\"; fi; read _",
+            socket_path.display()
+        );
+        send_frame(
+            &mut stream,
+            &FrameKind::Attach {
+                target: AttachTarget::CreateIfMissing {
+                    name: "seed-sock".to_owned(),
+                    command: Some(vec!["/bin/sh".to_owned(), "-c".to_owned(), probe]),
+                    cwd: None,
+                },
+                viewport: ViewportInfo::new(80, 24),
+                request_scrollback: false,
+                scrollback_limit_lines: 0,
+            },
+        )
+        .await;
+
+        let (type_byte, attached) = recv_typed(&mut stream).await;
+        assert_eq!(type_byte, TYPE_ATTACHED, "expected ATTACHED");
+        let seed_id = match attached {
+            FrameKind::Attached { snapshot, .. } => {
+                assert_eq!(snapshot.panes.len(), 1, "attach-create seeds one pane");
+                snapshot.panes[0].id.clone()
+            }
+            other => panic!("expected Attached, got {other:?}"),
+        };
+        let acc = await_snapshot_or_output_contains(&mut stream, &seed_id, b"SOCK").await;
+        let body = String::from_utf8_lossy(&acc);
+        assert!(
+            acc.windows(b"SOCKOK.".len()).any(|w| w == b"SOCKOK."),
+            "attach-create seed pane must see PHUX_SOCKET={}; got: {body:?}",
+            socket_path.display(),
+        );
+
+        drop(stream);
+        shutdown_tx.send(()).ok();
+        timeout(Duration::from_secs(5), server_handle)
+            .await
+            .expect("server didn't shut down in time")
+            .expect("server join")
+            .expect("server run_async ok");
+    });
+}
+
 /// phux-cs6 acceptance: with `defaults.cwd-inheritance = inherit-focused`
 /// (the schema default the test server runs with), a `SPAWN_TERMINAL`
 /// that leaves `cwd` unset opens the new pane in the *focused* pane's
