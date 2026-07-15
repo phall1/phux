@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T19:41:21Z",
+  "generated_at": "2026-07-15T19:45:21Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -118,6 +118,15 @@
       "created_at": "2026-07-15T19:18:15Z",
       "duration_s": 519,
       "runner_s": 727
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "ci/agents-smoke",
+      "conclusion": "success",
+      "created_at": "2026-07-15T19:18:15Z",
+      "duration_s": 1007,
+      "runner_s": 1220
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T18:44:57Z",
       "duration_s": 16,
       "runner_s": 13
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "train/wave-2026-07-15",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T18:44:57Z",
-      "duration_s": 310,
-      "runner_s": 588
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 131,
+      "runs": 132,
       "success_rate": 60,
       "median_s": 809,
       "p95_s": 1035,
-      "runner_minutes": 1615
+      "runner_minutes": 1635
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 130,
+      "runs": 131,
       "median_queue_s": 2,
-      "median_s": 798,
+      "median_s": 799,
       "p95_s": 1026
     },
     {
       "job": "check",
-      "runs": 128,
+      "runs": 129,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 269
     },
     {
       "job": "detect docs-only",
-      "runs": 131,
+      "runs": 132,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -343,56 +343,62 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 944,
-      "n": 16
+      "n": 17
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 167,
-      "n": 18
+      "n": 19
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 19,
-      "n": 19
+      "n": 20
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 19,
-      "n": 19
+      "median_s": 18,
+      "n": 20
+    },
+    {
+      "job": "test",
+      "step": "agents smoke",
+      "median_s": 12,
+      "n": 1
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 19
+      "n": 20
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 17
+      "n": 18
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 19
+      "n": 20
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 73,
-      "hit_rate": 32
+      "samples": 74,
+      "hit_rate": 31
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 70,
+      "samples": 71,
       "hit_rate": 37
     },
     {
@@ -407,43 +413,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 123,
-      "n": 67
+      "median_s": 122,
+      "n": 68
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 67
+      "n": 68
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 4,
-      "n": 67
+      "n": 68
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 70
+      "n": 71
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 843,
-      "n": 57
+      "n": 58
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 9,
-      "n": 56
+      "n": 57
+    },
+    {
+      "workflow": "ci",
+      "job": "test",
+      "phase": "agents-smoke",
+      "median_s": 1,
+      "n": 1
     },
     {
       "workflow": "observatory",
