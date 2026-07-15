@@ -181,10 +181,13 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   seed pane id as JSON and exits. `--json` requires an explicit `-s NAME` and
   errors if that name is already in use (create-only, never create-or-attach).
   Shape in §4.4.
-- **`phux spawn [--satellite NAME] [-c CWD] [-- COMMAND...] [--json]
-  [--socket P]`** — spawn a terminal without attaching (`SPAWN_TERMINAL`);
-  the pane joins the server's most recently active session and the new
-  terminal id prints on success. `--satellite NAME` routes the spawn
+- **`phux spawn [--satellite NAME] [--target TARGET [--split horizontal|vertical]
+  [--ratio R]] [-c CWD] [-- COMMAND...] [--json] [--socket P]`** — spawn a
+  terminal without attaching (`SPAWN_TERMINAL`). With `--target`, the new pane
+  is owned by the target's exact local window and inserted beside it; `R` is
+  finite and strictly between 0 and 1. Without placement flags, the pane joins
+  the server's most recently active session (legacy behavior). The new terminal
+  id prints on success. `--satellite NAME` routes the spawn
   through a federation hub (`phux server --hub`) to the named registry
   satellite and prints the satellite-tagged id, which every
   satellite-capable verb can address through the hub. Does not auto-start

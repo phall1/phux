@@ -56,6 +56,18 @@ pub enum LayoutMutation {
         /// Fraction assigned to the existing target, in `(0, 1)`.
         ratio: f32,
     },
+    /// Insert a pane without changing serialized active-window or focus fields.
+    /// Headless spawn placement uses this so it cannot publish shared focus.
+    SplitPreservingFocus {
+        /// Existing pane whose leaf is replaced by a split.
+        target: TerminalId,
+        /// Already-created pane to insert.
+        new_pane: TerminalId,
+        /// Split axis.
+        dir: SplitDir,
+        /// Fraction assigned to the existing target, in `(0, 1)`.
+        ratio: f32,
+    },
     /// Remove `source` from its old parent (collapsing it), then insert it
     /// beside `target`.
     Move {
@@ -184,6 +196,26 @@ impl<'a> LayoutOps<'a> {
         self.write_and_confirm(&workspace).await
     }
 
+    /// Mutate the stored workspace, or seed it from `fallback` when this
+    /// session has no layout metadata yet.
+    ///
+    /// # Errors
+    ///
+    /// Returns transport/envelope errors or a mutation-specific rejection.
+    pub async fn mutate_or_seed(
+        &mut self,
+        fallback: Workspace,
+        mutation: LayoutMutation,
+    ) -> Result<Workspace, LayoutOpsError> {
+        let mut workspace = match self.read().await {
+            Ok(workspace) => workspace,
+            Err(LayoutOpsError::MissingLayout) => fallback,
+            Err(err) => return Err(err),
+        };
+        apply_mutation(&mut workspace, &mutation)?;
+        self.write_and_confirm(&workspace).await
+    }
+
     async fn get_value(&mut self) -> Result<Option<Vec<u8>>, LayoutOpsError> {
         let request_id = self.allocate_request_id();
         self.conn
@@ -263,6 +295,12 @@ pub fn apply_mutation(
             new_pane,
             dir,
             ratio,
+        }
+        | LayoutMutation::SplitPreservingFocus {
+            target,
+            new_pane,
+            dir,
+            ratio,
         } => {
             if find_window(workspace, new_pane).is_some() {
                 return Err(LayoutOpsError::DuplicatePane(new_pane.clone()));
@@ -276,8 +314,10 @@ pub fn apply_mutation(
                 .ok_or_else(|| LayoutOpsError::ForeignTarget(target.clone()))?;
             workspace.windows[index].state.tree =
                 Some(split_at(tree, target, new_pane, *dir, *ratio)?);
-            workspace.windows[index].state.focus = Some(new_pane.clone());
-            workspace.active = index;
+            if matches!(mutation, LayoutMutation::Split { .. }) {
+                workspace.windows[index].state.focus = Some(new_pane.clone());
+                workspace.active = index;
+            }
         }
         LayoutMutation::Move {
             source,
@@ -543,6 +583,28 @@ mod tests {
         assert_eq!(
             leaves(workspace.windows[1].state.tree.as_ref().unwrap()),
             vec![tid(3), tid(1)]
+        );
+    }
+
+    #[test]
+    fn headless_split_preserves_serialized_focus_and_active_window() {
+        let mut workspace = two_window_workspace();
+        apply_mutation(
+            &mut workspace,
+            &LayoutMutation::SplitPreservingFocus {
+                target: tid(3),
+                new_pane: tid(4),
+                dir: SplitDir::Vertical,
+                ratio: 0.3,
+            },
+        )
+        .unwrap();
+        assert_eq!(workspace.active, 0);
+        assert_eq!(workspace.windows[0].state.focus, Some(tid(1)));
+        assert_eq!(workspace.windows[1].state.focus, Some(tid(3)));
+        assert_eq!(
+            leaves(workspace.windows[1].state.tree.as_ref().unwrap()),
+            vec![tid(3), tid(4)]
         );
     }
 

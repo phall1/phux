@@ -2104,6 +2104,7 @@ dependencies = [
 name = "phux"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "clap",
  "dhat",
  "libghostty-vt",

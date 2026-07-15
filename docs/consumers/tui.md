@@ -117,11 +117,10 @@ phux server [--session N] [--listen HOST:PORT] [--quic HOST:PORT] [--hub]
                               # satellite-tagged frames over the links (§4.2)
 phux new [-s NAME] [-c CWD] [--] [COMMAND...]
                               # create a session
-phux spawn [--satellite NAME] [-c CWD] [--json] [--] [COMMAND...]
-                              # spawn a terminal without attaching; --satellite
-                              # routes the spawn to a federation satellite via
-                              # a --hub server and prints the routed id
-phux launch INTEGRATION [--print] [-c CWD] [--] [ARGS...]
+phux spawn [--satellite NAME | --target TARGET [--split DIR] [--ratio R]] [-c CWD] [--json] [--] [COMMAND...]
+                              # explicit placement is local-only; absent target
+                              # preserves legacy unplaced behavior
+phux launch INTEGRATION [--print] [--target TARGET [--split DIR] [--ratio R]] [-c CWD] [--] [ARGS...]
                               # spawn a pane running an agent integration's
                               # [launch] command (ADR-0042); resolves the named
                               # template from an enabled plugin and routes the

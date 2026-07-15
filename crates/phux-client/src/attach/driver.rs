@@ -35,7 +35,7 @@ use phux_protocol::PROTOCOL_VERSION;
 use phux_protocol::caps::{ClientCapabilities, Layer, LayerSet, OutputMode, detect_color_support};
 use phux_protocol::ids::{ClientId, TerminalId};
 use phux_protocol::wire::frame::{
-    AttachTarget, CONFIG_RELOAD_KEY, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
+    AttachTarget, CONFIG_RELOAD_KEY, Command, FrameKind, Scope, TerminalLifecycle, ViewportInfo,
 };
 use rustix::termios::{LocalModes, OptionalActions, Termios};
 use tokio::io::AsyncReadExt;
@@ -2476,6 +2476,21 @@ async fn main_loop<W: super::RenderSink>(
                         )?;
                         if outcome.exit {
                             return Ok(LoopExit::Detached);
+                        }
+                        // A peer headless placement can add a layout leaf
+                        // without this attached client being subscribed to the
+                        // new Terminal. Attach each discovered leaf so its
+                        // snapshot creates a PaneSlot and renders in place.
+                        for terminal_id in &outcome.attach_panes {
+                            let request_id = next_request_id;
+                            next_request_id = next_request_id.wrapping_add(1);
+                            conn.send(&FrameKind::Command {
+                                request_id,
+                                command: Command::AttachTerminal {
+                                    terminal_id: terminal_id.clone(),
+                                },
+                            })
+                            .await?;
                         }
                         // phux-foz.7: did this frame change anything the
                         // agent-fleet dashboard projects (agent records,

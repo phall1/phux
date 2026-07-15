@@ -1030,6 +1030,18 @@ impl ServerState {
         self.registry.new_terminal(wid).ok()
     }
 
+    /// Add a pane to the exact window that owns `owner`.
+    ///
+    /// Used by headless spawn ownership targeting: the caller names a known
+    /// Terminal so the request cannot drift into another session or window.
+    /// Layout geometry remains client-owned L3 metadata.
+    #[must_use]
+    pub fn add_pane_to_terminal_owner(&mut self, owner: &WireTerminalId) -> Option<TerminalId> {
+        let owner = self.terminal_from_wire(owner)?;
+        let window = self.registry.terminal(owner)?.window;
+        self.registry.new_terminal(window).ok()
+    }
+
     /// Record a freshly-spawned [`TerminalHandle`] against `pane` and
     /// allocate its wire id.
     ///

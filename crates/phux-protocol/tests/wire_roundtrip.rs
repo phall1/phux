@@ -1603,6 +1603,7 @@ proptest! {
         env in proptest::option::of(proptest::collection::vec(arb_env_pair(), 0..4)),
         term in proptest::option::of(".{0,16}"),
         satellite in proptest::option::of(".{0,16}"),
+        owner_terminal in proptest::option::of(any::<u32>()),
     ) {
         let frame = FrameKind::SpawnTerminal {
             request_id,
@@ -1612,6 +1613,7 @@ proptest! {
             env,
             term,
             satellite: satellite.map(phux_protocol::ids::SatelliteHost::new),
+            owner_terminal: owner_terminal.map(TerminalId::local),
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
@@ -2102,6 +2104,7 @@ fn spawn_terminal_empty_command_vec_round_trips() {
         env: None,
         term: None,
         satellite: None,
+        owner_terminal: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -2123,6 +2126,7 @@ fn spawn_terminal_empty_env_vec_round_trips() {
         env: Some(Vec::new()),
         term: None,
         satellite: None,
+        owner_terminal: None,
     };
     let mut buf = BytesMut::new();
     frame.encode(&mut buf);
@@ -2145,6 +2149,7 @@ fn spawn_terminal_term_field_round_trips() {
             env: None,
             term,
             satellite: None,
+            owner_terminal: None,
         };
         let mut buf = BytesMut::new();
         frame.encode(&mut buf);
