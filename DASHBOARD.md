@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T09:57:34Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T10:00:43Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | observatory | 2 | 100% | 11m44s | 11m44s | 47 |
 | release-please | 11 | 100% | 36s | 44s | 22 |
-| conventional-commits | 47 | 91% | 16s | 19s | 9 |
+| conventional-commits | 48 | 92% | 16s | 19s | 9 |
 
 ## ci jobs, last 30 days
 
@@ -117,6 +117,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 10:00 | conventional-commits | pull_request | feat/opencode-integration | success | 24s | 22s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
 | 2026-07-15 09:56 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
 | 2026-07-15 09:56 | conventional-commits | pull_request | fix/client-local-focus | success | 14s | 10s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 09:41 | ci | push | main | success | 13m37s | 17m48s |
 | 2026-07-15 09:39 | conventional-commits | pull_request | fix/input-lane-ordering | success | 13s | 10s |
 | 2026-07-15 09:38 | conventional-commits | pull_request | fix/headless-watch-idle | success | 17s | 13s |
-| 2026-07-15 09:33 | conventional-commits | pull_request | fix/watch-dirty-idle-starvation | success | 15s | 11s |
 
 ---
 
