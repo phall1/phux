@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T18:42:30Z",
+  "generated_at": "2026-07-15T18:44:16Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -28,6 +28,15 @@
       "created_at": "2026-07-15T18:26:39Z",
       "duration_s": 16,
       "runner_s": 12
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "fix/socket-path-too-long",
+      "conclusion": "success",
+      "created_at": "2026-07-15T18:26:39Z",
+      "duration_s": 1045,
+      "runner_s": 1304
     },
     {
       "workflow": "ci",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T18:05:24Z",
       "duration_s": 17,
       "runner_s": 10
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-15T18:05:22Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 116,
-      "success_rate": 60,
-      "median_s": 798,
-      "p95_s": 1030,
-      "runner_minutes": 1421
+      "runs": 117,
+      "success_rate": 61,
+      "median_s": 809,
+      "p95_s": 1035,
+      "runner_minutes": 1443
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 115,
+      "runs": 116,
       "median_queue_s": 2,
       "median_s": 798,
-      "p95_s": 1019
+      "p95_s": 1022
     },
     {
       "job": "check",
-      "runs": 114,
+      "runs": 115,
       "median_queue_s": 2,
-      "median_s": 155,
+      "median_s": 156,
       "p95_s": 266
     },
     {
       "job": "detect docs-only",
-      "runs": 116,
+      "runs": 117,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,58 +342,58 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 912,
-      "n": 15
+      "median_s": 920,
+      "n": 14
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 190,
-      "n": 15
+      "n": 16
     },
     {
       "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 19,
-      "n": 15
-    },
-    {
-      "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 19,
       "n": 16
     },
     {
+      "job": "test",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 19,
+      "n": 15
+    },
+    {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 15
+      "n": 16
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 9,
-      "n": 14
+      "n": 15
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 8,
-      "n": 16
+      "median_s": 9,
+      "n": 15
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 62,
+      "samples": 63,
       "hit_rate": 35
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 60,
-      "hit_rate": 42
+      "samples": 61,
+      "hit_rate": 41
     },
     {
       "workflow": "stress",
@@ -408,42 +408,42 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 122,
-      "n": 57
+      "n": 58
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 14,
-      "n": 57
+      "n": 58
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 57
+      "n": 58
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 59
+      "n": 60
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 782,
-      "n": 49
+      "n": 50
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 9,
-      "n": 48
+      "n": 49
     },
     {
       "workflow": "observatory",
@@ -468,32 +468,32 @@
     }
   ],
   "slow_tests": {
-    "sha": "127a8d226",
+    "sha": "001ad15b3",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 111.029
+        "seconds": 105.936
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 27.385
+        "seconds": 28.212
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.015
+        "seconds": 6.017
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "deleting_the_record_hands_it_back_to_the_detector",
+        "seconds": 3.817
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
         "seconds": 3.816
-      },
-      {
-        "binary": "phux-server::agent_detect",
-        "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.813
       },
       {
         "binary": "phux-server::agent_detect",
@@ -503,22 +503,22 @@
       {
         "binary": "phux-server::agent_events",
         "test": "unattached_subscriber_receives_events",
-        "seconds": 3.014
+        "seconds": 3.018
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.515
+        "seconds": 2.514
       },
       {
         "binary": "phux::bin/phux",
         "test": "commands::overlay::tests::wedged_tailscale_binary_is_killed_at_the_deadline",
-        "seconds": 2.020
+        "seconds": 2.021
       },
       {
         "binary": "phux-server::l2_adversarial",
         "test": "test_subscribe_events_no_loss",
-        "seconds": 2.016
+        "seconds": 2.017
       }
     ]
   },
