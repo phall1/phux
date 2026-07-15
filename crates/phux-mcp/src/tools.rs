@@ -22,6 +22,7 @@ use phux_client::selector::{self, Selector};
 use phux_client::state;
 use phux_client::wait::{Condition, DEFAULT_IDLE_DWELL, DEFAULT_POLL_INTERVAL, WaitOutcome};
 use phux_protocol::ids::TerminalId;
+use phux_protocol::input::paste::PasteTrust;
 use phux_protocol::wire::info::SessionSnapshot;
 use serde_json::{Value, json};
 
@@ -99,6 +100,20 @@ pub(crate) fn catalog() -> Value {
                     "socket": { "type": "string" }
                 },
                 "required": ["target", "keys"]
+            }
+        },
+        {
+            "name": "phux_paste",
+            "description": "Paste text into a pane as one paste event. The server adds bracketed-paste markers when the pane has DEC mode 2004 on, so multiline text lands intact (no per-character auto-indent). A paste inserts without submitting; follow with phux_send_keys Enter to run it.",
+            "inputSchema": {
+                "type": "object",
+                "properties": {
+                    "target": { "type": "string", "description": TARGET_DESC },
+                    "text": { "type": "string", "description": "The payload to paste, verbatim (newlines included)." },
+                    "untrusted": { "type": "boolean", "description": "Mark the payload untrusted: the pane's untrusted-paste policy (reject by default) may silently drop an unsafe payload. Default false — the caller vouches for content it composed." },
+                    "socket": { "type": "string" }
+                },
+                "required": ["target", "text"]
             }
         },
         {
@@ -199,6 +214,7 @@ pub(crate) async fn dispatch(name: &str, args: &Value) -> Result<Value, ToolErro
         "phux_ls" => phux_ls(args).await,
         "phux_snapshot" => phux_snapshot(args).await,
         "phux_send_keys" => phux_send_keys(args).await,
+        "phux_paste" => phux_paste(args).await,
         "phux_run" => phux_run(args).await,
         "phux_wait" => phux_wait(args).await,
         "phux_new" => phux_new(args).await,
@@ -258,6 +274,33 @@ async fn phux_send_keys(args: &Value) -> Result<Value, ToolError> {
     // `send_to` returns `()`; echo the pane we resolved ourselves.
     phux_client::send_keys::send_to(&socket, pane.clone(), &keys).await?;
     Ok(json!({ "sent": true, "pane": pane_value(&pane) }))
+}
+
+/// `phux_paste` — paste a payload into the pane named by the selector.
+///
+/// One `InputEvent::Paste` over `ROUTE_INPUT` (no attach, no resize); the
+/// server brackets the payload when the pane's DEC mode 2004 is on.
+/// Trusted by default, mirroring `phux paste`; `untrusted: true` opts
+/// into the server-side safety gate.
+async fn phux_paste(args: &Value) -> Result<Value, ToolError> {
+    strict_object(
+        args,
+        &["target", "text", "untrusted", "socket"],
+        &["target", "text"],
+    )?;
+    let socket = socket::resolve(str_arg(args, "socket"));
+    let selector = required_target(args)?;
+    let text = required_str(args, "text")?.to_owned();
+    let untrusted = bool_arg(args, "untrusted").unwrap_or(false);
+    let trust = if untrusted {
+        PasteTrust::Untrusted
+    } else {
+        PasteTrust::Trusted
+    };
+    let snapshot = state::get_state(&socket).await?;
+    let pane = resolve_one(&socket, &selector, &snapshot).await?;
+    phux_client::send_keys::paste_to(&socket, pane.clone(), text.into_bytes(), trust).await?;
+    Ok(json!({ "sent": true, "pane": pane_value(&pane), "untrusted": untrusted }))
 }
 
 /// `phux_run` — run a command in the pane named by the selector.
@@ -589,6 +632,7 @@ mod tests {
                 "phux_ls",
                 "phux_snapshot",
                 "phux_send_keys",
+                "phux_paste",
                 "phux_run",
                 "phux_wait",
                 "phux_new",
@@ -672,6 +716,16 @@ mod tests {
             tool("phux_send_keys")["inputSchema"]["required"],
             json!(["target", "keys"]),
         );
+        // paste requires an explicit target and payload; `untrusted` is an
+        // optional boolean (trusted is the default).
+        assert_eq!(
+            tool("phux_paste")["inputSchema"]["required"],
+            json!(["target", "text"]),
+        );
+        assert_eq!(
+            tool("phux_paste")["inputSchema"]["properties"]["untrusted"]["type"],
+            json!("boolean"),
+        );
         assert_eq!(
             tool("phux_run")["inputSchema"]["required"],
             json!(["target", "command"]),
@@ -700,6 +754,20 @@ mod tests {
             "kill must reject before discovering or starting the CLI",
         );
         assert!(dispatch("phux_launch", &json!({})).await.is_err());
+        // paste rejects a missing payload and unknown keys before any
+        // socket resolution or wire side effect.
+        let paste_error = dispatch("phux_paste", &json!({ "target": "@1" }))
+            .await
+            .unwrap_err();
+        assert_eq!(paste_error.0, "missing required argument `text`");
+        assert!(
+            dispatch(
+                "phux_paste",
+                &json!({ "target": "@1", "text": "x", "keys": ["a"] })
+            )
+            .await
+            .is_err()
+        );
         assert!(
             dispatch("phux_signal", &json!({ "target": "@1", "signal": "kill" }))
                 .await

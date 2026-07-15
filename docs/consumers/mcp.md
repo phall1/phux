@@ -6,7 +6,7 @@ last-reviewed: 2026-07-15
 
 # The phux MCP adapter
 
-**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the 21
+**TL;DR.** This doc covers what is MCP-specific in `phux-mcp`: the 22
 JSON-RPC stdio tools spanning inspection, execution, session lifecycle,
 agent identity, existing-pane layout, and bounded plugin/workspace operations;
 the stdio transport and lifecycle; target resolution; and the `tools/call`
@@ -121,8 +121,8 @@ therefore triggers the subprocess adapter's `kill_on_drop` child cleanup.
 
 ## 2. How a tool resolves a target
 
-Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_run`,
-`phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`, `phux_launch`,
+Every targeted tool (`phux_snapshot`, `phux_send_keys`, `phux_paste`,
+`phux_run`, `phux_wait`, `phux_kill`, `phux_watch`, `phux_ask`, `phux_launch`,
 `phux_spawn`, `phux_signal`, `phux_tag`, and the three pane-layout tools)
 takes a `target` selector string in the **same grammar as the CLI's
 `TARGET`**, whose table and examples live in
@@ -145,8 +145,8 @@ attached-client focus history; callers must use `.` or an explicit target.
 - `phux_snapshot` and `phux_wait` make `target` **optional**; when absent
   they default to the focused/last session (`Selector::Last`). `phux_watch`
   also permits omission to collect server-wide events.
-- `phux_send_keys`, `phux_run`, `phux_ask`, `phux_kill`, `phux_signal`,
-  `phux_tag`, and the spatial tools require explicit targets. Spatial selectors
+- `phux_send_keys`, `phux_paste`, `phux_run`, `phux_ask`, `phux_kill`,
+  `phux_signal`, `phux_tag`, and the spatial tools require explicit targets. Spatial selectors
   must each resolve to exactly one local same-session pane rather than applying
   the focused-pane tiebreak.
 - `phux_launch` and `phux_spawn` use optional `target` only for explicit local
@@ -163,7 +163,7 @@ the literal `default`).
 
 ## 3. The tool catalog
 
-Twenty-one tools, returned verbatim by `tools/list`. Each `inputSchema` is a
+Twenty-two tools, returned verbatim by `tools/list`. Each `inputSchema` is a
 JSON Schema `object`. Tools that take no required argument (e.g.
 `phux_ls`) work with no `arguments` at all. The return shapes are the
 shared agent shapes owned by [`agents.md`](./agents.md) §4; each tool
@@ -369,7 +369,32 @@ Result: `{ workspaces, count }`, where each item contains
 `plugin_id`, `plugin_name`, `enabled`, and the serialized plugin
 `workspace` profile. A filtered miss is an MCP tool error.
 
-### 3.12–3.21 Orchestration parity tools
+### 3.12 `phux_paste`
+
+Pastes a payload into the resolved pane as one paste event. No attach, no
+resize. The server picks the delivery form from the pane's live terminal
+state: with bracketed paste (DEC mode 2004) on, the payload arrives wrapped
+in `ESC[200~` / `ESC[201~` as a single block; otherwise the raw bytes are
+delivered as if typed. A paste inserts without submitting — paste-aware
+programs buffer the block until a real Enter, so follow with
+`phux_send_keys` sending `Enter` to run it. Prefer this over
+`phux_send_keys` for multiline or indented text, which per-character typing
+would corrupt through the target's auto-indent. The CLI contract (trust
+default, `--untrusted` gate) is owned by [`agents.md`](./agents.md) §2.
+
+| Param | Type | Required | Meaning |
+|---|---|---|---|
+| `target` | string | yes | Selector (see §2). |
+| `text` | string | yes | The payload to paste, verbatim (newlines included). |
+| `untrusted` | boolean | no | Mark the payload untrusted; the pane's untrusted-paste policy (reject by default) may silently drop an unsafe payload. Default `false` — the caller vouches for content it composed. |
+| `socket` | string | no | Override the UDS path (see §2). |
+
+Result: `{ "sent": true, "pane": "<pane>", "untrusted": <bool> }`. `pane`
+is the canonical direct selector (`@N` or `host/@N`). A dropped untrusted
+payload still reports `sent: true` — the route was accepted; the drop is
+the pane's policy.
+
+### 3.13–3.22 Orchestration parity tools
 
 The remaining ten strict-schema tools execute the canonical `phux` CLI with
 argv (never a shell), parse its JSON or small documented text shape, cap each

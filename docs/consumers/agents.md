@@ -9,7 +9,7 @@ last-reviewed: 2026-07-15
 **TL;DR.** The structured CLI surface an AI agent drives without a TTY:
 create with `new`, place configured agents or explicit argv with `launch` /
 `spawn`, reshape exact existing panes with `insert-pane` / `move-pane` /
-`swap-pane`, act through `run` or `send-keys`, observe through bounded `wait` /
+`swap-pane`, act through `run`, `send-keys`, or `paste`, observe through bounded `wait` /
 `watch`, and raise advisory human attention with `ask`. Plugin, workspace, and
 satellite verbs provide the surrounding configuration and inventory surfaces.
 This file is the agent contract. Per ADR-0030, the structured agent state —
@@ -78,11 +78,11 @@ decision rationale lives in
 [ADR-0022](../../ADR/0022-tool-for-agents.md); client-side selector resolution
 in [ADR-0021](../../ADR/0021-control-plane-commands.md).
 
-**Viewport-safe against a live pane.** `snapshot`, `run`, `send-keys`, and
-`wait` neither attach nor resize the target pane: reads issue `GET_SCREEN`, and
-input rides `ROUTE_INPUT` to a pane id. `snapshot`/`wait` are side-effect-free;
-`run`/`send-keys` deliberately mutate the live PTY. None changes an attached
-human's local focus or viewport.
+**Viewport-safe against a live pane.** `snapshot`, `run`, `send-keys`,
+`paste`, and `wait` neither attach nor resize the target pane: reads issue
+`GET_SCREEN`, and input rides `ROUTE_INPUT` to a pane id. `snapshot`/`wait`
+are side-effect-free; `run`/`send-keys`/`paste` deliberately mutate the live
+PTY. None changes an attached human's local focus or viewport.
 
 ## 2. The structured CLI surface (verb catalog)
 
@@ -102,6 +102,27 @@ agent verbs and their JSON. Exit codes are collected in §5.2.
   required. No JSON. `KEYS` are tmux-shaped: named keys (`Enter`, `Tab`,
   `Escape`, `Up`, `C-c`, `M-x`) or a literal string sent character by
   character.
+- **`phux paste [--untrusted] [--socket P] TARGET [TEXT]`** — deliver a
+  payload to one resolved pane as a single paste event (`ROUTE_INPUT`).
+  `TARGET` is required; `TEXT` is the payload, read from stdin when omitted
+  (`git diff | phux paste review`). No JSON, like `send-keys`; exit codes
+  mirror `send-keys` (§5.2). The server picks the delivery form from the
+  pane's live terminal state: when the pane's program has bracketed paste
+  (DEC mode 2004) switched on, the payload arrives wrapped in `ESC[200~` /
+  `ESC[201~` markers as one block; otherwise the raw bytes are delivered as
+  if typed. **A paste INSERTS; it does not SUBMIT.** Paste-aware shells and
+  REPLs (bash on readline 8.1+, python 3.13+'s PyREPL) buffer the bracketed
+  block and wait for a real Enter — follow with
+  `phux send-keys TARGET Enter` to run what you pasted. Prefer `paste` over
+  `send-keys` for anything multiline or indented: `send-keys` types
+  character by character, so the target program's auto-indent reacts to
+  every newline and corrupts indented blocks, while a paste arrives intact.
+  Pastes are **trusted by default** — the agent vouches for content it
+  composed, the same ungated input authority `send-keys` has. `--untrusted`
+  opts into the server's safety gate: the payload is classified, and the
+  pane's untrusted-paste policy (reject, by default) may silently drop an
+  unsafe payload — notably anything multiline — so reserve the flag for
+  content you did not compose and cannot vouch for.
 - **`phux run [--timeout SECS] [--json] [--socket P] TARGET CMD...`** — run a
   command in a pane and capture its exit code, output, and duration via printed
   sentinels (assumes a POSIX shell: sh/bash/zsh). `TARGET` is required.
@@ -281,8 +302,8 @@ then the `PHUX_SOCKET` environment variable, then the daemon default:
 ## 3. Targeting: the selector grammar
 
 One grammar, every targeted command — `kill`, `snapshot`, `wait`, `watch`,
-`send-keys`, `run`, `ask`, launch/spawn placement, and the three spatial verbs
-all share `TARGET`.
+`send-keys`, `paste`, `run`, `ask`, launch/spawn placement, and the three
+spatial verbs all share `TARGET`.
 It is resolved client-side against a server snapshot ([ADR-0021](../../ADR/0021-control-plane-commands.md)); the server
 never parses a selector.
 
@@ -295,7 +316,7 @@ A selector that names several panes (a whole session or window) narrows to a
 single pane: the focused pane when it is among the matches, else the first in
 snapshot order (the `pick_target_pane` tiebreak the MCP tools share).
 Optionality differs per verb: `snapshot`, `wait`, and `watch` may omit a target;
-`send-keys`, `run`, `ask`, and every spatial verb require it. `launch`/`spawn`
+`send-keys`, `paste`, `run`, `ask`, and every spatial verb require it. `launch`/`spawn`
 use an optional target only for explicit local placement. Spatial and placement
 targets are stricter than the selected-pane tiebreak: each must resolve to one
 exact local pane.
@@ -779,6 +800,20 @@ driving an interactive or long-lived program." Because `run` mirrors the
 child's code (§5.2), `phux run ... && next` composes like a shell
 ([ADR-0022](../../ADR/0022-tool-for-agents.md) §3).
 
+When the input itself is a block of text — a heredoc body, an indented code
+snippet for a REPL, a multiline SQL statement — use `paste`, then submit
+explicitly:
+
+```sh
+phux paste repl "$(cat snippet.py)"
+phux send-keys repl Enter
+```
+
+`send-keys` would type the block character by character, letting the REPL's
+auto-indent mangle every indented line; `paste` delivers it as one bracketed
+block (when the pane's program supports DEC mode 2004) and the program
+inserts it verbatim, waiting for the explicit Enter.
+
 The fleet extension is discover → create → place → shape → act → observe →
 surface asks → verify. See the executable
 [`examples/agents/orchestrate-placed-fleet`](../../examples/agents/orchestrate-placed-fleet):
@@ -795,6 +830,7 @@ Exit codes are not uniform across verbs:
 | `ls` | `0` ok; `1` no server / unexpected result. |
 | `snapshot` | `0` ok; `1` failure (no server, serialize error, resolve miss). |
 | `send-keys` | `0` ok; `1` failure (no server / refused / miss). |
+| `paste` | `0` ok (including a paste the pane's untrusted policy silently dropped); `1` failure (no server / refused / miss / unreadable stdin). |
 | `ask` | `0` accepted; `1` no server, unknown pane, or invalid ask payload. |
 | `agent` | `0` ok; `1` no server, unknown pane, or JSON render failure. |
 | `run` | the child's own code clamped to `0..=255` (negative or `>255` saturate to `255`); `125` when phux gave up waiting for the sentinel (`--timeout`); `1` for no server / refused target / other. |
@@ -822,9 +858,9 @@ timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
 The CLI verbs here are the stable contract. The
 [OpenCode integration](./opencode.md) selects a host-specific six-tool subset;
 the [Pi integration](./pi.md) exposes nineteen bounded tools, including spatial
-placement and topology edits. The [MCP adapter](./mcp.md) exposes 21 strict
-tools, including launch/spawn, bounded watch, ask, spatial edits, agent state,
-and workspace parity, over JSON-RPC stdio. Adapter guides link here instead of
+placement and topology edits. The [MCP adapter](./mcp.md) exposes 22 strict
+tools, including paste, launch/spawn, bounded watch, ask, spatial edits, agent
+state, and workspace parity, over JSON-RPC stdio. Adapter guides link here instead of
 redefining CLI syntax.
 [`sdk.md`](./sdk.md) documents `phux-client`, the library crate those surfaces
 are built from. These adapters are unprivileged consumers
