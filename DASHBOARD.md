@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T19:09:53Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T19:11:25Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 122 | 61% | 13m29s | 17m15s | 1519 |
+| ci | 123 | 60% | 13m29s | 17m15s | 1519 |
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 18 | 100% | 40s | 52s | 26 |
-| conventional-commits | 114 | 87% | 15s | 20s | 21 |
+| conventional-commits | 115 | 86% | 15s | 20s | 21 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 121 | 2s | 13m19s | 17m06s |
-| check | 120 | 2s | 2m37s | 4m29s |
-| detect docs-only | 122 | 2s | 5s | 7s |
+| test | 122 | 2s | 13m18s | 17m02s |
+| check | 121 | 2s | 2m37s | 4m29s |
+| detect docs-only | 123 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -117,6 +117,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 19:11 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-15 19:11 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-15 19:01 | conventional-commits | pull_request | feat/phux-pair-qr | success | 14s | 11s |
 | 2026-07-15 18:53 | conventional-commits | pull_request | train/wave-2026-07-15 | success | 14s | 12s |
 | 2026-07-15 18:53 | conventional-commits | pull_request | train/wave-2026-07-15 | success | 13s | 10s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 18:22 | ci | pull_request | fix/attach-last-flake | success | 13m15s | 16m52s |
 | 2026-07-15 18:21 | ci | pull_request | fix/seed-pane-cwd | success | 17m04s | 19m31s |
 | 2026-07-15 18:21 | conventional-commits | pull_request | fix/seed-pane-cwd | success | 18s | 14s |
-| 2026-07-15 18:20 | conventional-commits | pull_request | fix/phux-socket-inject | success | 17s | 13s |
-| 2026-07-15 18:20 | ci | pull_request | fix/phux-socket-inject | success | 16m13s | 18m38s |
 
 ---
 
