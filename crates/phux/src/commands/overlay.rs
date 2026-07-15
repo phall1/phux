@@ -68,6 +68,18 @@ const TAILSCALE_DEADLINE: std::time::Duration = std::time::Duration::from_secs(2
 /// would hang `phux pair` with it, so the child is polled against the
 /// deadline and killed on expiry, degrading to the route probe.
 fn run_tailscale_ip(program: &std::ffi::OsStr) -> Option<String> {
+    run_tailscale_ip_with_deadline(program, TAILSCALE_DEADLINE)
+}
+
+/// [`run_tailscale_ip`] with the deadline injectable, so the happy-path
+/// round-trip test can use a bound generous enough to survive a loaded CI
+/// box (a `/bin/sh` stub can take over 2s just to spawn there) without
+/// loosening the production deadline. Deadline *behavior* is pinned
+/// separately by the wedged-stub test.
+fn run_tailscale_ip_with_deadline(
+    program: &std::ffi::OsStr,
+    deadline: std::time::Duration,
+) -> Option<String> {
     let mut child = std::process::Command::new(program)
         .args(["ip", "-4"])
         .stdin(std::process::Stdio::null())
@@ -76,7 +88,7 @@ fn run_tailscale_ip(program: &std::ffi::OsStr) -> Option<String> {
         .spawn()
         .ok()?;
 
-    let deadline = std::time::Instant::now() + TAILSCALE_DEADLINE;
+    let deadline = std::time::Instant::now() + deadline;
     let status = loop {
         match child.try_wait() {
             Ok(Some(status)) => break status,
@@ -202,7 +214,13 @@ mod tests {
         std::fs::set_permissions(&script, std::fs::Permissions::from_mode(0o755))
             .expect("chmod stub");
 
-        let out = run_tailscale_ip(script.as_os_str()).expect("stub output");
+        // Generous deadline: this test pins the spawn/parse round-trip, not
+        // deadline behavior (the wedged-stub test does that). Under full
+        // parallel nextest load the stub's /bin/sh spawn alone has been
+        // observed to blow the 2s production deadline and flake this test.
+        let out =
+            run_tailscale_ip_with_deadline(script.as_os_str(), std::time::Duration::from_secs(30))
+                .expect("stub output");
         assert_eq!(parse_tailscale_ip_output(&out), vec![ip("100.99.98.97")]);
     }
 
