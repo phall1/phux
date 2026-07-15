@@ -2218,6 +2218,7 @@ dependencies = [
 name = "phux-mcp"
 version = "0.2.0"
 dependencies = [
+ "bytes",
  "phux-client",
  "phux-config",
  "phux-core",

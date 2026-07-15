@@ -2,13 +2,10 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use phux_client::attach::connection::Connection;
-use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, SESSION_NAME_KEY, Scope,
-    StateScope,
-};
+use phux_protocol::wire::frame::{FrameKind, SESSION_NAME_KEY, Scope};
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{cli_runtime, command_on, report_no_server};
+use crate::commands::{cli_runtime, report_no_server};
 
 /// `phux rename SESSION NEW_NAME` — reassign a session's name.
 ///
@@ -40,20 +37,8 @@ pub(crate) fn run_rename(session: &str, new_name: &str, socket: Option<PathBuf>)
         // Validate against a fresh snapshot: the target must exist and the
         // new name must be free (the server enforces this too, but it has no
         // reply channel for SET_METADATA, so we surface the diagnostic here).
-        let snapshot = match command_on(
-            &mut conn,
-            0,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )
-        .await
-        {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-            Ok(other) => {
-                eprintln!("phux: unexpected GET_STATE result: {other:?}");
-                return ExitCode::from(2);
-            }
+        let snapshot = match phux_client::state::get_state_on(&mut conn).await {
+            Ok(snapshot) => snapshot,
             Err(err) => return report_no_server(&err, &socket_path, "rename"),
         };
 

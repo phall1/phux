@@ -12,14 +12,10 @@ use std::process::ExitCode;
 use phux_client::attach::connection::Connection;
 use phux_client::selector::{self, TagIndex};
 use phux_protocol::ids::TerminalId;
-use phux_protocol::wire::frame::{
-    Command as WireCommand, CommandResult, CommandValue, FrameKind, Scope, StateScope,
-    TERMINAL_TAGS_KEY,
-};
-use phux_protocol::wire::info::SessionSnapshot;
+use phux_protocol::wire::frame::{FrameKind, Scope, TERMINAL_TAGS_KEY};
 use phux_server::runtime::default_socket_path;
 
-use crate::commands::{TagAction, cli_runtime, command_on, report_no_server};
+use crate::commands::{TagAction, cli_runtime, report_no_server};
 
 /// Dispatch `phux tag <action>`.
 pub(crate) fn run_tag(action: &TagAction, socket: Option<std::path::PathBuf>) -> ExitCode {
@@ -46,26 +42,14 @@ pub(crate) fn run_tag(action: &TagAction, socket: Option<std::path::PathBuf>) ->
             Ok(conn) => conn,
             Err(err) => return report_no_server(&err, &socket_path, "tag"),
         };
-        let snapshot = match command_on(
-            &mut conn,
-            0,
-            WireCommand::GetState {
-                scope: StateScope::Server,
-            },
-        )
-        .await
-        {
-            Ok(CommandResult::OkWith(CommandValue::State(snap))) => snap,
-            Ok(other) => {
-                eprintln!("phux: unexpected GET_STATE result: {other:?}");
-                return ExitCode::FAILURE;
-            }
+        let snapshot = match phux_client::state::get_state_on(&mut conn).await {
+            Ok(snapshot) => snapshot,
             Err(err) => return report_no_server(&err, &socket_path, "tag"),
         };
 
         // `phux tag` resolves the target itself (it may be a `#tag` selector,
         // e.g. re-tagging a set), so it goes through the tag-aware resolver.
-        let index = fetch_tag_index(&mut conn, &snapshot).await;
+        let index = phux_client::state::fetch_tag_index(&mut conn, &snapshot).await;
         let targets = selector::resolve_with_tags(&selector, &snapshot, &index);
         if targets.is_empty() {
             eprintln!("phux: no such target: {target}");
@@ -184,59 +168,4 @@ async fn edit_tags<F: Fn(&mut Vec<String>)>(
         println!("@{}\t{}", local_id(id), confirmed.join(" "));
     }
     ExitCode::SUCCESS
-}
-
-/// Fetch the L3 tag index — `TerminalId` → its `phux.tags/v1` tags — for
-/// every pane in `snapshot`, over `conn`.
-///
-/// One `GET_METADATA` per pane, pipelined: all requests are sent first, then
-/// the `METADATA_VALUE` replies are collected by `request_id`. A pane with no
-/// tag key, an empty value, or a value that is not a JSON string array maps to
-/// no tags (absent from the index).
-pub(crate) async fn fetch_tag_index(conn: &mut Connection, snapshot: &SessionSnapshot) -> TagIndex {
-    let ids: Vec<TerminalId> = snapshot.panes.iter().map(|p| p.id.clone()).collect();
-    let mut index = TagIndex::new();
-    if ids.is_empty() {
-        return index;
-    }
-    // request_id base of 1 so the GET_STATE on request_id 0 (sent earlier on
-    // shared connections) never collides.
-    for (i, id) in ids.iter().enumerate() {
-        let request_id = u32::try_from(i).unwrap_or(u32::MAX).saturating_add(1);
-        if conn
-            .send(&FrameKind::GetMetadata {
-                request_id,
-                scope: Scope::Terminal(id.clone()),
-                key: TERMINAL_TAGS_KEY.to_owned(),
-            })
-            .await
-            .is_err()
-        {
-            return index; // server gone mid-flight: best-effort empty.
-        }
-    }
-    let mut remaining = ids.len();
-    while remaining > 0 {
-        match conn.recv().await {
-            Ok(FrameKind::MetadataValue { request_id, value }) => {
-                let Some(pos) = usize::try_from(request_id)
-                    .ok()
-                    .and_then(|r| r.checked_sub(1))
-                else {
-                    continue;
-                };
-                let Some(id) = ids.get(pos) else { continue };
-                remaining -= 1;
-                if let Some(bytes) = value
-                    && let Ok(tags) = serde_json::from_slice::<Vec<String>>(&bytes)
-                    && !tags.is_empty()
-                {
-                    index.insert(id.clone(), tags);
-                }
-            }
-            Ok(_) => {}      // unrelated interleaved frame: ignore
-            Err(_) => break, // transport closed: return what we have
-        }
-    }
-    index
 }
