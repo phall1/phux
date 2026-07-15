@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-15T10:19:11Z",
+  "generated_at": "2026-07-15T10:19:34Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "swarm/satellite-selectors",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:19:14Z",
+      "duration_s": 15,
+      "runner_s": 10
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "swarm/pi-parity",
+      "conclusion": "success",
+      "created_at": "2026-07-15T10:19:07Z",
+      "duration_s": 15,
+      "runner_s": 10
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-15T09:56:05Z",
       "duration_s": 828,
       "runner_s": 1068
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "swarm/remove-agent-facade",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:48:25Z",
-      "duration_s": 18,
-      "runner_s": 15
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "swarm/remove-agent-facade",
-      "conclusion": "success",
-      "created_at": "2026-07-15T09:48:25Z",
-      "duration_s": 967,
-      "runner_s": 1091
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 59,
+      "runs": 61,
       "success_rate": 92,
       "median_s": 16,
       "p95_s": 20,
-      "runner_minutes": 11
+      "runner_minutes": 12
     }
   ],
   "ci_jobs_30d": [
