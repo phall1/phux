@@ -1140,6 +1140,19 @@ pub(crate) enum SatelliteAction {
     },
 }
 
+/// Fail fast when `socket_path` cannot fit in a `sockaddr_un` (phux-iwuc).
+///
+/// A too-long path can never bind or connect, so naming the platform's
+/// UDS path-length limit here beats the downstream misdirection (a 2s
+/// auto-spawn timeout, or a raw "path must be shorter than `SUN_LEN`").
+/// Prints the diagnostic and returns the failure exit code to bubble.
+pub(crate) fn ensure_socket_path_fits(socket_path: &Path) -> Result<(), ExitCode> {
+    phux_server::runtime::validate_socket_path_len(socket_path).map_err(|err| {
+        eprintln!("phux: {err}");
+        ExitCode::FAILURE
+    })
+}
+
 /// Build a current-thread tokio runtime, or print why and return the
 /// failure exit code.
 pub(crate) fn cli_runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
