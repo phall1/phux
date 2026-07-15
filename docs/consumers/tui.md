@@ -1888,7 +1888,13 @@ Beyond that, two client-rendered overlays teach the bindings themselves
 (the TUI owns its chrome — nothing here is server-rendered):
 
 - `C-a ?` opens the **help modal**, a centered reference listing every
-  prefix-table and global binding. Esc (or `?` again) dismisses it.
+  prefix-table and global binding. A table taller than the modal scrolls —
+  arrows / `j` / `k` / `C-n` / `C-p` step a row, `PageUp` / `PageDown` a
+  screenful, `Home` / `End` jump to the ends, the wheel scrolls a detent,
+  and an overflowing table paints a scrollbar in the right border column
+  (the window is counted in wrapped display rows, so long action labels
+  that fold onto a second row are budgeted for). Esc (or `?` again)
+  dismisses it.
 - Press `C-a` and *hesitate*, and the **which-key popup** appears after
   `which-key-delay-ms` (default 600 ms), listing the available prefix
   continuations. Any key dismisses it and executes normally; Esc cancels
