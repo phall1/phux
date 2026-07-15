@@ -13,15 +13,21 @@ const phux = process.env.PHUX ?? "phux";
 const temp = await mkdtemp(join(tmpdir(), "phux-pi-real-smoke-"));
 const socket = join(temp, "runtime", "phux.sock");
 const session = "pi-package-smoke";
-const env = {
-  ...process.env,
+const env = { ...process.env };
+for (const name of [
+  "PHUX_WS_ADDR", "PHUX_QUIC_ADDR", "PHUX_WT_ADDR",
+  "PHUX_WS_TLS_CERT", "PHUX_WS_TLS_KEY", "PHUX_WS_TOKENS",
+]) {
+  delete env[name];
+}
+Object.assign(env, {
   PHUX_SOCKET: socket,
   XDG_CACHE_HOME: join(temp, "cache"),
   XDG_CONFIG_HOME: join(temp, "config"),
   XDG_DATA_HOME: join(temp, "data"),
   XDG_RUNTIME_DIR: join(temp, "runtime"),
   XDG_STATE_HOME: join(temp, "state"),
-};
+});
 let server;
 let serverStderr = "";
 let cleanupPromise;
