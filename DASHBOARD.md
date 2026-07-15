@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T18:05:30Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T18:05:45Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 17 | 100% | 40s | 52s | 25 |
-| conventional-commits | 91 | 87% | 16s | 20s | 17 |
+| conventional-commits | 93 | 86% | 16s | 20s | 17 |
 
 ## ci jobs, last 30 days
 
@@ -117,8 +117,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-15 18:05 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 10s |
 | 2026-07-15 18:05 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 18:05 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
+| 2026-07-15 18:05 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 25s | 11s |
 | 2026-07-15 18:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 18s | 14s |
 | 2026-07-15 18:04 | release-please | push | main | success | 43s | 37s |
 | 2026-07-15 17:59 | conventional-commits | pull_request | feat/phux-pair-qr | success | 20s | 14s |
@@ -145,8 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 11:27 | release-please | push | main | success | 40s | 34s |
 | 2026-07-15 11:27 | observatory | push | main | success | 12m25s | 24m05s |
 | 2026-07-15 11:27 | ci | push | main | success | 16m13s | 20m33s |
-| 2026-07-15 11:12 | conventional-commits | pull_request | swarm/spatial-final | success | 18s | 10s |
-| 2026-07-15 11:11 | conventional-commits | pull_request | swarm/spatial-final | cancelled | 14s | 10s |
 
 ---
 
