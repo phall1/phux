@@ -217,11 +217,10 @@ When the server receives an `INPUT_KEY`:
 
 1. Translate the wire `KeyEvent` into a `libghostty::key::Event` —
    every field maps one-to-one.
-2. Refresh the encoder's options against the current terminal state via
-   `Encoder::set_options_from_terminal(&terminal)`. This pulls cursor-
-   key application mode, keypad mode, alt-esc-prefix, modifyOtherKeys,
-   and KIP progressive-enhancement flags from the terminal's current
-   modes.
+2. Apply the latest actor-published terminal option snapshot to the encoder.
+   libghostty captures this exact `Send` value from the terminal state; it
+   includes cursor-key/keypad application, alt-esc-prefix, modifyOtherKeys,
+   backarrow/numlock behavior, and KIP progressive-enhancement flags.
 3. Call `Encoder::encode_to_vec(&event, &mut buf)`.
 4. Write `buf` to the Terminal's PTY.
 
@@ -305,10 +304,10 @@ URXVT) and pixel-format (SGR-Pixels) mouse protocols.
 
 ### 3.2 Server-side encoding pipeline
 
-Identical in spirit to §2.6: each Terminal has a
-`libghostty_vt::mouse::Encoder`. On `INPUT_MOUSE`, the server refreshes
-the encoder via `set_options_from_terminal`, sets the encoder's
-`EncoderSize` from current Terminal/cell geometry, builds a
+Identical in spirit to §2.6: each Terminal has a lane-owned
+`libghostty_vt::mouse::Encoder`. On `INPUT_MOUSE`, the server applies the
+latest libghostty-captured effective tracking/format snapshot, sets
+`EncoderSize` from snapshotted Terminal/cell geometry, builds a
 `libghostty::mouse::Event`, encodes, and writes to PTY.
 
 ---

@@ -1737,10 +1737,10 @@ pub(crate) async fn handle_get_terminal_state(
 /// Build the `Ok` reply for `ROUTE_INPUT`.
 ///
 /// The write counterpart to [`handle_get_screen`]: it resolves the wire id
-/// to its pane actor and feeds the already-built input event straight into
-/// the pane's input mailbox — the same mailbox `handle_terminal_input`
-/// targets, but with no attach / subscription gate and, crucially, no
-/// resize. So unlike the ATTACH-then-`INPUT_KEY` path, routing input here
+/// to its pane actor with no attach / subscription gate and, crucially, no
+/// resize. Production routes through the dedicated lane's encoder; the inline
+/// path used by direct-drive tests feeds the actor's legacy event mailbox.
+/// Unlike the ATTACH-then-`INPUT_KEY` path, routing input here
 /// never transiently shrinks the pane to the caller's viewport; the live
 /// dimensions are preserved (ADR-0022, `phux-3j3`).
 ///
@@ -1758,69 +1758,90 @@ pub(crate) async fn handle_get_terminal_state(
 /// control-plane caller. `client_id` is kept for that future policy and for
 /// the observability trace below.
 ///
-/// `try_send` is non-blocking for the same single-threaded-runtime reason
-/// as `handle_terminal_input`: input is fire-and-forget per SPEC §9, so a
+/// Both the lane's encoded-byte handoff and the inline fallback use
+/// non-blocking `try_send`: input is fire-and-forget per SPEC §9, so a
 /// full mailbox drops the event rather than blocking the read loop. The
 /// command still acks `Ok` (the event was accepted for delivery); an
 /// unknown Terminal or a gone actor produces an `Error`.
+#[derive(Debug)]
+pub(crate) struct InputDestination {
+    pub(crate) pane: phux_core::ids::TerminalId,
+    pub(crate) handle: TerminalHandle,
+}
+
+/// Resolve and lease-gate a local headless destination, then run `action`
+/// while the authority lock remains held.
+pub(crate) fn with_route_input_destination<R>(
+    state: &SharedState,
+    client_id: ClientId,
+    terminal_id: &phux_protocol::ids::TerminalId,
+    action: impl FnOnce(InputDestination) -> R,
+) -> Result<R, CommandResult> {
+    if !terminal_id.is_local() {
+        return Err(CommandResult::Error {
+            code: ErrorCode::UnsupportedSatelliteRoute,
+            message: format!("ROUTE_INPUT to satellite route unsupported: {terminal_id:?}"),
+        });
+    }
+    state.with(|s| {
+        let Some(pane) = s.terminal_from_wire(terminal_id) else {
+            return Err(CommandResult::Error {
+                code: ErrorCode::TerminalNotFound,
+                message: format!("no such terminal: {terminal_id:?}"),
+            });
+        };
+        if s.input_blocked(pane, client_id) {
+            debug!(
+                ?client_id,
+                ?terminal_id,
+                "ROUTE_INPUT blocked: another client holds the input lease (ADR-0033)"
+            );
+            return Err(CommandResult::Error {
+                code: ErrorCode::InputLeaseHeld,
+                message: "input lease held by another client".to_owned(),
+            });
+        }
+        let Some(handle) = s.terminal_handle(pane).cloned() else {
+            return Err(CommandResult::Error {
+                code: ErrorCode::TerminalNotFound,
+                message: format!("no such terminal: {terminal_id:?}"),
+            });
+        };
+        Ok(action(InputDestination { pane, handle }))
+    })
+}
+
+pub(crate) fn terminal_input_from_event(event: InputEvent) -> Result<TerminalInput, CommandResult> {
+    match event {
+        InputEvent::Key(event) => Ok(TerminalInput::Key(event)),
+        InputEvent::Mouse(event) => Ok(TerminalInput::Mouse(event)),
+        InputEvent::Focus(event) => Ok(TerminalInput::Focus(event)),
+        InputEvent::Paste(event) => Ok(TerminalInput::Paste(event)),
+        _ => Err(CommandResult::Error {
+            code: ErrorCode::InvalidCommand,
+            message: "unsupported ROUTE_INPUT event".to_owned(),
+        }),
+    }
+}
+
 pub(crate) fn handle_route_input(
     state: &SharedState,
     client_id: ClientId,
     terminal_id: &phux_protocol::ids::TerminalId,
     event: InputEvent,
 ) -> CommandResult {
-    // v0.1 non-federation-hub servers reject SATELLITE-routed input
-    // (ADR-0016 / SPEC §10.1), matching `handle_terminal_input`.
-    if !terminal_id.is_local() {
-        return CommandResult::Error {
-            code: ErrorCode::UnsupportedSatelliteRoute,
-            message: format!("ROUTE_INPUT to satellite route unsupported: {terminal_id:?}"),
-        };
-    }
-    // Resolve the wire id to its (Send) Terminal handle in one lock; we
-    // never await inside the lock. No subscription/role gate: ROUTE_INPUT is
-    // the headless agent path (see the doc comment) and must work without an
-    // attach. But the input lease DOES gate it (ADR-0033): if a human has
-    // taken the wheel, the automated ROUTE_INPUT path is locked out too —
-    // that is the whole point of seizing input authority over an agent.
-    let resolved = state.with(|s| {
-        let core = s.terminal_from_wire(terminal_id)?;
-        let blocked = s.input_blocked(core, client_id);
-        s.terminal_handle(core).cloned().map(|h| (h, blocked))
-    });
-    let Some((handle, blocked)) = resolved else {
-        return CommandResult::Error {
-            code: ErrorCode::TerminalNotFound,
-            message: format!("no such terminal: {terminal_id:?}"),
-        };
-    };
-    if blocked {
-        debug!(
-            ?client_id,
-            ?terminal_id,
-            "ROUTE_INPUT blocked: another client holds the input lease (ADR-0033)"
-        );
-        return CommandResult::Error {
-            code: ErrorCode::InputLeaseHeld,
-            message: "input lease held by another client".to_owned(),
-        };
-    }
     debug!(?client_id, ?terminal_id, "ROUTE_INPUT delivering input");
-    let input = match event {
-        InputEvent::Key(event) => TerminalInput::Key(event),
-        InputEvent::Mouse(event) => TerminalInput::Mouse(event),
-        InputEvent::Focus(event) => TerminalInput::Focus(event),
-        InputEvent::Paste(event) => TerminalInput::Paste(event),
-        // `InputEvent` is `#[non_exhaustive]`; a future atom a newer peer
-        // sends is not yet routable here.
-        _ => {
-            return CommandResult::Error {
-                code: ErrorCode::InvalidCommand,
-                message: "unsupported ROUTE_INPUT event".to_owned(),
-            };
-        }
+    let input = match terminal_input_from_event(event) {
+        Ok(input) => input,
+        Err(result) => return result,
     };
-    match handle.input.try_send(input) {
+    let send = match with_route_input_destination(state, client_id, terminal_id, |destination| {
+        destination.handle.input.try_send(input)
+    }) {
+        Ok(send) => send,
+        Err(result) => return result,
+    };
+    match send {
         Ok(()) => CommandResult::Ok,
         Err(tokio::sync::mpsc::error::TrySendError::Full(_)) => {
             warn!(
@@ -2384,6 +2405,60 @@ fn relay_satellite_input(
     }
 }
 
+/// Apply subscription, lease, and activity gates for attached local input,
+/// then running `action` with the generational pane and current actor handle
+/// while the authority lock remains held.
+pub(crate) fn with_attached_input_destination<R>(
+    state: &SharedState,
+    client_id: ClientId,
+    wire_terminal_id: &phux_protocol::ids::TerminalId,
+    frame_label: &'static str,
+    action: impl FnOnce(InputDestination) -> R,
+) -> Option<R> {
+    state.with_mut(|s| {
+        let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                frame_label,
+                "input frame for unknown pane; dropping"
+            );
+            return None;
+        };
+        if !s.subscribers_for_terminal(pane).contains(&client_id) {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                frame_label,
+                "client not subscribed to pane (no ATTACH or ATTACH_TERMINAL); dropping input"
+            );
+            return None;
+        }
+        if s.input_blocked(pane, client_id) {
+            trace!(
+                ?client_id,
+                ?wire_terminal_id,
+                frame_label,
+                "input dropped: another client holds the input lease"
+            );
+            return None;
+        }
+        if let Some(attached) = s.attached.get(&client_id) {
+            s.touch_session(attached.session);
+        }
+        let Some(handle) = s.terminal_handle(pane).cloned() else {
+            warn!(
+                ?client_id,
+                ?wire_terminal_id,
+                frame_label,
+                "no TerminalHandle for pane; dropping input"
+            );
+            return None;
+        };
+        Some(action(InputDestination { pane, handle }))
+    })
+}
+
 pub(crate) fn handle_terminal_input(
     state: &SharedState,
     client_id: ClientId,
@@ -2412,62 +2487,12 @@ pub(crate) fn handle_terminal_input(
         input,
         TerminalInput::Focus(phux_protocol::input::focus::FocusEvent::Gained)
     );
-    let routed = state.with_mut(|s| {
-        let Some(pane) = s.terminal_from_wire(wire_terminal_id) else {
-            warn!(
-                ?client_id,
-                ?wire_terminal_id,
-                frame_label,
-                "input frame for unknown pane; dropping",
-            );
-            return false;
-        };
-        // Subscription gate: the pane must be one the client is observing.
-        // Both subscription paths register here — the session-scoped
-        // ATTACH (byc.8's "panes of the attached session") and the
-        // per-terminal ATTACH_TERMINAL (phux-v45.7), which has no session
-        // attachment at all: the federation hub's link consumer drives
-        // satellite panes through exactly that shape, so requiring an
-        // `attached` entry would gate every relayed two-hop keystroke.
-        let is_subscribed = s.subscribers_for_terminal(pane).contains(&client_id);
-        if !is_subscribed {
-            warn!(
-                ?client_id,
-                ?wire_terminal_id,
-                frame_label,
-                "client not subscribed to pane (no ATTACH or ATTACH_TERMINAL); dropping input",
-            );
-            return false;
-        }
-        // Input-lease gate (ADR-0033, "take the wheel"): when another client
-        // holds the lease, drop this client's input. Dropped, not errored —
-        // the fire-and-forget input invariant (SPEC §12.2) holds, and the
-        // client renders the locked state from the `TerminalControl` event.
-        if s.input_blocked(pane, client_id) {
-            trace!(
-                ?client_id,
-                ?wire_terminal_id,
-                frame_label,
-                "input dropped: another client holds the input lease",
-            );
-            return false;
-        }
-        // Session activity is only meaningful for session-attached
-        // clients; an ATTACH_TERMINAL consumer has no session to touch.
-        if let Some(attached) = s.attached.get(&client_id) {
-            let session = attached.session;
-            s.touch_session(session);
-        }
-        let Some(handle): Option<&TerminalHandle> = s.terminal_handle(pane) else {
-            warn!(
-                ?client_id,
-                ?wire_terminal_id,
-                frame_label,
-                "no TerminalHandle for pane; dropping input",
-            );
-            return false;
-        };
-        match handle.input.try_send(input) {
+    let Some(routed) = with_attached_input_destination(
+        state,
+        client_id,
+        wire_terminal_id,
+        frame_label,
+        |destination| match destination.handle.input.try_send(input) {
             Ok(()) => {
                 trace!(
                     ?client_id,
@@ -2482,7 +2507,7 @@ pub(crate) fn handle_terminal_input(
                     ?client_id,
                     ?wire_terminal_id,
                     frame_label,
-                    "pane input mailbox full; dropping (fire-and-forget per SPEC §9)",
+                    "pane input mailbox full; dropping (fire-and-forget per SPEC §9)"
                 );
                 false
             }
@@ -2491,12 +2516,14 @@ pub(crate) fn handle_terminal_input(
                     ?client_id,
                     ?wire_terminal_id,
                     frame_label,
-                    "pane actor gone; dropping input",
+                    "pane actor gone; dropping input"
                 );
                 false
             }
-        }
-    });
+        },
+    ) else {
+        return;
+    };
     if routed && is_focus_gained {
         crate::hooks::fire_hook(
             state,
