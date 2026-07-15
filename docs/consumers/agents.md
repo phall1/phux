@@ -820,8 +820,9 @@ timeout. `kill` is a control-plane verb (not strictly an agent read) but shares
 ## 6. Relationship to the other agent surfaces
 
 The CLI verbs here are the stable contract. The
-[OpenCode integration](./opencode.md) and [Pi integration](./pi.md) each select
-a host-specific six-tool subset. The [MCP adapter](./mcp.md) exposes 21 strict
+[OpenCode integration](./opencode.md) selects a host-specific six-tool subset;
+the [Pi integration](./pi.md) exposes nineteen bounded tools, including spatial
+placement and topology edits. The [MCP adapter](./mcp.md) exposes 21 strict
 tools, including launch/spawn, bounded watch, ask, spatial edits, agent state,
 and workspace parity, over JSON-RPC stdio. Adapter guides link here instead of
 redefining CLI syntax.

@@ -11,24 +11,30 @@ import {
   parseAgentStateList,
   parseAskedEvent,
   parseCreateResult,
+  parseInsertPaneResult,
   parseLaunchResult,
+  parseMovePaneResult,
   parseRenderedFrame,
   parseRunResult,
   parseScreenState,
   parseSessionList,
   parseSpawnResult,
+  parseSwapPaneResult,
   parseWatchEvent,
   SchemaValidationError,
   type AgentRecord,
   type AgentStateList,
   type AskedEvent,
   type CreateResult,
+  type InsertPaneResult,
   type LaunchResult,
+  type MovePaneResult,
   type RenderedFrame,
   type RunResult,
   type ScreenState,
   type SessionList,
   type SpawnResult,
+  type SwapPaneResult,
   type TagRow,
   type WatchEvent,
 } from "./schemas.js";
@@ -83,15 +89,28 @@ export interface AgentTargetOptions extends ExecutionOptions {
   readonly target: string;
 }
 
-export interface SpawnOptions extends ExecutionOptions {
+export type SplitDirection = "horizontal" | "vertical";
+
+export interface PlacementOptions {
+  readonly target?: string;
+  readonly split?: SplitDirection;
+  readonly ratio?: number;
+}
+
+export interface SpawnOptions extends ExecutionOptions, PlacementOptions {
   readonly satellite?: string;
   readonly cwd?: string;
   readonly command?: readonly string[];
 }
 
-export interface LaunchOptions extends ExecutionOptions {
+export interface LaunchOptions extends ExecutionOptions, PlacementOptions {
   readonly cwd?: string;
   readonly extra?: readonly string[];
+}
+
+export interface SpatialOptions extends ExecutionOptions {
+  readonly direction?: SplitDirection;
+  readonly ratio?: number;
 }
 
 export interface RenderedSnapshotOptions extends ExecutionOptions {
@@ -218,8 +237,12 @@ export class PhuxCli {
   }
 
   async spawn(options: SpawnOptions = {}): Promise<SpawnResult> {
+    validatePlacement(options, true);
     const args = ["spawn", "--json"];
     if (options.satellite !== undefined) args.push("--satellite", options.satellite);
+    if (options.target !== undefined) args.push("--target", options.target);
+    if (options.split !== undefined) args.push("--split", options.split);
+    if (options.ratio !== undefined) args.push("--ratio", String(options.ratio));
     if (options.cwd !== undefined) args.push("--cwd", options.cwd);
     this.pushSocket(args);
     if (options.command !== undefined) {
@@ -231,7 +254,11 @@ export class PhuxCli {
 
   async launch(integration: string, options: LaunchOptions = {}): Promise<LaunchResult> {
     if (integration.trim().length === 0) throw new TypeError("integration must be non-empty");
+    validatePlacement(options, false);
     const args = ["launch", "--json"];
+    if (options.target !== undefined) args.push("--target", options.target);
+    if (options.split !== undefined) args.push("--split", options.split);
+    if (options.ratio !== undefined) args.push("--ratio", String(options.ratio));
     if (options.cwd !== undefined) args.push("--cwd", options.cwd);
     this.pushSocket(args);
     args.push(integration);
@@ -240,6 +267,44 @@ export class PhuxCli {
       args.push("--", ...options.extra);
     }
     return this.jsonCommand("launch", args, options, parseLaunchResult);
+  }
+
+  async insertPane(
+    target: string,
+    newPane: string,
+    options: SpatialOptions = {},
+  ): Promise<InsertPaneResult> {
+    validateSpatial(target, newPane, options);
+    const args = ["insert-pane", "--json"];
+    pushSpatialGeometry(args, options);
+    this.pushSocket(args);
+    args.push(target, newPane);
+    return this.jsonCommand("insert-pane", args, options, parseInsertPaneResult);
+  }
+
+  async movePane(
+    source: string,
+    target: string,
+    options: SpatialOptions = {},
+  ): Promise<MovePaneResult> {
+    validateSpatial(source, target, options);
+    const args = ["move-pane", "--json"];
+    pushSpatialGeometry(args, options);
+    this.pushSocket(args);
+    args.push(source, target);
+    return this.jsonCommand("move-pane", args, options, parseMovePaneResult);
+  }
+
+  async swapPane(
+    first: string,
+    second: string,
+    options: ExecutionOptions = {},
+  ): Promise<SwapPaneResult> {
+    validateDistinctTargets(first, second);
+    const args = ["swap-pane", "--json"];
+    this.pushSocket(args);
+    args.push(first, second);
+    return this.jsonCommand("swap-pane", args, options, parseSwapPaneResult);
   }
 
   /** Read one pane's public projection, including declared-record provenance. */
@@ -630,6 +695,57 @@ function isMissingExecutable(error: unknown): boolean {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+const SATELLITE_PANE_SELECTOR = /^[^/\s]+\/@\d+$/;
+
+function validatePlacement(options: PlacementOptions & { readonly satellite?: string }, allowSatellite: boolean): void {
+  if (options.target === undefined && (options.split !== undefined || options.ratio !== undefined)) {
+    throw new TypeError("target is required when split or ratio is provided");
+  }
+  if (options.target !== undefined) {
+    if (options.target.trim().length === 0) throw new TypeError("target must be non-empty");
+    if (SATELLITE_PANE_SELECTOR.test(options.target)) {
+      throw new TypeError("explicit placement is local-only; satellite pane targets are unsupported");
+    }
+  }
+  if (options.satellite !== undefined) {
+    if (!allowSatellite) throw new TypeError("satellite is not supported for launch placement");
+    if (options.target !== undefined) throw new TypeError("satellite and target placement cannot be combined");
+  }
+  if (options.split !== undefined && options.split !== "horizontal" && options.split !== "vertical") {
+    throw new TypeError("split must be horizontal or vertical");
+  }
+  if (options.ratio !== undefined) requireRatio(options.ratio);
+}
+
+function validateSpatial(first: string, second: string, options: SpatialOptions): void {
+  validateDistinctTargets(first, second);
+  if (options.direction !== undefined && options.direction !== "horizontal" && options.direction !== "vertical") {
+    throw new TypeError("direction must be horizontal or vertical");
+  }
+  if (options.ratio !== undefined) requireRatio(options.ratio);
+}
+
+function validateDistinctTargets(first: string, second: string): void {
+  if (first.trim().length === 0 || second.trim().length === 0) {
+    throw new TypeError("spatial targets must be non-empty");
+  }
+  if (first === second) throw new TypeError("spatial actions require two distinct targets");
+  if (SATELLITE_PANE_SELECTOR.test(first) || SATELLITE_PANE_SELECTOR.test(second)) {
+    throw new TypeError("spatial actions require local pane targets");
+  }
+}
+
+function pushSpatialGeometry(args: string[], options: SpatialOptions): void {
+  if (options.direction !== undefined) args.push(`--${options.direction}`);
+  if (options.ratio !== undefined) args.push("--ratio", String(options.ratio));
+}
+
+function requireRatio(value: number): void {
+  if (!Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new RangeError("ratio must be finite and strictly between 0 and 1");
+  }
 }
 
 function requireNonNegativeInteger(value: number, name: string): void {

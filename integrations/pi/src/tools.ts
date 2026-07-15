@@ -14,6 +14,9 @@ import { PhuxTargetStore, type PhuxTargetSelection } from "./target-store.js";
 const TARGET = Type.Optional(Type.String({ minLength: 1, maxLength: 512, pattern: ".*\\S.*", description: "Explicit CLI selector or alias:name; otherwise use the selected /phux target" }));
 const REQUIRED_TARGET = Type.String({ minLength: 1, maxLength: 512, pattern: ".*\\S.*", description: "CLI selector, alias:name, or (where documented) group:name" });
 const TARGET_NAME = Type.String({ minLength: 1, maxLength: 64, pattern: "^[A-Za-z][A-Za-z0-9_-]{0,63}$" });
+const PLACEMENT_TARGET = Type.String({ minLength: 1, maxLength: 512, pattern: ".*\\S.*", description: "Exact local CLI pane selector or alias:name" });
+const SPLIT = Type.Optional(Type.Union([Type.Literal("horizontal"), Type.Literal("vertical")]));
+const RATIO = Type.Optional(Type.Number({ exclusiveMinimum: 0, exclusiveMaximum: 1 }));
 const LOCAL_TIMEOUT = Type.Optional(Type.Integer({ minimum: 1, maximum: 3_600_000, description: "Local subprocess timeout in milliseconds" }));
 const RUN_TIMEOUT = Type.Optional(Type.Integer({ minimum: 0, maximum: 86_400, description: "phux run timeout in seconds; 0 waits indefinitely" }));
 const WAIT_TIMEOUT = Type.Optional(Type.Integer({ minimum: 1, maximum: 86_400, description: "phux wait timeout in seconds; omit to wait indefinitely" }));
@@ -52,18 +55,52 @@ export const PhuxWaitParams = Type.Object({
   local_timeout_ms: LOCAL_TIMEOUT,
 }, { ...STRICT, not: { required: ["until", "idle_ms"] } });
 export const PhuxPanesParams = Type.Object({}, STRICT);
-export const PhuxSpawnParams = Type.Object({
-  satellite: Type.Optional(Type.String({ minLength: 1, maxLength: 255, pattern: ".*\\S.*" })),
+const SPAWN_COMMON = {
   cwd: Type.Optional(Type.String({ minLength: 1, pattern: ".*\\S.*" })),
   command: Type.Optional(NONEMPTY_ARGV),
   alias: Type.Optional(TARGET_NAME),
   local_timeout_ms: LOCAL_TIMEOUT,
-}, STRICT);
-export const PhuxLaunchParams = Type.Object({
+};
+export const PhuxSpawnParams = Type.Union([
+  Type.Object({
+    ...SPAWN_COMMON,
+    satellite: Type.Optional(Type.String({ minLength: 1, maxLength: 255, pattern: ".*\\S.*" })),
+  }, STRICT),
+  Type.Object({
+    ...SPAWN_COMMON,
+    target: PLACEMENT_TARGET,
+    split: SPLIT,
+    ratio: RATIO,
+  }, STRICT),
+]);
+const LAUNCH_COMMON = {
   integration: Type.String({ minLength: 1, maxLength: 255, pattern: ".*\\S.*" }),
   cwd: Type.Optional(Type.String({ minLength: 1, pattern: ".*\\S.*" })),
   extra: Type.Optional(NONEMPTY_ARGV),
   alias: Type.Optional(TARGET_NAME),
+  local_timeout_ms: LOCAL_TIMEOUT,
+};
+export const PhuxLaunchParams = Type.Union([
+  Type.Object(LAUNCH_COMMON, STRICT),
+  Type.Object({ ...LAUNCH_COMMON, target: PLACEMENT_TARGET, split: SPLIT, ratio: RATIO }, STRICT),
+]);
+export const PhuxInsertPaneParams = Type.Object({
+  target: PLACEMENT_TARGET,
+  new_pane: PLACEMENT_TARGET,
+  direction: Type.Optional(Type.Union([Type.Literal("horizontal"), Type.Literal("vertical")])),
+  ratio: RATIO,
+  local_timeout_ms: LOCAL_TIMEOUT,
+}, STRICT);
+export const PhuxMovePaneParams = Type.Object({
+  source: PLACEMENT_TARGET,
+  target: PLACEMENT_TARGET,
+  direction: Type.Optional(Type.Union([Type.Literal("horizontal"), Type.Literal("vertical")])),
+  ratio: RATIO,
+  local_timeout_ms: LOCAL_TIMEOUT,
+}, STRICT);
+export const PhuxSwapPaneParams = Type.Object({
+  first: PLACEMENT_TARGET,
+  second: PLACEMENT_TARGET,
   local_timeout_ms: LOCAL_TIMEOUT,
 }, STRICT);
 export const PhuxKillParams = Type.Object({
@@ -123,7 +160,7 @@ const MODEL_TRUNCATION_NOTICE = `[Pi adapter truncated terminal output to the la
 const PHUX_TRUNCATION_NOTICE = "[phux reported that terminal output was already truncated]";
 
 export interface PhuxToolDetails {
-  readonly operation: "list" | "panes" | "create" | "spawn" | "launch" | "snapshot" | "rendered_snapshot" | "send_keys" | "run" | "wait" | "kill" | "signal" | "tag" | "ask" | "watch" | "targets";
+  readonly operation: "list" | "panes" | "create" | "spawn" | "launch" | "insert_pane" | "move_pane" | "swap_pane" | "snapshot" | "rendered_snapshot" | "send_keys" | "run" | "wait" | "kill" | "signal" | "tag" | "ask" | "watch" | "targets";
   readonly summary: string;
   readonly target?: string;
   readonly selection?: PhuxTargetSelection;
@@ -309,12 +346,23 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
   pi.registerTool({
     name: "phux_spawn",
     label: "phux spawn",
-    description: "Spawn a pane through phux without attaching. Optionally bind its validated canonical selector to a branch-local alias.",
-    promptSnippet: "Spawn and optionally name a shared terminal pane",
+    description: "Spawn a pane through phux without attaching. Optional target/split/ratio performs local placement; split or ratio requires target and satellite placement is rejected. Optionally bind the validated result to a branch-local alias.",
+    promptSnippet: "Spawn, place, and optionally name a shared terminal pane",
     parameters: PhuxSpawnParams,
     async execute(_id, params, signal) {
+      const requestedTarget = "target" in params ? params.target : undefined;
+      const placementTarget = requestedTarget === undefined
+        ? undefined
+        : await resolvePlacementTarget(requestedTarget, store, signal);
+      const satellite = "satellite" in params ? params.satellite : undefined;
+      const split = "split" in params ? params.split : undefined;
+      const ratio = "ratio" in params ? params.ratio : undefined;
+      validateToolPlacement(placementTarget, split, ratio, satellite);
       const spawned = await cli.spawn({
-        ...(params.satellite === undefined ? {} : { satellite: params.satellite }),
+        ...(satellite === undefined ? {} : { satellite }),
+        ...(placementTarget === undefined ? {} : { target: placementTarget }),
+        ...(split === undefined ? {} : { split }),
+        ...(ratio === undefined ? {} : { ratio }),
         ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
         ...(params.command === undefined ? {} : { command: params.command }),
         ...execution(params, signal),
@@ -330,18 +378,28 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
         operation: "spawn", summary: `spawned ${target}${aliasWarning === null ? "" : " (alias not saved)"}`, target,
       });
     },
-    renderCall: (args, theme) => callText(theme, `spawn${args.alias === undefined ? " pane" : ` alias:${args.alias}`}`),
+    renderCall: (args, theme) => callText(theme, `spawn${"target" in args ? ` beside ${args.target}` : " pane"}${args.alias === undefined ? "" : ` alias:${args.alias}`}`),
     renderResult: renderSummary,
   });
 
   pi.registerTool({
     name: "phux_launch",
     label: "phux launch",
-    description: "Launch a configured integration through phux's versioned JSON result. Validates but never displays the resolved argv, which may contain sensitive arguments.",
-    promptSnippet: "Launch a configured agent integration in a pane",
+    description: "Launch a configured integration through phux's versioned JSON result, optionally placed beside one exact local pane. Split or ratio requires target. Validates but never displays resolved argv, which may contain sensitive arguments.",
+    promptSnippet: "Launch and optionally place a configured agent integration",
     parameters: PhuxLaunchParams,
     async execute(_id, params, signal) {
+      const requestedTarget = "target" in params ? params.target : undefined;
+      const placementTarget = requestedTarget === undefined
+        ? undefined
+        : await resolvePlacementTarget(requestedTarget, store, signal);
+      const split = "split" in params ? params.split : undefined;
+      const ratio = "ratio" in params ? params.ratio : undefined;
+      validateToolPlacement(placementTarget, split, ratio);
       const launched = await cli.launch(params.integration, {
+        ...(placementTarget === undefined ? {} : { target: placementTarget }),
+        ...(split === undefined ? {} : { split }),
+        ...(ratio === undefined ? {} : { ratio }),
         ...(params.cwd === undefined ? {} : { cwd: params.cwd }),
         ...(params.extra === undefined ? {} : { extra: params.extra }),
         ...execution(params, signal),
@@ -358,7 +416,60 @@ export function registerPhuxTools(pi: ExtensionAPI, cli: PhuxCli, store: PhuxTar
         operation: "launch", summary: `launched ${launched.integration} at ${target}${aliasWarning === null ? "" : " (alias not saved)"}`, target,
       });
     },
-    renderCall: (args, theme) => callText(theme, `launch ${args.integration}`),
+    renderCall: (args, theme) => callText(theme, `launch ${args.integration}${"target" in args ? ` beside ${args.target}` : ""}`),
+    renderResult: renderSummary,
+  });
+
+  pi.registerTool({
+    name: "phux_insert_pane",
+    label: "phux insert pane",
+    description: "Insert one already-created exact local pane beside another. Both targets are ownership-refreshed aliases or canonical CLI selectors; no spawn and no focus change.",
+    promptSnippet: "Insert an existing pane into shared layout topology",
+    parameters: PhuxInsertPaneParams,
+    async execute(_id, params, signal) {
+      const [target, newPane] = await resolveSpatialPair(params.target, params.new_pane, store, signal);
+      const result = await cli.insertPane(target, newPane, {
+        ...(params.direction === undefined ? {} : { direction: params.direction }),
+        ...(params.ratio === undefined ? {} : { ratio: params.ratio }),
+        ...execution(params, signal),
+      });
+      return spatialResult("insert_pane", `inserted @${String(result.new_terminal_id)} beside @${String(result.target_terminal_id)}`, result.session_id, target);
+    },
+    renderCall: (args, theme) => callText(theme, `insert ${args.new_pane} beside ${args.target}`),
+    renderResult: renderSummary,
+  });
+
+  pi.registerTool({
+    name: "phux_move_pane",
+    label: "phux move pane",
+    description: "Move one exact local pane beside another in the same session. Named aliases are freshly ownership-validated; no focus change.",
+    promptSnippet: "Move an existing pane within shared layout topology",
+    parameters: PhuxMovePaneParams,
+    async execute(_id, params, signal) {
+      const [source, target] = await resolveSpatialPair(params.source, params.target, store, signal);
+      const result = await cli.movePane(source, target, {
+        ...(params.direction === undefined ? {} : { direction: params.direction }),
+        ...(params.ratio === undefined ? {} : { ratio: params.ratio }),
+        ...execution(params, signal),
+      });
+      return spatialResult("move_pane", `moved @${String(result.source_terminal_id)} beside @${String(result.target_terminal_id)}`, result.session_id, source);
+    },
+    renderCall: (args, theme) => callText(theme, `move ${args.source} beside ${args.target}`),
+    renderResult: renderSummary,
+  });
+
+  pi.registerTool({
+    name: "phux_swap_pane",
+    label: "phux swap pane",
+    description: "Swap two exact local pane leaves without changing split geometry or client-local focus. Named aliases are freshly ownership-validated.",
+    promptSnippet: "Swap two existing panes in shared layout topology",
+    parameters: PhuxSwapPaneParams,
+    async execute(_id, params, signal) {
+      const [first, second] = await resolveSpatialPair(params.first, params.second, store, signal);
+      const result = await cli.swapPane(first, second, execution(params, signal));
+      return spatialResult("swap_pane", `swapped @${String(result.first_terminal_id)} and @${String(result.second_terminal_id)}`, result.session_id, first);
+    },
+    renderCall: (args, theme) => callText(theme, `swap ${args.first} and ${args.second}`),
     renderResult: renderSummary,
   });
 
@@ -563,6 +674,54 @@ export function resolveTargets(explicit: string | undefined, store: PhuxTargetSt
   return [resolveTarget(explicit, store)];
 }
 
+const SATELLITE_PANE = /^[^/\s]+\/@\d+$/;
+
+async function resolvePlacementTarget(
+  explicit: string,
+  store: PhuxTargetStore,
+  signal: AbortSignal | undefined,
+): Promise<string> {
+  const target = await resolveActionTarget(explicit, store, signal);
+  if (SATELLITE_PANE.test(target)) {
+    throw new Error("explicit placement is local-only; satellite pane targets are unsupported");
+  }
+  return target;
+}
+
+async function resolveSpatialPair(
+  first: string,
+  second: string,
+  store: PhuxTargetStore,
+  signal: AbortSignal | undefined,
+): Promise<readonly [string, string]> {
+  if (first.startsWith("alias:") || second.startsWith("alias:")) {
+    await refreshNamedTargets(store, signal);
+  }
+  const resolvedFirst = resolveTarget(first, store);
+  const resolvedSecond = resolveTarget(second, store);
+  if (SATELLITE_PANE.test(resolvedFirst) || SATELLITE_PANE.test(resolvedSecond)) {
+    throw new Error("spatial actions require exact local pane targets");
+  }
+  if (resolvedFirst === resolvedSecond) {
+    throw new Error("spatial actions require two distinct pane targets");
+  }
+  return [resolvedFirst, resolvedSecond];
+}
+
+function validateToolPlacement(
+  target: string | undefined,
+  split: "horizontal" | "vertical" | undefined,
+  ratio: number | undefined,
+  satellite?: string,
+): void {
+  if (target === undefined && (split !== undefined || ratio !== undefined)) {
+    throw new Error("target is required when split or ratio is provided");
+  }
+  if (target !== undefined && satellite !== undefined) {
+    throw new Error("satellite and target placement cannot be combined");
+  }
+}
+
 async function resolveActionTarget(
   explicit: string | undefined,
   store: PhuxTargetStore,
@@ -603,6 +762,19 @@ async function tryBindSpawnedAlias(
   if (selection === null) return `spawned pane ${target} was not present in the canonical pane inventory`;
   store.bindAlias(alias, selection);
   return null;
+}
+
+function spatialResult(
+  operation: "insert_pane" | "move_pane" | "swap_pane",
+  summary: string,
+  sessionId: number,
+  target: string,
+): AgentToolResult<PhuxToolDetails> {
+  return toolResult(`${summary} in session ${String(sessionId)}.`, {
+    operation,
+    summary,
+    target,
+  });
 }
 
 function controlResult(operation: "kill", targets: readonly string[]): AgentToolResult<PhuxToolDetails> {

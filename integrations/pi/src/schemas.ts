@@ -81,6 +81,36 @@ export interface LaunchResult {
   readonly argv: readonly string[];
 }
 
+export type SpatialDirection = "horizontal" | "vertical";
+
+export interface InsertPaneResult {
+  readonly schema_version: 1;
+  readonly operation: "insert-pane";
+  readonly session_id: number;
+  readonly target_terminal_id: number;
+  readonly new_terminal_id: number;
+  readonly direction: SpatialDirection;
+  readonly ratio: number;
+}
+
+export interface MovePaneResult {
+  readonly schema_version: 1;
+  readonly operation: "move-pane";
+  readonly session_id: number;
+  readonly source_terminal_id: number;
+  readonly target_terminal_id: number;
+  readonly direction: SpatialDirection;
+  readonly ratio: number;
+}
+
+export interface SwapPaneResult {
+  readonly schema_version: 1;
+  readonly operation: "swap-pane";
+  readonly session_id: number;
+  readonly first_terminal_id: number;
+  readonly second_terminal_id: number;
+}
+
 export interface AskedEvent {
   readonly event: "asked";
   readonly terminal: string;
@@ -378,6 +408,65 @@ export function parseLaunchResult(value: unknown): LaunchResult {
     integration,
     plugin,
     argv,
+  };
+}
+
+function spatialRoot(value: unknown, operation: string): RecordValue {
+  const root = record(value, `$ (phux ${operation} --json CLI shape)`);
+  if (root.schema_version !== 1) {
+    throw new SchemaValidationError("$.schema_version", "the supported value 1");
+  }
+  if (root.operation !== operation) {
+    throw new SchemaValidationError("$.operation", JSON.stringify(operation));
+  }
+  return root;
+}
+
+function spatialDirection(value: unknown): SpatialDirection {
+  return oneOf(value, "$.direction", ["horizontal", "vertical"] as const);
+}
+
+function spatialRatio(value: unknown): number {
+  if (typeof value !== "number" || !Number.isFinite(value) || value <= 0 || value >= 1) {
+    throw new SchemaValidationError("$.ratio", "finite and strictly between 0 and 1");
+  }
+  return value;
+}
+
+export function parseInsertPaneResult(value: unknown): InsertPaneResult {
+  const root = spatialRoot(value, "insert-pane");
+  return {
+    schema_version: 1,
+    operation: "insert-pane",
+    session_id: integer(root.session_id, "$.session_id", 0),
+    target_terminal_id: integer(root.target_terminal_id, "$.target_terminal_id", 0, 4_294_967_295),
+    new_terminal_id: integer(root.new_terminal_id, "$.new_terminal_id", 0, 4_294_967_295),
+    direction: spatialDirection(root.direction),
+    ratio: spatialRatio(root.ratio),
+  };
+}
+
+export function parseMovePaneResult(value: unknown): MovePaneResult {
+  const root = spatialRoot(value, "move-pane");
+  return {
+    schema_version: 1,
+    operation: "move-pane",
+    session_id: integer(root.session_id, "$.session_id", 0),
+    source_terminal_id: integer(root.source_terminal_id, "$.source_terminal_id", 0, 4_294_967_295),
+    target_terminal_id: integer(root.target_terminal_id, "$.target_terminal_id", 0, 4_294_967_295),
+    direction: spatialDirection(root.direction),
+    ratio: spatialRatio(root.ratio),
+  };
+}
+
+export function parseSwapPaneResult(value: unknown): SwapPaneResult {
+  const root = spatialRoot(value, "swap-pane");
+  return {
+    schema_version: 1,
+    operation: "swap-pane",
+    session_id: integer(root.session_id, "$.session_id", 0),
+    first_terminal_id: integer(root.first_terminal_id, "$.first_terminal_id", 0, 4_294_967_295),
+    second_terminal_id: integer(root.second_terminal_id, "$.second_terminal_id", 0, 4_294_967_295),
   };
 }
 

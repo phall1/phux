@@ -11,9 +11,11 @@ import {
   MAX_MODEL_LINES,
   PhuxAskParams,
   PhuxCreateParams,
+  PhuxInsertPaneParams,
   PhuxKillParams,
   PhuxLaunchParams,
   PhuxListParams,
+  PhuxMovePaneParams,
   PhuxPanesParams,
   PhuxRenderedSnapshotParams,
   PhuxRunParams,
@@ -21,6 +23,7 @@ import {
   PhuxSignalParams,
   PhuxSnapshotParams,
   PhuxSpawnParams,
+  PhuxSwapPaneParams,
   PhuxTagParams,
   PhuxTargetsParams,
   PhuxWaitParams,
@@ -44,11 +47,14 @@ interface ObjectSchema {
   readonly type?: string;
   readonly additionalProperties?: boolean;
   readonly anyOf?: readonly ObjectSchema[];
+  readonly required?: readonly string[] | undefined;
   readonly not?: { readonly required?: readonly string[] };
   readonly properties?: Record<string, {
     readonly type?: string;
     readonly minItems?: number;
     readonly minimum?: number;
+    readonly exclusiveMinimum?: number;
+    readonly exclusiveMaximum?: number;
   }>;
 }
 
@@ -128,6 +134,18 @@ function fixture(options: {
         case "launch": return completed(JSON.stringify({
           schema_version: 1, terminal_id: 10, integration: "codex", plugin: "agents", argv: ["secret"],
         }));
+        case "insert-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "insert-pane", session_id: 1,
+          target_terminal_id: 3, new_terminal_id: 4, direction: "vertical", ratio: 0.4,
+        }));
+        case "move-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "move-pane", session_id: 1,
+          source_terminal_id: 4, target_terminal_id: 3, direction: "horizontal", ratio: 0.6,
+        }));
+        case "swap-pane": return completed(JSON.stringify({
+          schema_version: 1, operation: "swap-pane", session_id: 1,
+          first_terminal_id: 3, second_terminal_id: 4,
+        }));
         case "kill": case "signal": return completed("");
         case "tag": return completed(`${request.args[2] ?? "@3"}\tbuild ci\n`);
         case "ask": return completed(JSON.stringify({
@@ -176,7 +194,8 @@ test("every registered tool schema, including union branches, is strict", () => 
   for (const schema of [
     PhuxListParams, PhuxCreateParams, PhuxSnapshotParams, PhuxSendKeysParams,
     PhuxRunParams, PhuxWaitParams, PhuxPanesParams, PhuxSpawnParams,
-    PhuxLaunchParams, PhuxKillParams, PhuxSignalParams, PhuxTagParams,
+    PhuxLaunchParams, PhuxInsertPaneParams, PhuxMovePaneParams, PhuxSwapPaneParams,
+    PhuxKillParams, PhuxSignalParams, PhuxTagParams,
     PhuxAskParams, PhuxWatchParams, PhuxRenderedSnapshotParams, PhuxTargetsParams,
   ]) assertStrict(schema as ObjectSchema);
 
@@ -186,6 +205,27 @@ test("every registered tool schema, including union branches, is strict", () => 
   assert.equal((PhuxRunParams as ObjectSchema).properties?.timeout_seconds?.minimum, 0);
   assert.equal((PhuxWaitParams as ObjectSchema).properties?.timeout_seconds?.minimum, 1);
   assert.deepEqual((PhuxWaitParams as ObjectSchema).not?.required, ["until", "idle_ms"]);
+});
+
+test("placement and spatial schemas encode conditional requirements and numeric bounds", () => {
+  const spawn = PhuxSpawnParams as ObjectSchema;
+  const launch = PhuxLaunchParams as ObjectSchema;
+  assert.equal(spawn.anyOf?.length, 2);
+  assert.equal(spawn.anyOf?.[0]?.properties?.target, undefined);
+  assert.equal(spawn.anyOf?.[1]?.properties?.satellite, undefined);
+  assert.ok(spawn.anyOf?.[1]?.required?.includes("target"));
+  assert.ok(launch.anyOf?.[1]?.required?.includes("target"));
+
+  for (const schema of [
+    spawn.anyOf?.[1]?.properties?.ratio,
+    launch.anyOf?.[1]?.properties?.ratio,
+    (PhuxInsertPaneParams as ObjectSchema).properties?.ratio,
+    (PhuxMovePaneParams as ObjectSchema).properties?.ratio,
+  ]) {
+    assert.equal(schema?.exclusiveMinimum, 0);
+    assert.equal(schema?.exclusiveMaximum, 1);
+  }
+  assert.deepEqual((PhuxSwapPaneParams as ObjectSchema).required, ["first", "second"]);
 });
 
 test("list and create execute their registered operations", async () => {
@@ -264,6 +304,47 @@ test("panes, spawn, and launch execute and save validated aliases", async () => 
     ["spawn", "--json", "--socket", "/tmp/phux.sock", "--", "bash"]);
   assert.deepEqual(requests.filter((request) => request.args[0] === "launch")[0]?.args,
     ["launch", "--json", "--socket", "/tmp/phux.sock", "codex"]);
+});
+
+test("placement and spatial tools execute exact bounded CLI actions", async () => {
+  const { tools, requests } = fixture();
+  const controller = new AbortController();
+  await tool(tools, "phux_spawn").execute("placed-spawn", {
+    target: "@3", split: "vertical", ratio: 0.4, local_timeout_ms: 700,
+  }, controller.signal);
+  await tool(tools, "phux_launch").execute("placed-launch", {
+    integration: "codex", target: "@3", split: "horizontal", ratio: 0.6,
+  });
+  await tool(tools, "phux_insert_pane").execute("insert", {
+    target: "@3", new_pane: "@4", direction: "vertical", ratio: 0.4,
+  });
+  await tool(tools, "phux_move_pane").execute("move", {
+    source: "@4", target: "@3", direction: "horizontal", ratio: 0.6, local_timeout_ms: 800,
+  }, controller.signal);
+  await tool(tools, "phux_swap_pane").execute("swap", { first: "@3", second: "@4" });
+
+  assert.deepEqual(requests.map((request) => request.args), [
+    ["spawn", "--json", "--target", "@3", "--split", "vertical", "--ratio", "0.4", "--socket", "/tmp/phux.sock"],
+    ["launch", "--json", "--target", "@3", "--split", "horizontal", "--ratio", "0.6", "--socket", "/tmp/phux.sock", "codex"],
+    ["insert-pane", "--json", "--vertical", "--ratio", "0.4", "--socket", "/tmp/phux.sock", "@3", "@4"],
+    ["move-pane", "--json", "--horizontal", "--ratio", "0.6", "--socket", "/tmp/phux.sock", "@4", "@3"],
+    ["swap-pane", "--json", "--socket", "/tmp/phux.sock", "@3", "@4"],
+  ]);
+  assert.equal(requests[0]?.timeoutMs, 700);
+  assert.equal(requests[0]?.signal, controller.signal);
+  assert.equal(requests[3]?.timeoutMs, 800);
+  assert.equal(requests[3]?.signal, controller.signal);
+});
+
+test("placement validation rejects satellite and incomplete requests without executing", async () => {
+  const { tools, requests } = fixture();
+  await assert.rejects(tool(tools, "phux_spawn").execute("satellite", {
+    target: "edge/@7", split: "vertical",
+  }), /local-only/);
+  await assert.rejects(tool(tools, "phux_launch").execute("missing", {
+    integration: "codex", ratio: 0.4,
+  }), /target is required/);
+  assert.equal(requests.length, 0);
 });
 
 test("targets execute mutations and group expansion for tag and confirmed kill", async () => {
@@ -351,6 +432,21 @@ test("named actions refresh ownership immediately and reject reused ids", async 
   assert.equal(requests.some((request) => request.args[0] === "snapshot"), false);
 });
 
+test("spatial aliases refresh ownership immediately and fail before topology mutation", async () => {
+  const original = agentPane("@3");
+  const reused = agentPane("@3", "foreign", "window-99");
+  const { tools, requests } = fixture({ agentLists: [[original, agentPane("@4")], [reused, agentPane("@4")]] });
+  await tool(tools, "phux_targets").execute("alias", {
+    action: "set_alias", name: "build", target: "@3",
+  });
+  await assert.rejects(tool(tools, "phux_move_pane").execute("stale-move", {
+    source: "alias:build", target: "@4",
+  }), /ownership changed/);
+
+  assert.equal(requests.filter((request) => request.args[0] === "agent").length, 2);
+  assert.equal(requests.some((request) => request.args[0] === "move-pane"), false);
+});
+
 test("named actions fail closed when fresh inventory fails", async () => {
   const { tools, requests } = fixture({ agentLists: [[agentPane("@3")], new Error("server offline")] });
   await tool(tools, "phux_targets").execute("alias", {
@@ -386,6 +482,8 @@ test("custom renderers sanitize dynamic fields and show compact summaries", asyn
   const malicious = "bad\x1b[31mRED\x1b[0m\nNEXT\x9b31mC1\x07";
   const run = tool(tools, "phux_run");
   const call = run.renderCall?.({ command: malicious, target: "@9\rspoof" }, theme, {}).render(200).join("\n") ?? "";
+  const move = tool(tools, "phux_move_pane");
+  const spatialCall = move.renderCall?.({ source: malicious, target: "@9\rspoof" }, theme, {}).render(200).join("\n") ?? "";
   assert.equal(sanitizeRenderText(malicious), "badRED NEXTC1 ");
-  assert.doesNotMatch(call, /\x1b|\x9b|\x07|\r|\[31m/);
+  assert.doesNotMatch(`${call}${spatialCall}`, /\x1b|\x9b|\x07|\r|\[31m/);
 });
