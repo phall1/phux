@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-15T14:09:53Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-15T14:10:07Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 4 | 75% | 11m54s | 11m56s | 94 |
 | stress | 6 | 50% | 6s | 21m33s | 65 |
 | release-please | 15 | 100% | 38s | 48s | 24 |
-| conventional-commits | 84 | 88% | 15s | 19s | 15 |
+| conventional-commits | 85 | 88% | 15s | 19s | 16 |
 
 ## ci jobs, last 30 days
 
@@ -119,6 +119,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-15 14:09 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-15 14:09 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-07-15 14:09 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 | 2026-07-15 13:55 | conventional-commits | pull_request | feat/overlay-reachability-first- | success | 13s | 9s |
 | 2026-07-15 13:55 | ci | pull_request | feat/overlay-reachability-first- | success | 13m18s | 17m12s |
 | 2026-07-15 11:28 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -146,7 +147,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 10:59 | ci | push | main | success | 17m15s | 21m16s |
 | 2026-07-15 10:42 | conventional-commits | pull_request | swarm/foundation-train | success | 14s | 10s |
 | 2026-07-15 10:42 | ci | pull_request | swarm/foundation-train | success | 16m44s | 21m10s |
-| 2026-07-15 10:41 | conventional-commits | pull_request | swarm/input-encode-train | success | 17s | 13s |
 
 ---
 
