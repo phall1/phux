@@ -1311,11 +1311,7 @@ async fn attach_session<W: super::RenderSink>(
                         pending_pane = pane;
                         AttachTarget::ByName(name)
                     }
-                    ReattachTarget::Create(name) => AttachTarget::CreateIfMissing {
-                        name,
-                        command: None,
-                        cwd: None,
-                    },
+                    ReattachTarget::Create(name) => create_session_target(name),
                 };
                 send_attach(&mut conn, attach_target).await?;
                 attached = wait_for_attached(&mut conn).await?;
@@ -1329,6 +1325,26 @@ async fn attach_session<W: super::RenderSink>(
                 let _ = write_terminal_clear(out);
             }
         }
+    }
+}
+
+/// Build the `CreateIfMissing` target for an in-TUI session create (the
+/// session picker's "new session" row, phux-0db).
+///
+/// Carries the client process's current working directory instead of
+/// `cwd: None`: `None` on the wire seeds the pane in the *daemon's* CWD
+/// (typically `$HOME` for a long-lived server), which breaks tools whose
+/// persistence is keyed by directory (e.g. `claude --resume`). The server
+/// validates the path and falls back to its default spawn directory when
+/// it is not an enterable directory on the server host, so a stale or
+/// remote-client path can never fail the create.
+fn create_session_target(name: String) -> AttachTarget {
+    AttachTarget::CreateIfMissing {
+        name,
+        command: None,
+        cwd: std::env::current_dir()
+            .ok()
+            .map(|path| path.to_string_lossy().into_owned()),
     }
 }
 
@@ -4639,6 +4655,25 @@ mod tests {
     use tokio::net::UnixStream;
 
     static TERMINAL_RESET_TEST_LOCK: Mutex<()> = Mutex::new(());
+
+    /// phux-0db: a session created from inside the TUI (picker "new
+    /// session") seeds its pane in the client's cwd, not `None` (= the
+    /// daemon's CWD).
+    #[test]
+    fn create_session_target_carries_client_cwd() {
+        let expected = std::env::current_dir()
+            .expect("test cwd")
+            .to_string_lossy()
+            .into_owned();
+        assert_eq!(
+            create_session_target("picker".to_owned()),
+            AttachTarget::CreateIfMissing {
+                name: "picker".to_owned(),
+                command: None,
+                cwd: Some(expected),
+            }
+        );
+    }
 
     #[test]
     fn sidebar_reservation_changes_view_rects_for_pty_reflow() {

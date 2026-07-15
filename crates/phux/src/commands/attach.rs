@@ -180,10 +180,25 @@ fn default_create_target(default_name: &str) -> AttachTarget {
         command: None,
         // Seed the pane in the client's cwd so tools whose persistence is
         // keyed by project directory, such as `claude --resume`, find it.
-        cwd: std::env::current_dir()
-            .ok()
-            .map(|path| path.to_string_lossy().into_owned()),
+        cwd: client_cwd(),
     }
+}
+
+/// The client's current working directory as a wire `cwd` value
+/// (phux-0db).
+///
+/// Every session-create path sends this instead of `cwd: None` so the
+/// seed pane lands in the user's project directory rather than the
+/// daemon's CWD — `None` made the PTY child inherit wherever the server
+/// process happened to start (typically `$HOME`), which broke tools
+/// whose persistence is keyed by directory (e.g. `claude --resume`).
+/// `None` only when the cwd is unreadable; the server validates the path
+/// and falls back to its default spawn directory if it isn't an
+/// enterable directory on the server host.
+pub(crate) fn client_cwd() -> Option<String> {
+    std::env::current_dir()
+        .ok()
+        .map(|path| path.to_string_lossy().into_owned())
 }
 
 /// How long a vanished server is given to come back before the client gives up
