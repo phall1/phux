@@ -26,3 +26,12 @@ pty-serial = { max-threads = 1 }
 [[profile.default.overrides]]
 filter = 'package(phux-server) & kind(test)'
 test-group = 'pty-serial'
+
+# The `ci` profile is behavior-identical to `default` — nextest consults the
+# selected profile's settings first and falls back to profile.default, so the
+# retry policy and the pty-serial override above still apply. It exists only
+# to emit a junit report that scripts/ci/summarize-job.sh folds into the CI
+# job's step summary (slowest tests, flaky-retry counts). CI lanes opt in
+# with NEXTEST_PROFILE=ci; local runs never select it.
+[profile.ci.junit]
+path = "junit.xml"

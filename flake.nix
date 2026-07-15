@@ -68,6 +68,11 @@
             pkgs.chromedriver
             # Shell linting for scripts/ and examples/agents/ (just shellcheck).
             pkgs.shellcheck
+            # JSON plumbing for the CI observability scripts (scripts/ci/,
+            # ADR-0047) and `just trace-attach`'s slow-render peek. The
+            # hosted runners ship jq, but the scripts must also run in the
+            # devshell (`just dep-stats`, local dashboard renders).
+            pkgs.jq
             # Debugging.
             pkgs.lldb
           ]

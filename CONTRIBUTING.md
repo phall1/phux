@@ -157,6 +157,24 @@ the protocol epic):
    git branch -d <branch-name>
    ```
 
+## Observability: CI itself
+
+CI is instrumented end to end (ADR-0047). Where to look, cheapest first:
+
+- **Any run's step summary** — every lane renders its cargo phase timings,
+  rust-cache hit/miss, and slowest tests right on the run page.
+- **`just ci-report`** — prints the recorded dashboard: per-workflow medians
+  and p95s, slowest steps, cache hit rates, cold-build and binary-size
+  trends. Rendered live at <https://phux.phall.io/ci> as well.
+- **The `ci-metrics` branch** — the raw NDJSON store (one shard per month),
+  written only by the `ci-metrics` workflow. Query it with `git show
+  origin/ci-metrics:runs/<YYYY-MM>.ndjson | jq ...`.
+- **The `observatory` workflow** — dispatch it when a build feels slow: cold
+  dev/release `--timings` timelines (HTML artifact + distilled tables),
+  binary size with bloat attribution, dependency stats. Runs weekly and on
+  lockfile/toolchain changes to main, never on the PR path.
+- Locally: `just timings`, `just llvm-lines`, `just bloat`, `just dep-stats`.
+
 ## Observability: tokio-console
 
 `phux-server` has an opt-in `tokio-console` cargo feature that attaches
