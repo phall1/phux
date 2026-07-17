@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-16T09:44:19Z",
+  "generated_at": "2026-07-17T09:37:27Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "schedule",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-17T09:14:40Z",
+      "duration_s": 1357,
+      "runner_s": 1354
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T19:36:41Z",
       "duration_s": 14,
       "runner_s": 11
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/phux-detach",
-      "conclusion": "success",
-      "created_at": "2026-07-15T19:36:41Z",
-      "duration_s": 993,
-      "runner_s": 1226
     }
   ],
   "workflows_30d": [
@@ -292,11 +292,11 @@
     },
     {
       "workflow": "stress",
-      "runs": 7,
-      "success_rate": 57,
+      "runs": 8,
+      "success_rate": 63,
       "median_s": 1271,
-      "p95_s": 1335,
-      "runner_minutes": 89
+      "p95_s": 1357,
+      "runner_minutes": 111
     },
     {
       "workflow": "release-please",
@@ -416,7 +416,7 @@
     {
       "workflow": "stress",
       "job": "stress",
-      "samples": 2,
+      "samples": 3,
       "hit_rate": 0
     }
   ],
@@ -488,8 +488,8 @@
       "workflow": "stress",
       "job": "stress",
       "phase": "stress",
-      "median_s": 1231,
-      "n": 2
+      "median_s": 1262,
+      "n": 3
     }
   ],
   "slow_tests": {
@@ -498,52 +498,52 @@
       {
         "binary": "phux-server::stress_resize_extremes",
         "test": "both_axes_shrink_storm_under_output_does_not_panic",
-        "seconds": 1034.607
+        "seconds": 960.092
       },
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "multi_mb_no_newline_burst_does_not_panic",
-        "seconds": 39.317
+        "seconds": 36.579
       },
       {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "attach_racing_pty_eof_does_not_panic",
-        "seconds": 10.190
+        "seconds": 10.196
       },
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "wide_combining_zwj_flood_does_not_panic",
-        "seconds": 4.349
+        "seconds": 3.703
       },
       {
         "binary": "phux-server::stress_resize_extremes",
         "test": "resize_degenerate_viewports_do_not_panic",
-        "seconds": 3.348
-      },
-      {
-        "binary": "phux-server::stress_attach_churn",
-        "test": "attach_detach_churn_keeps_pane_alive",
-        "seconds": 0.453
+        "seconds": 3.064
       },
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "control_char_flood_does_not_panic",
-        "seconds": 0.447
+        "seconds": 0.785
+      },
+      {
+        "binary": "phux-server::stress_attach_churn",
+        "test": "attach_detach_churn_keeps_pane_alive",
+        "seconds": 0.450
       },
       {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "many_concurrent_clients_attach_detach_under_output",
-        "seconds": 0.367
+        "seconds": 0.345
       },
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "rapid_alt_screen_toggles_do_not_panic",
-        "seconds": 0.361
+        "seconds": 0.339
       },
       {
         "binary": "phux-server::stress_spawn_kill",
         "test": "spawn_storm_then_kill_storm_does_not_panic",
-        "seconds": 0.137
+        "seconds": 0.152
       }
     ]
   },
