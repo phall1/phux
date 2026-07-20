@@ -9,6 +9,41 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.3.0](https://github.com/phall1/phux/compare/v0.2.0...v0.3.0) (2026-07-20)
+
+
+### Features
+
+* **cli,mcp:** add bracketed-paste verb over ROUTE_INPUT (phux-foir) ([6079fcf](https://github.com/phall1/phux/commit/6079fcf5749aa5a518a75f4bde52686172274538))
+* **cli:** add phux detach to force-detach clients (phux-87r) ([#174](https://github.com/phall1/phux/issues/174)) ([b7cfefe](https://github.com/phall1/phux/commit/b7cfefef189e22e5fda3c465d42e627f29054c7f))
+* **dial,cli,docs:** make overlay reachability first-class (phux-zndc) ([#237](https://github.com/phall1/phux/issues/237)) ([7de4049](https://github.com/phall1/phux/commit/7de4049774552a5890495c8db479173815c8bbca))
+* land agent integration foundation ([#243](https://github.com/phall1/phux/issues/243)) ([44ade38](https://github.com/phall1/phux/commit/44ade3883359c0e0dd90c40ecaccdd5622b4b1ac))
+* **opencode:** add shared phux terminal integration ([#227](https://github.com/phall1/phux/issues/227)) ([d55e2ce](https://github.com/phall1/phux/commit/d55e2ce4f1f8375e553a5bbded05a9193a25013b))
+* **orchestration:** add safe spatial agent workflows ([#246](https://github.com/phall1/phux/issues/246)) ([e7e6996](https://github.com/phall1/phux/commit/e7e6996304e7b9b6c86b2ba1e31e830b1803645b))
+* **pair:** print a one-tap phux://connect link and render it as a QR (phux-a9s) ([#175](https://github.com/phall1/phux/issues/175)) ([5b4cd38](https://github.com/phall1/phux/commit/5b4cd38564efefe05475f332f1a9278fd068e38c))
+* **pi:** add shared phux terminal integration ([#223](https://github.com/phall1/phux/issues/223)) ([66dc4d0](https://github.com/phall1/phux/commit/66dc4d09a1eb9d63eace45e863b8fa8360ad7f00))
+
+
+### Bug Fixes
+
+* **cli,server:** name the UDS path-length limit up front (phux-iwuc) ([2d860af](https://github.com/phall1/phux/commit/2d860af1b98f5f68c72b63c1c5328ba3ae7b79d8))
+* **cli:** deflake tailscale stub round-trip test ([b5f72d1](https://github.com/phall1/phux/commit/b5f72d150fedd9e623f07e7d5ecf6891b97e129d))
+* **client:** make help overlay scrollable (phux-9adu) ([d215ef4](https://github.com/phall1/phux/commit/d215ef47197cd7fa8c1bf6039907a21f2df01bf9))
+* **pi:** add spatial orchestration parity ([cb99f18](https://github.com/phall1/phux/commit/cb99f188bd8b0b4ba63c854342c00804a47420ec))
+* **server:** apply client cwd to seed pane (phux-0db) ([1aecb35](https://github.com/phall1/phux/commit/1aecb35bf410672f548e2dc9bbb00233cd44b5db))
+* **server:** deflake attach_last focus-ordering test (phux-mn3b) ([b753459](https://github.com/phall1/phux/commit/b75345944f4db2c6e578d448d2c634523f75c07e))
+* **server:** inject PHUX_SOCKET into hook child env (phux-d4rf) ([e623d9e](https://github.com/phall1/phux/commit/e623d9e9dcb6450c7fbee4f932b012597263a5bf))
+* **server:** inject PHUX_SOCKET into spawned panes (phux-cufw) ([8a4097e](https://github.com/phall1/phux/commit/8a4097e40c1cbcdc70359c451d95d0029c0521ec))
+* **server:** preserve retained snapshot on relay rollback ([#226](https://github.com/phall1/phux/issues/226)) ([0a0cec8](https://github.com/phall1/phux/commit/0a0cec840c96a36f7f96eb5fa539586a935b2d21))
+* **watch:** decouple idle bookkeeping from state sync ([#229](https://github.com/phall1/phux/issues/229)) ([1922659](https://github.com/phall1/phux/commit/19226591b98b45be45e935e09acc2e9e639d40ec))
+
+
+### Documentation
+
+* **adr:** propose outbound dial-out connector transport, with relay spike ([#238](https://github.com/phall1/phux/issues/238)) ([c537b6d](https://github.com/phall1/phux/commit/c537b6dc5bed56c266efa70c4609dd5ceffc7bf2))
+* **mcp:** document host registration ([#231](https://github.com/phall1/phux/issues/231)) ([0b475a6](https://github.com/phall1/phux/commit/0b475a6a1ede2b5d5a7ac7b1f322eab62f261244))
+* **pi:** record live agent fleet proof ([127a8d2](https://github.com/phall1/phux/commit/127a8d226899cbbea651867f77d1f74358b0fc67))
+
 ## [0.2.0](https://github.com/phall1/phux/compare/v0.1.0...v0.2.0) (2026-07-15)
 
 
