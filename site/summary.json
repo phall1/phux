@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-20T23:19:08Z",
+  "generated_at": "2026-07-20T23:23:21Z",
   "recent_runs": [
     {
       "workflow": "stress",
@@ -19,6 +19,15 @@
       "created_at": "2026-07-20T23:10:25Z",
       "duration_s": 513,
       "runner_s": 1185
+    },
+    {
+      "workflow": "observatory",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-20T23:10:25Z",
+      "duration_s": 762,
+      "runner_s": 1467
     },
     {
       "workflow": "conventional-commits",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T20:21:49Z",
       "duration_s": 814,
       "runner_s": 1040
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "train/wave2-2026-07-15",
-      "conclusion": "success",
-      "created_at": "2026-07-15T20:04:49Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
@@ -283,20 +283,20 @@
       "runner_minutes": 1881
     },
     {
+      "workflow": "observatory",
+      "runs": 7,
+      "success_rate": 86,
+      "median_s": 745,
+      "p95_s": 762,
+      "runner_minutes": 168
+    },
+    {
       "workflow": "stress",
       "runs": 12,
       "success_rate": 67,
       "median_s": 1245,
       "p95_s": 1425,
       "runner_minutes": 161
-    },
-    {
-      "workflow": "observatory",
-      "runs": 6,
-      "success_rate": 83,
-      "median_s": 716,
-      "p95_s": 758,
-      "runner_minutes": 144
     },
     {
       "workflow": "release-please",
@@ -475,14 +475,14 @@
       "job": "timings",
       "phase": "build-dev",
       "median_s": 666,
-      "n": 5
+      "n": 6
     },
     {
       "workflow": "observatory",
       "job": "timings",
       "phase": "build-release",
-      "median_s": 300,
-      "n": 6
+      "median_s": 301,
+      "n": 7
     },
     {
       "workflow": "stress",
@@ -551,99 +551,99 @@
     {
       "profile": "dev",
       "latest": {
-        "sha": "220695682",
-        "created_at": "2026-07-20T08:57:06Z",
-        "total_wall_s": 682,
+        "sha": "c34009cfb",
+        "created_at": "2026-07-20T23:10:25Z",
+        "total_wall_s": 687,
         "units": 520,
-        "cpu_seconds": 2693.6,
+        "cpu_seconds": 2728.01,
         "slowest_units": [
           {
             "name": "libghostty-vt-sys build script (run)",
-            "seconds": 102.83,
+            "seconds": 123.46,
             "frontend_s": null
           },
           {
             "name": "phux-server lib (test)",
-            "seconds": 94.68,
+            "seconds": 91.46,
             "frontend_s": null
           },
           {
             "name": "phux bin \"phux\"",
-            "seconds": 76.04,
+            "seconds": 73.96,
             "frontend_s": null
           },
           {
             "name": "phux-client lib (test)",
-            "seconds": 67.99,
+            "seconds": 65.86,
             "frontend_s": null
           },
           {
             "name": "phux-server",
-            "seconds": 56.99,
-            "frontend_s": 7.04
+            "seconds": 56.43,
+            "frontend_s": 7.79
           },
           {
             "name": "rustls",
-            "seconds": 42.52,
-            "frontend_s": 3.83
+            "seconds": 48.41,
+            "frontend_s": 4.54
           },
           {
             "name": "phux-server test \"spawn_terminal\" (test)",
-            "seconds": 36.25,
+            "seconds": 35.92,
             "frontend_s": null
           },
           {
-            "name": "phux-server test \"hub_relay_federation\" (test)",
-            "seconds": 35.65,
-            "frontend_s": null
+            "name": "quinn-proto",
+            "seconds": 35.03,
+            "frontend_s": 7.84
           }
         ],
         "build_script_runs": [
           {
             "name": "libghostty-vt-sys",
-            "seconds": 102.83
+            "seconds": 123.46
           },
           {
             "name": "ring",
-            "seconds": 7.32
+            "seconds": 6.7
           },
           {
             "name": "anyhow",
-            "seconds": 0.14
+            "seconds": 0.16
           },
           {
             "name": "proc-macro2",
-            "seconds": 0.13
+            "seconds": 0.11
           },
           {
             "name": "alloca",
-            "seconds": 0.1
+            "seconds": 0.11
           }
         ],
         "terminal_units": [
           {
             "name": "phux bin \"phux\"",
-            "seconds": 76.04
+            "seconds": 73.96
           },
           {
             "name": "phux-server test \"spawn_terminal\" (test)",
-            "seconds": 36.25
+            "seconds": 35.92
           },
           {
             "name": "phux-server test \"hub_relay_federation\" (test)",
-            "seconds": 35.65
+            "seconds": 35.0
           },
           {
             "name": "phux-server test \"command_dispatch\" (test)",
-            "seconds": 33.26
+            "seconds": 32.51
           },
           {
             "name": "phux-server test \"relay_connector_spike\" (test)",
-            "seconds": 31.72
+            "seconds": 30.52
           }
         ]
       },
-      "previous_total_s": 688,
+      "previous_total_s": 682,
       "history": [
         {
           "sha": "c3529bbc2",
@@ -669,93 +669,98 @@
           "sha": "220695682",
           "created_at": "2026-07-20T08:57:06Z",
           "total_wall_s": 682
+        },
+        {
+          "sha": "c34009cfb",
+          "created_at": "2026-07-20T23:10:25Z",
+          "total_wall_s": 687
         }
       ]
     },
     {
       "profile": "release",
       "latest": {
-        "sha": "220695682",
-        "created_at": "2026-07-20T08:57:06Z",
-        "total_wall_s": 324,
+        "sha": "c34009cfb",
+        "created_at": "2026-07-20T23:10:25Z",
+        "total_wall_s": 307,
         "units": 359,
-        "cpu_seconds": 794.03,
+        "cpu_seconds": 765.68,
         "slowest_units": [
           {
             "name": "libghostty-vt-sys build script (run)",
-            "seconds": 163.93,
+            "seconds": 158.3,
             "frontend_s": null
           },
           {
             "name": "phux bin \"phux\"",
-            "seconds": 111.39,
+            "seconds": 102.9,
+            "frontend_s": null
+          },
+          {
+            "name": "phux-mcp bin \"phux-mcp\"",
+            "seconds": 21.12,
             "frontend_s": null
           },
           {
             "name": "phux-server",
-            "seconds": 24.3,
-            "frontend_s": 6.37
-          },
-          {
-            "name": "phux-mcp bin \"phux-mcp\"",
-            "seconds": 23.01,
-            "frontend_s": null
+            "seconds": 20.93,
+            "frontend_s": 4.83
           },
           {
             "name": "regex-automata",
-            "seconds": 20.69,
-            "frontend_s": 4.03
-          },
-          {
-            "name": "phux-config",
-            "seconds": 18.11,
-            "frontend_s": 2.06
+            "seconds": 19.23,
+            "frontend_s": 4.3
           },
           {
             "name": "rustls",
-            "seconds": 15.22,
-            "frontend_s": 4.46
+            "seconds": 18.4,
+            "frontend_s": 7.17
+          },
+          {
+            "name": "phux-config",
+            "seconds": 17.64,
+            "frontend_s": 1.83
           },
           {
             "name": "clap_builder",
-            "seconds": 14.91,
-            "frontend_s": 4.67
+            "seconds": 16.19,
+            "frontend_s": 5.96
           }
         ],
         "build_script_runs": [
           {
             "name": "libghostty-vt-sys",
-            "seconds": 163.93
+            "seconds": 158.3
           },
           {
             "name": "ring",
-            "seconds": 12.54
-          },
-          {
-            "name": "rustix",
-            "seconds": 0.18
-          },
-          {
-            "name": "proc-macro2",
-            "seconds": 0.15
+            "seconds": 12.55
           },
           {
             "name": "anyhow",
+            "seconds": 0.15
+          },
+          {
+            "name": "rustix",
             "seconds": 0.14
+          },
+          {
+            "name": "proc-macro2",
+            "seconds": 0.13
           }
         ],
         "terminal_units": [
           {
             "name": "phux bin \"phux\"",
-            "seconds": 111.39
+            "seconds": 102.9
           },
           {
             "name": "phux-mcp bin \"phux-mcp\"",
-            "seconds": 23.01
+            "seconds": 21.12
           }
         ]
       },
-      "previous_total_s": 311,
+      "previous_total_s": 324,
       "history": [
         {
           "sha": "c3529bbc2",
@@ -786,32 +791,37 @@
           "sha": "220695682",
           "created_at": "2026-07-20T08:57:06Z",
           "total_wall_s": 324
+        },
+        {
+          "sha": "c34009cfb",
+          "created_at": "2026-07-20T23:10:25Z",
+          "total_wall_s": 307
         }
       ]
     }
   ],
   "binary_size": {
     "latest": {
-      "sha": "220695682",
-      "created_at": "2026-07-20T08:57:06Z",
+      "sha": "c34009cfb",
+      "created_at": "2026-07-20T23:10:25Z",
       "bins": [
         {
           "name": "phux",
-          "bytes": 13532248
+          "bytes": 13531096
         },
         {
           "name": "phux-mcp",
-          "bytes": 2218024
+          "bytes": 2217048
         }
       ],
       "bloat_crates": [
         {
           "name": "std",
-          "bytes": 1895472
+          "bytes": 1895112
         },
         {
           "name": "phux_server",
-          "bytes": 1062877
+          "bytes": 1062820
         },
         {
           "name": "phux",
@@ -823,7 +833,7 @@
         },
         {
           "name": "phux_client",
-          "bytes": 541189
+          "bytes": 541227
         },
         {
           "name": "regex_automata",
@@ -850,11 +860,11 @@
     "previous_bins": [
       {
         "name": "phux",
-        "bytes": 13520608
+        "bytes": 13532248
       },
       {
         "name": "phux-mcp",
-        "bytes": 2217672
+        "bytes": 2218024
       }
     ],
     "history": [
@@ -941,13 +951,27 @@
             "bytes": 2218024
           }
         ]
+      },
+      {
+        "sha": "c34009cfb",
+        "created_at": "2026-07-20T23:10:25Z",
+        "bins": [
+          {
+            "name": "phux",
+            "bytes": 13531096
+          },
+          {
+            "name": "phux-mcp",
+            "bytes": 2217048
+          }
+        ]
       }
     ]
   },
   "deps": {
     "latest": {
-      "sha": "220695682",
-      "created_at": "2026-07-20T08:57:06Z",
+      "sha": "c34009cfb",
+      "created_at": "2026-07-20T23:10:25Z",
       "locked_packages": 432,
       "direct_deps": 48,
       "workspace_members": 11,
@@ -1027,6 +1051,12 @@
       {
         "sha": "220695682",
         "created_at": "2026-07-20T08:57:06Z",
+        "locked_packages": 432,
+        "duplicates": 32
+      },
+      {
+        "sha": "c34009cfb",
+        "created_at": "2026-07-20T23:10:25Z",
         "locked_packages": 432,
         "duplicates": 32
       }
