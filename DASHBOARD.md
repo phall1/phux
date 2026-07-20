@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-20T09:45:07Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-20T10:38:32Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,8 +10,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 146 | 61% | 13m34s | 17m20s | 1837 |
+| stress | 11 | 73% | 21m11s | 23m45s | 161 |
 | observatory | 6 | 83% | 11m56s | 12m38s | 144 |
-| stress | 10 | 70% | 21m11s | 23m45s | 140 |
 | release-please | 23 | 100% | 42s | 52s | 29 |
 | conventional-commits | 134 | 86% | 15s | 20s | 25 |
 
@@ -51,7 +51,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | agents-smoke | 1s | 8 |
 | observatory / timings | build-dev | 11m06s | 5 |
 | observatory / timings | build-release | 5m00s | 6 |
-| stress / stress | stress | 21m02s | 5 |
+| stress / stress | stress | 20m31s | 6 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -59,7 +59,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|
 | ci / check | 30% | 84 |
 | ci / test | 33% | 81 |
-| stress / stress | 0% | 5 |
+| stress / stress | 17% | 6 |
 
 ## Cold build (observatory)
 
@@ -106,21 +106,22 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | test | wall |
 |---|---:|
-| `phux-server::stress_resize_extremes::both_axes_shrink_storm_under_output_does_not_panic` | 1044.500s |
-| `phux-server::stress_output_extremes::multi_mb_no_newline_burst_does_not_panic` | 37.753s |
-| `phux-server::stress_lifecycle_churn::attach_racing_pty_eof_does_not_panic` | 10.194s |
-| `phux-server::stress_output_extremes::wide_combining_zwj_flood_does_not_panic` | 4.431s |
-| `phux-server::stress_resize_extremes::resize_degenerate_viewports_do_not_panic` | 3.352s |
-| `phux-server::stress_attach_churn::attach_detach_churn_keeps_pane_alive` | 0.453s |
-| `phux-server::stress_output_extremes::control_char_flood_does_not_panic` | 0.440s |
-| `phux-server::stress_lifecycle_churn::many_concurrent_clients_attach_detach_under_output` | 0.367s |
-| `phux-server::stress_output_extremes::rapid_alt_screen_toggles_do_not_panic` | 0.355s |
-| `phux-server::stress_spawn_kill::spawn_storm_then_kill_storm_does_not_panic` | 0.138s |
+| `phux-server::stress_resize_extremes::both_axes_shrink_storm_under_output_does_not_panic` | 1025.927s |
+| `phux-server::stress_output_extremes::multi_mb_no_newline_burst_does_not_panic` | 37.169s |
+| `phux-server::stress_lifecycle_churn::attach_racing_pty_eof_does_not_panic` | 10.196s |
+| `phux-server::stress_output_extremes::wide_combining_zwj_flood_does_not_panic` | 3.703s |
+| `phux-server::stress_resize_extremes::resize_degenerate_viewports_do_not_panic` | 3.072s |
+| `phux-server::stress_attach_churn::attach_detach_churn_keeps_pane_alive` | 0.446s |
+| `phux-server::stress_output_extremes::control_char_flood_does_not_panic` | 0.415s |
+| `phux-server::stress_output_extremes::rapid_alt_screen_toggles_do_not_panic` | 0.342s |
+| `phux-server::stress_lifecycle_churn::many_concurrent_clients_attach_detach_under_output` | 0.342s |
+| `phux-server::stress_spawn_kill::spawn_storm_then_kill_storm_does_not_panic` | 0.141s |
 
 ## Recent runs
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-20 10:17 | stress | schedule | main | success | 20m45s | 20m41s |
 | 2026-07-20 08:57 | observatory | schedule | main | success | 12m56s | 25m23s |
 | 2026-07-19 09:08 | stress | schedule | main | success | 23m51s | 23m48s |
 | 2026-07-18 08:52 | stress | schedule | main | success | 5m20s | 5m17s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-15 19:53 | release-please | push | main | success | 44s | 39s |
 | 2026-07-15 19:53 | ci | push | main | success | 16m29s | 20m17s |
 | 2026-07-15 19:46 | conventional-commits | pull_request | train/wave2-2026-07-15 | success | 16s | 12s |
-| 2026-07-15 19:46 | ci | pull_request | train/wave2-2026-07-15 | success | 15m10s | 17m47s |
 
 ---
 
