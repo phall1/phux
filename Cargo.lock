@@ -2113,6 +2113,7 @@ dependencies = [
  "phux-core",
  "phux-plugin",
  "phux-protocol",
+ "phux-relay",
  "phux-server",
  "portable-pty",
  "qrcode",
@@ -2261,6 +2262,25 @@ dependencies = [
 ]
 
 [[package]]
+name = "phux-relay"
+version = "0.3.0"
+dependencies = [
+ "getrandom 0.2.17",
+ "hex",
+ "phux-dial",
+ "phux-protocol",
+ "quinn",
+ "rcgen 0.13.2",
+ "rustls",
+ "sha2 0.10.9",
+ "subtle",
+ "tempfile",
+ "thiserror 2.0.18",
+ "tokio",
+ "tracing",
+]
+
+[[package]]
 name = "phux-server"
 version = "0.3.0"
 dependencies = [
@@ -2281,6 +2301,7 @@ dependencies = [
  "phux-dial",
  "phux-plugin",
  "phux-protocol",
+ "phux-relay",
  "portable-pty",
  "portable-pty-adopt",
  "quinn",
