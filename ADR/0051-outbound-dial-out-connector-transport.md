@@ -1,7 +1,7 @@
 ---
 audience: contributors
 stability: stable
-last-reviewed: 2026-07-15
+last-reviewed: 2026-07-21
 ---
 
 # 0051 — Outbound dial-out (connector) transport mode
@@ -13,8 +13,13 @@ fingerprint pinning on both legs, and the server still verifies every
 consumer's own token. This ADR fixes the tunnel shape and blesses a
 test-only spike; no production code or spec bytes change yet.
 
-Status: Proposed
+Status: Accepted
 Date: 2026-07-15
+
+> **Update 2026-07-21:** accepted on merge of PR #238 per bead phux-1cfx.
+> Open questions 1, 4, and 5 are settled by
+> [ADR-0052](./0052-connector-route-identity-and-config.md); the
+> productization epic is bead phux-8lyr.
 
 ## Context
 
