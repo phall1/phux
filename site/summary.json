@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-21T07:38:53Z",
+  "generated_at": "2026-07-21T09:52:09Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "schedule",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-21T09:31:47Z",
+      "duration_s": 1209,
+      "runner_s": 1206
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T20:22:13Z",
       "duration_s": 18,
       "runner_s": 14
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-15T20:22:12Z",
-      "duration_s": 2,
-      "runner_s": 1
     }
   ],
   "workflows_30d": [
@@ -283,20 +283,20 @@
       "runner_minutes": 1908
     },
     {
+      "workflow": "stress",
+      "runs": 13,
+      "success_rate": 69,
+      "median_s": 1245,
+      "p95_s": 1425,
+      "runner_minutes": 181
+    },
+    {
       "workflow": "observatory",
       "runs": 7,
       "success_rate": 86,
       "median_s": 745,
       "p95_s": 762,
       "runner_minutes": 168
-    },
-    {
-      "workflow": "stress",
-      "runs": 12,
-      "success_rate": 67,
-      "median_s": 1245,
-      "p95_s": 1425,
-      "runner_minutes": 161
     },
     {
       "workflow": "release-please",
@@ -416,8 +416,8 @@
     {
       "workflow": "stress",
       "job": "stress",
-      "samples": 6,
-      "hit_rate": 17
+      "samples": 7,
+      "hit_rate": 14
     }
   ],
   "phase_medians": [
@@ -489,61 +489,61 @@
       "job": "stress",
       "phase": "stress",
       "median_s": 1231,
-      "n": 6
+      "n": 7
     }
   ],
   "slow_tests": {
     "sha": "c34009cfb",
     "tests": [
       {
-        "binary": "phux-server::perf_bursty_output",
-        "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 88.789
+        "binary": "phux-server::stress_resize_extremes",
+        "test": "both_axes_shrink_storm_under_output_does_not_panic",
+        "seconds": 876.440
       },
       {
-        "binary": "phux-server",
-        "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 23.380
+        "binary": "phux-server::stress_output_extremes",
+        "test": "multi_mb_no_newline_burst_does_not_panic",
+        "seconds": 18.694
       },
       {
-        "binary": "phux-server::agent_detect",
-        "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.017
+        "binary": "phux-server::stress_lifecycle_churn",
+        "test": "attach_racing_pty_eof_does_not_panic",
+        "seconds": 10.192
       },
       {
-        "binary": "phux-server::agent_detect",
-        "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.816
+        "binary": "phux-server::stress_resize_extremes",
+        "test": "resize_degenerate_viewports_do_not_panic",
+        "seconds": 3.402
       },
       {
-        "binary": "phux-server::agent_detect",
-        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.816
+        "binary": "phux-server::stress_output_extremes",
+        "test": "wide_combining_zwj_flood_does_not_panic",
+        "seconds": 3.111
       },
       {
-        "binary": "phux-server::agent_detect",
-        "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.517
+        "binary": "phux-server::stress_output_extremes",
+        "test": "control_char_flood_does_not_panic",
+        "seconds": 0.443
       },
       {
-        "binary": "phux-server::agent_events",
-        "test": "unattached_subscriber_receives_events",
-        "seconds": 3.019
+        "binary": "phux-server::stress_attach_churn",
+        "test": "attach_detach_churn_keeps_pane_alive",
+        "seconds": 0.423
       },
       {
-        "binary": "phux-server::phux_3uv_acked_incremental",
-        "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.516
+        "binary": "phux-server::stress_output_extremes",
+        "test": "rapid_alt_screen_toggles_do_not_panic",
+        "seconds": 0.365
       },
       {
-        "binary": "phux::bin/phux",
-        "test": "commands::overlay::tests::wedged_tailscale_binary_is_killed_at_the_deadline",
-        "seconds": 2.021
+        "binary": "phux-server::stress_lifecycle_churn",
+        "test": "many_concurrent_clients_attach_detach_under_output",
+        "seconds": 0.281
       },
       {
-        "binary": "phux-server::l2_adversarial",
-        "test": "test_subscribe_events_no_loss",
-        "seconds": 2.016
+        "binary": "phux-server::stress_resize_storm",
+        "test": "resize_storm_converges_to_final_geometry",
+        "seconds": 0.119
       }
     ]
   },
