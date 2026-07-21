@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-20T23:28:23Z",
+  "generated_at": "2026-07-21T07:36:34Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "adr-0052-connector-productization",
+      "conclusion": "success",
+      "created_at": "2026-07-21T07:36:06Z",
+      "duration_s": 17,
+      "runner_s": 15
+    },
     {
       "workflow": "stress",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-15T20:22:12Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-15T20:21:49Z",
-      "duration_s": 45,
-      "runner_s": 38
     }
   ],
   "workflows_30d": [
@@ -308,8 +308,8 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 137,
-      "success_rate": 85,
+      "runs": 138,
+      "success_rate": 86,
       "median_s": 15,
       "p95_s": 20,
       "runner_minutes": 25
