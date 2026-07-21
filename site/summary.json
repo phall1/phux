@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-21T07:36:34Z",
+  "generated_at": "2026-07-21T07:38:53Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -10,6 +10,15 @@
       "created_at": "2026-07-21T07:36:06Z",
       "duration_s": 17,
       "runner_s": 15
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "adr-0052-connector-productization",
+      "conclusion": "success",
+      "created_at": "2026-07-21T07:36:06Z",
+      "duration_s": 155,
+      "runner_s": 244
     },
     {
       "workflow": "stress",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-15T20:22:12Z",
       "duration_s": 2,
       "runner_s": 1
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-15T20:22:12Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 150,
-      "success_rate": 61,
+      "runs": 151,
+      "success_rate": 62,
       "median_s": 816,
       "p95_s": 1045,
-      "runner_minutes": 1904
+      "runner_minutes": 1908
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 149,
+      "runs": 150,
       "median_queue_s": 2,
-      "median_s": 805,
+      "median_s": 802,
       "p95_s": 1033
     },
     {
       "job": "check",
-      "runs": 147,
+      "runs": 148,
       "median_queue_s": 2,
       "median_s": 163,
       "p95_s": 274
     },
     {
       "job": "detect docs-only",
-      "runs": 150,
+      "runs": 151,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -342,26 +342,26 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 932,
-      "n": 17
+      "median_s": 927,
+      "n": 16
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 175,
-      "n": 18
+      "n": 17
     },
     {
       "job": "check",
       "step": "runner disk headroom",
-      "median_s": 69,
-      "n": 7
+      "median_s": 60,
+      "n": 8
     },
     {
       "job": "test",
       "step": "runner disk headroom",
-      "median_s": 54,
-      "n": 7
+      "median_s": 51,
+      "n": 8
     },
     {
       "job": "check",
@@ -404,14 +404,14 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 87,
+      "samples": 88,
       "hit_rate": 30
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 84,
-      "hit_rate": 33
+      "samples": 85,
+      "hit_rate": 34
     },
     {
       "workflow": "stress",
