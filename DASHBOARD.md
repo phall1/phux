@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-22T09:52:38Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-22T19:32:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 14 | 71% | 20m45s | 23m45s | 202 |
 | observatory | 7 | 86% | 12m25s | 12m42s | 168 |
 | release-please | 25 | 100% | 42s | 54s | 50 |
-| conventional-commits | 140 | 86% | 15s | 20s | 26 |
+| conventional-commits | 141 | 86% | 16s | 20s | 26 |
 
 ## ci jobs, last 30 days
 
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-22 19:31 | conventional-commits | pull_request | fix/plugin-agent-bench-phux-bin | success | 20s | 16s |
 | 2026-07-22 09:31 | stress | schedule | main | success | 21m01s | 20m58s |
 | 2026-07-21 14:48 | conventional-commits | pull_request | feat/oss-reference-relay | success | 14s | 11s |
 | 2026-07-21 14:48 | ci | pull_request | feat/oss-reference-relay | success | 18m08s | 23m10s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-17 09:14 | stress | schedule | main | success | 22m37s | 22m34s |
 | 2026-07-16 09:20 | stress | schedule | main | success | 23m45s | 23m42s |
 | 2026-07-15 20:42 | release-please | push | main | success | 21s | 18s |
-| 2026-07-15 20:42 | ci | push | main | success | 15m45s | 20m43s |
 
 ---
 
