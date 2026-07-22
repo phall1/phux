@@ -9,6 +9,13 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.3.1](https://github.com/phall1/phux/compare/v0.3.0...v0.3.1) (2026-07-22)
+
+
+### Bug Fixes
+
+* **ci:** pass built phux binary to plugin actions ([#264](https://github.com/phall1/phux/issues/264)) ([b30018e](https://github.com/phall1/phux/commit/b30018ea93a569b192670630fd4abc9dcc711de1))
+
 ## [0.3.0](https://github.com/phall1/phux/compare/v0.2.0...v0.3.0) (2026-07-20)
 
 
