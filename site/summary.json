@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-22T19:48:56Z",
+  "generated_at": "2026-07-22T19:49:10Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-22T19:48:45Z",
+      "duration_s": 18,
+      "runner_s": 15
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -19,6 +28,15 @@
       "created_at": "2026-07-22T19:48:43Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-22T19:48:14Z",
+      "duration_s": 51,
+      "runner_s": 44
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-18T03:23:58Z",
       "duration_s": 18,
       "runner_s": 15
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "ci/sync-install-surface-releasing",
-      "conclusion": "success",
-      "created_at": "2026-07-18T03:23:58Z",
-      "duration_s": 1107,
-      "runner_s": 1303
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-18T03:22:17Z",
-      "duration_s": 1051,
-      "runner_s": 1368
     }
   ],
   "workflows_30d": [
@@ -300,7 +300,7 @@
     },
     {
       "workflow": "release-please",
-      "runs": 25,
+      "runs": 26,
       "success_rate": 100,
       "median_s": 42,
       "p95_s": 54,
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 141,
+      "runs": 142,
       "success_rate": 86,
       "median_s": 16,
       "p95_s": 20,
