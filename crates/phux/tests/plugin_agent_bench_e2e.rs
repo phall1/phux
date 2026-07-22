@@ -78,6 +78,9 @@ fn repo_root() -> PathBuf {
 
 fn run_with_env(args: &[&str], envs: &[(&str, &str)]) -> (i32, String, String) {
     let out = Command::new(PHUX)
+        // Plugin actions launch nested `phux` commands. CI does not install
+        // the just-built binary on PATH, so always pass its exact location.
+        .env("PHUX_BIN", PHUX)
         .envs(envs.iter().copied())
         .args(args)
         .stdin(Stdio::null())
@@ -112,7 +115,6 @@ fn agent_bench_launches_lists_and_drives_role_session() {
     let envs = [
         ("XDG_CONFIG_HOME", xdg_text.as_str()),
         ("PHUX_SOCKET", socket.as_str()),
-        ("PHUX_BIN", PHUX),
         ("PHUX_AGENT_BENCH_PROFILE", profile.as_str()),
         ("PHUX_AGENT_BENCH_ROLES", "codex claude-code"),
         ("PHUX_AGENT_BENCH_STATE", state_text.as_str()),
@@ -140,7 +142,6 @@ fn agent_bench_launches_lists_and_drives_role_session() {
     let drive_envs = [
         ("XDG_CONFIG_HOME", xdg_text.as_str()),
         ("PHUX_SOCKET", socket.as_str()),
-        ("PHUX_BIN", PHUX),
         ("PHUX_AGENT_BENCH_PROFILE", profile.as_str()),
         ("PHUX_AGENT_BENCH_STATE", state_text.as_str()),
         ("PHUX_AGENT_BENCH_ROLE", "codex"),
