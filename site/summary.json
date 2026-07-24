@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-24T10:55:49Z",
+  "generated_at": "2026-07-24T10:56:05Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -28,6 +28,15 @@
       "created_at": "2026-07-24T10:52:20Z",
       "duration_s": 20,
       "runner_s": 15
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/relay-alpn-dialer",
+      "conclusion": "cancelled",
+      "created_at": "2026-07-24T10:52:20Z",
+      "duration_s": 207,
+      "runner_s": 378
     },
     {
       "workflow": "stress",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-20T23:10:25Z",
       "duration_s": 513,
       "runner_s": 1185
-    },
-    {
-      "workflow": "observatory",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-20T23:10:25Z",
-      "duration_s": 762,
-      "runner_s": 1467
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 159,
+      "runs": 160,
       "success_rate": 62,
       "median_s": 817,
       "p95_s": 1072,
-      "runner_minutes": 2043
+      "runner_minutes": 2049
     },
     {
       "workflow": "stress",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 158,
+      "runs": 159,
       "median_queue_s": 2,
       "median_s": 805,
       "p95_s": 1054
     },
     {
       "job": "check",
-      "runs": 156,
+      "runs": 157,
       "median_queue_s": 2,
-      "median_s": 167,
+      "median_s": 177,
       "p95_s": 284
     },
     {
       "job": "detect docs-only",
-      "runs": 159,
+      "runs": 160,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -361,7 +361,7 @@
       "job": "test",
       "step": "runner disk headroom",
       "median_s": 54,
-      "n": 14
+      "n": 15
     },
     {
       "job": "check",
@@ -373,7 +373,7 @@
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 18,
-      "n": 18
+      "n": 19
     },
     {
       "job": "test",
@@ -397,7 +397,7 @@
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 18
+      "n": 19
     }
   ],
   "cache": [
@@ -410,7 +410,7 @@
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 91,
+      "samples": 92,
       "hit_rate": 33
     },
     {
