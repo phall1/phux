@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-24T10:52:54Z",
+  "generated_at": "2026-07-24T10:55:49Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "adr-0052-connector-productization",
+      "conclusion": "success",
+      "created_at": "2026-07-24T10:55:24Z",
+      "duration_s": 16,
+      "runner_s": 14
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/relay-alpn-dialer",
+      "conclusion": "success",
+      "created_at": "2026-07-24T10:55:23Z",
+      "duration_s": 13,
+      "runner_s": 11
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-20T23:10:25Z",
       "duration_s": 762,
       "runner_s": 1467
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-20T23:10:25Z",
-      "duration_s": 1065,
-      "runner_s": 1361
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-20T22:52:11Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 144,
+      "runs": 146,
       "success_rate": 86,
       "median_s": 16,
       "p95_s": 20,

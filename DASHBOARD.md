@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-24T10:52:54Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-24T10:55:49Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 18 | 67% | 20m09s | 23m45s | 239 |
 | observatory | 8 | 88% | 12m07s | 12m42s | 190 |
 | release-please | 27 | 100% | 43s | 7m03s | 70 |
-| conventional-commits | 144 | 86% | 16s | 20s | 27 |
+| conventional-commits | 146 | 86% | 16s | 20s | 27 |
 
 ## ci jobs, last 30 days
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-24 10:55 | conventional-commits | pull_request | adr-0052-connector-productizatio | success | 16s | 14s |
+| 2026-07-24 10:55 | conventional-commits | pull_request | feat/relay-alpn-dialer | success | 13s | 11s |
 | 2026-07-24 10:52 | conventional-commits | pull_request | feat/relay-alpn-dialer | success | 20s | 15s |
 | 2026-07-24 09:25 | stress | schedule | main | success | 20m44s | 20m41s |
 | 2026-07-23 09:28 | stress | schedule | main | success | 16m36s | 16m33s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-20 23:10 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-20 23:10 | release-please | push | main | success | 8m33s | 19m45s |
 | 2026-07-20 23:10 | observatory | push | main | success | 12m42s | 24m27s |
-| 2026-07-20 23:10 | ci | push | main | success | 17m45s | 22m41s |
-| 2026-07-20 22:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 12s |
 
 ---
 
