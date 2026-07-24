@@ -83,6 +83,7 @@ amends / extends) are hand-curated from each ADR's body.
 | [0049](./0049-client-local-focus-and-advisory-attention.md) | Client-local focus and advisory agent attention | Accepted (reaffirms [0019](./0019-tui-multi-pane-rendering.md)) |
 | [0050](./0050-explicit-spawn-ownership.md) | Explicit spawn ownership, client-owned placement | Accepted |
 | [0051](./0051-outbound-dial-out-connector-transport.md) | Outbound dial-out (connector) transport mode | Proposed (walks through [0037](./0037-overlay-network-reachability.md)'s deferred door; builds on [0031](./0031-remote-consumer-auth-and-encryption.md), [0038](./0038-hub-satellite-auth.md)) |
+| [0053](./0053-minimal-reference-relay.md) | A minimal reference relay in-tree | Proposed (implements [0051](./0051-outbound-dial-out-connector-transport.md) and ADR-0052; backs 0051's trust-honesty claim) |
 
 ## When to write an ADR
 
