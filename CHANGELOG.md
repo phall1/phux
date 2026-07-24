@@ -9,6 +9,13 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.3.2](https://github.com/phall1/phux/compare/v0.3.1...v0.3.2) (2026-07-24)
+
+
+### Documentation
+
+* **adr:** accept 0051; propose 0052 settling connector route identity and config (phux-tmmb) ([#261](https://github.com/phall1/phux/issues/261)) ([45d24c1](https://github.com/phall1/phux/commit/45d24c114f0a51ee004d2b33d8b4a73a38bd07cc))
+
 ## [0.3.1](https://github.com/phall1/phux/compare/v0.3.0...v0.3.1) (2026-07-22)
 
 
