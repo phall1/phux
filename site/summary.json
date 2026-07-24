@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-24T09:46:20Z",
+  "generated_at": "2026-07-24T10:52:54Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/relay-alpn-dialer",
+      "conclusion": "success",
+      "created_at": "2026-07-24T10:52:20Z",
+      "duration_s": 20,
+      "runner_s": 15
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-20T22:52:11Z",
       "duration_s": 16,
       "runner_s": 12
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-20T22:52:11Z",
-      "duration_s": 1072,
-      "runner_s": 1325
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 143,
+      "runs": 144,
       "success_rate": 86,
       "median_s": 16,
       "p95_s": 20,
