@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T21:10:28Z",
+  "generated_at": "2026-07-25T21:12:49Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -50,6 +50,15 @@
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
+      "branch": "feat/phux-doctor",
+      "conclusion": "success",
+      "created_at": "2026-07-25T19:08:13Z",
+      "duration_s": 19,
+      "runner_s": 16
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
       "branch": "feat/herdr-parity-wave2",
       "conclusion": "failure",
       "created_at": "2026-07-25T18:45:00Z",
@@ -64,6 +73,15 @@
       "created_at": "2026-07-25T18:45:00Z",
       "duration_s": 4,
       "runner_s": 3
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/herdr-parity-wave2",
+      "conclusion": "success",
+      "created_at": "2026-07-25T18:45:00Z",
+      "duration_s": 19,
+      "runner_s": 15
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-24T10:58:17Z",
       "duration_s": 1053,
       "runner_s": 1279
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "adr-0052-connector-productization",
-      "conclusion": "success",
-      "created_at": "2026-07-24T10:55:24Z",
-      "duration_s": 16,
-      "runner_s": 14
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "adr-0052-connector-productization",
-      "conclusion": "success",
-      "created_at": "2026-07-24T10:55:24Z",
-      "duration_s": 169,
-      "runner_s": 230
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 156,
+      "runs": 158,
       "success_rate": 84,
       "median_s": 16,
       "p95_s": 21,
