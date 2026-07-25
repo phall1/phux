@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T21:54:49Z",
+  "generated_at": "2026-07-25T21:55:06Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -10,6 +10,15 @@
       "created_at": "2026-07-25T21:54:38Z",
       "duration_s": 3,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-25T21:54:38Z",
+      "duration_s": 16,
+      "runner_s": 13
     },
     {
       "workflow": "conventional-commits",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-25T20:50:24Z",
       "duration_s": 4,
       "runner_s": 2
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/phux-doctor",
-      "conclusion": "failure",
-      "created_at": "2026-07-25T19:08:13Z",
-      "duration_s": 5,
-      "runner_s": 3
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 171,
+      "runs": 172,
       "success_rate": 83,
       "median_s": 16,
       "p95_s": 21,
-      "runner_minutes": 36
+      "runner_minutes": 37
     }
   ],
   "ci_jobs_30d": [
