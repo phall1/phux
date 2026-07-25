@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T21:30:37Z",
+  "generated_at": "2026-07-25T21:30:58Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/cross-session-pane-move",
+      "conclusion": "success",
+      "created_at": "2026-07-25T21:30:22Z",
+      "duration_s": 25,
+      "runner_s": 17
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-25T01:40:13Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-25T01:40:13Z",
-      "duration_s": 1,
-      "runner_s": 1
     }
   ],
   "workflows_30d": [
@@ -308,10 +308,10 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 164,
+      "runs": 165,
       "success_rate": 84,
       "median_s": 16,
-      "p95_s": 20,
+      "p95_s": 21,
       "runner_minutes": 35
     }
   ],
