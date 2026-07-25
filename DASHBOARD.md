@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T23:10:01Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T23:10:57Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 193 | 60% | 13m31s | 18m24s | 2352 |
+| ci | 194 | 60% | 13m31s | 18m24s | 2373 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
 | release-please | 34 | 97% | 43s | 7m03s | 74 |
@@ -19,36 +19,36 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 192 | 2s | 13m19s | 17m58s |
-| check | 189 | 2s | 2m47s | 5m11s |
-| detect docs-only | 193 | 2s | 5s | 7s |
+| test | 193 | 2s | 13m21s | 17m58s |
+| check | 190 | 2s | 2m47s | 5m11s |
+| detect docs-only | 194 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 14m34s | 10 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m10s | 10 |
-| check | runner disk headroom | 1m09s | 12 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m03s | 10 |
+| check | runner disk headroom | 1m08s | 12 |
 | test | runner disk headroom | 1m01s | 12 |
-| check | Run Swatinem/rust-cache@v2 | 17s | 12 |
+| check | Run Swatinem/rust-cache@v2 | 18s | 12 |
 | test | Run Swatinem/rust-cache@v2 | 17s | 12 |
 | test | agents smoke | 12s | 10 |
 | check | docs-check | 10s | 12 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 12 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 12 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 12 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 2m00s | 100 |
-| ci / check | doc | 12s | 100 |
-| ci / check | deny | 4s | 100 |
-| ci / check | fmt | 1s | 103 |
-| ci / test | unit | 14m13s | 90 |
-| ci / test | e2e | 10s | 89 |
-| ci / test | agents-smoke | 1s | 30 |
+| ci / check | clippy | 2m00s | 101 |
+| ci / check | doc | 12s | 101 |
+| ci / check | deny | 4s | 101 |
+| ci / check | fmt | 1s | 104 |
+| ci / test | unit | 14m13s | 91 |
+| ci / test | e2e | 10s | 90 |
+| ci / test | agents-smoke | 1s | 31 |
 | observatory / timings | build-dev | 11m06s | 8 |
 | observatory / timings | build-release | 5m01s | 9 |
 | stress / stress | stress | 19m15s | 11 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 29% | 110 |
-| ci / test | 31% | 108 |
+| ci / check | 30% | 111 |
+| ci / test | 31% | 109 |
 | stress / stress | 18% | 11 |
 
 ## Cold build (observatory)
@@ -128,6 +128,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 22:53 | release-please | push | main | success | 52s | 45s |
 | 2026-07-25 22:53 | ci | push | main | success | 15m49s | 19m30s |
 | 2026-07-25 22:53 | conventional-commits | pull_request | feat/right-click-context-menus | success | 15s | 11s |
+| 2026-07-25 22:53 | ci | pull_request | feat/right-click-context-menus | success | 17m28s | 21m09s |
 | 2026-07-25 22:53 | conventional-commits | pull_request | feat/connector-productization | success | 13s | 11s |
 | 2026-07-25 22:53 | ci | pull_request | feat/connector-productization | success | 15m13s | 20m13s |
 | 2026-07-25 21:54 | ci | pull_request | release-please--branches--main-- | skipped | 3s | 0s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | success | 25s | 17s |
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | cancelled | 7s | 4s |
 | 2026-07-25 21:30 | ci | pull_request | feat/cross-session-pane-move | success | 3m06s | 4m00s |
-| 2026-07-25 21:27 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 
 ---
 
