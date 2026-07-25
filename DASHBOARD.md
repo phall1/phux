@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T21:34:08Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T21:34:22Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 9 | 78% | 12m07s | 12m42s | 190 |
 | release-please | 31 | 97% | 43s | 7m03s | 72 |
-| conventional-commits | 166 | 83% | 16s | 21s | 35 |
+| conventional-commits | 167 | 83% | 16s | 21s | 36 |
 
 ## ci jobs, last 30 days
 
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-25 21:33 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 0s |
 | 2026-07-25 21:33 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-25 21:33 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | success | 25s | 17s |
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | cancelled | 7s | 4s |
 | 2026-07-25 21:30 | ci | pull_request | feat/cross-session-pane-move | success | 3m06s | 4m00s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 17:45 | ci | pull_request | feat/always-on-server-and-ssh-en | failure | 6s | 5s |
 | 2026-07-25 17:16 | ci | pull_request | feat/herdr-parity-wave1 | failure | 4s | 3s |
 | 2026-07-25 17:16 | conventional-commits | pull_request | feat/herdr-parity-wave1 | success | 18s | 15s |
-| 2026-07-25 09:04 | stress | schedule | main | success | 18m05s | 18m01s |
 
 ---
 
