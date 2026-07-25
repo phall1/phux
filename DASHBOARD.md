@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T01:40:25Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T01:40:38Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 167 | 62% | 13m37s | 17m52s | 2120 |
+| ci | 168 | 61% | 13m36s | 17m52s | 2120 |
 | stress | 19 | 63% | 20m09s | 23m45s | 239 |
 | observatory | 8 | 88% | 12m07s | 12m42s | 190 |
-| release-please | 28 | 100% | 43s | 7m03s | 70 |
-| conventional-commits | 150 | 85% | 16s | 20s | 33 |
+| release-please | 29 | 100% | 43s | 7m03s | 71 |
+| conventional-commits | 151 | 85% | 16s | 21s | 33 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 166 | 2s | 13m25s | 17m34s |
-| check | 164 | 2s | 2m47s | 4m45s |
-| detect docs-only | 167 | 2s | 5s | 7s |
+| test | 167 | 2s | 13m25s | 17m34s |
+| check | 165 | 2s | 2m47s | 4m45s |
+| detect docs-only | 168 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,8 +121,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-25 01:40 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-25 01:40 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 01:40 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
+| 2026-07-25 01:40 | conventional-commits | pull_request | release-please--branches--main-- | success | 21s | 16s |
+| 2026-07-25 01:39 | release-please | push | main | success | 39s | 35s |
 | 2026-07-25 01:22 | conventional-commits | pull_request | feat/acknowledged-input | success | 25s | 21s |
 | 2026-07-25 01:22 | ci | pull_request | feat/acknowledged-input | success | 17m14s | 22m23s |
 | 2026-07-24 10:59 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-22 19:49 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-22 19:49 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-07-22 19:48 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
-| 2026-07-22 19:48 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-22 19:48 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-22 19:48 | release-please | push | main | success | 51s | 44s |
 
 ---
 
