@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T21:55:19Z",
+  "generated_at": "2026-07-25T22:03:53Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -118,6 +118,15 @@
       "created_at": "2026-07-25T21:33:29Z",
       "duration_s": 50,
       "runner_s": 43
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-25T21:33:29Z",
+      "duration_s": 1813,
+      "runner_s": 1250
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-25T20:50:24Z",
       "duration_s": 4,
       "runner_s": 6
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "failure",
-      "created_at": "2026-07-25T20:50:24Z",
-      "duration_s": 4,
-      "runner_s": 2
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 186,
+      "runs": 187,
       "success_rate": 59,
       "median_s": 809,
-      "p95_s": 1088,
-      "runner_minutes": 2244
+      "p95_s": 1094,
+      "runner_minutes": 2265
     },
     {
       "workflow": "stress",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 185,
+      "runs": 186,
       "median_queue_s": 2,
       "median_s": 799,
       "p95_s": 1069
     },
     {
       "job": "check",
-      "runs": 183,
+      "runs": 184,
       "median_queue_s": 2,
       "median_s": 163,
       "p95_s": 303
     },
     {
       "job": "detect docs-only",
-      "runs": 186,
+      "runs": 187,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -343,7 +343,7 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 944,
-      "n": 8
+      "n": 9
     },
     {
       "job": "check",
@@ -360,7 +360,7 @@
     {
       "job": "test",
       "step": "runner disk headroom",
-      "median_s": 54,
+      "median_s": 57,
       "n": 12
     },
     {
@@ -379,7 +379,7 @@
       "job": "test",
       "step": "agents smoke",
       "median_s": 12,
-      "n": 8
+      "n": 9
     },
     {
       "job": "check",
@@ -388,30 +388,30 @@
       "n": 11
     },
     {
+      "job": "test",
+      "step": "Run DeterminateSystems/nix-installer-action@v22",
+      "median_s": 9,
+      "n": 12
+    },
+    {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
       "n": 11
-    },
-    {
-      "job": "test",
-      "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 8,
-      "n": 12
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 105,
-      "hit_rate": 30
+      "samples": 106,
+      "hit_rate": 29
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 103,
-      "hit_rate": 29
+      "samples": 104,
+      "hit_rate": 30
     },
     {
       "workflow": "stress",
@@ -426,49 +426,49 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 120,
-      "n": 95
+      "n": 96
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 12,
-      "n": 95
+      "n": 96
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 4,
-      "n": 95
+      "n": 96
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 1,
-      "n": 98
+      "n": 99
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 854,
-      "n": 85
+      "median_s": 853,
+      "n": 86
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 10,
-      "n": 84
+      "n": 85
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 25
+      "n": 26
     },
     {
       "workflow": "observatory",
@@ -493,57 +493,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "f2483caaf",
+    "sha": "8df5245d7",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 114.162
+        "seconds": 111.787
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 28.562
+        "seconds": 28.745
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.018
+        "seconds": 6.017
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.817
+        "seconds": 3.816
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.817
+        "seconds": 3.815
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.518
+        "seconds": 3.516
       },
       {
         "binary": "phux-server::agent_events",
         "test": "unattached_subscriber_receives_events",
-        "seconds": 3.019
+        "seconds": 3.015
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.516
+        "seconds": 2.514
       },
       {
         "binary": "phux::bin/phux",
         "test": "commands::overlay::tests::wedged_tailscale_binary_is_killed_at_the_deadline",
-        "seconds": 2.022
+        "seconds": 2.020
       },
       {
         "binary": "phux-server::l2_adversarial",
         "test": "test_subscribe_events_no_loss",
-        "seconds": 2.017
+        "seconds": 2.016
       }
     ]
   },
