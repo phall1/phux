@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T23:51:36Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T23:51:53Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,34 +9,34 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 200 | 60% | 13m31s | 18m24s | 2431 |
+| ci | 201 | 59% | 13m31s | 18m24s | 2431 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
-| release-please | 35 | 97% | 43s | 7m03s | 74 |
-| conventional-commits | 182 | 83% | 16s | 21s | 38 |
+| release-please | 36 | 97% | 43s | 7m03s | 75 |
+| conventional-commits | 183 | 83% | 16s | 21s | 39 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
 | test | 199 | 2s | 13m21s | 17m58s |
-| check | 196 | 2s | 2m47s | 5m11s |
-| detect docs-only | 200 | 2s | 5s | 8s |
+| check | 197 | 2s | 2m47s | 5m11s |
+| detect docs-only | 201 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m25s | 12 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 12 |
-| test | runner disk headroom | 1m07s | 14 |
-| check | runner disk headroom | 1m03s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 17s | 14 |
-| test | agents smoke | 12s | 12 |
-| check | docs-check | 10s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| test | tests (unit + e2e) | 14m25s | 11 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m02s | 11 |
+| test | runner disk headroom | 1m07s | 13 |
+| check | runner disk headroom | 1m03s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 18s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 13 |
+| test | agents smoke | 12s | 11 |
+| check | docs-check | 10s | 13 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -122,7 +122,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-07-25 23:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
+| 2026-07-25 23:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-07-25 23:50 | release-please | push | main | success | 46s | 40s |
 | 2026-07-25 23:36 | conventional-commits | pull_request | feat/agent-detection-manifests | success | 22s | 18s |
 | 2026-07-25 23:36 | ci | pull_request | feat/agent-detection-manifests | success | 14m43s | 19m32s |
 | 2026-07-25 23:16 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 21:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
 | 2026-07-25 21:54 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-25 21:54 | ci | pull_request | release-please--branches--main-- | skipped | 8s | 0s |
-| 2026-07-25 21:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 10s |
-| 2026-07-25 21:53 | release-please | push | main | success | 45s | 37s |
-| 2026-07-25 21:53 | observatory | push | main | success | 13m00s | 24m57s |
 
 ---
 
