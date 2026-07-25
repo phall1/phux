@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T22:54:41Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T22:55:00Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 190 | 59% | 13m29s | 18m24s | 2312 |
+| ci | 191 | 59% | 13m29s | 18m24s | 2312 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
-| release-please | 33 | 97% | 43s | 7m03s | 73 |
-| conventional-commits | 174 | 83% | 16s | 21s | 37 |
+| release-please | 34 | 97% | 43s | 7m03s | 74 |
+| conventional-commits | 175 | 83% | 16s | 21s | 37 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 189 | 2s | 13m19s | 17m58s |
+| test | 190 | 2s | 13m19s | 17m58s |
 | check | 187 | 2s | 2m43s | 5m11s |
-| detect docs-only | 190 | 2s | 5s | 7s |
+| detect docs-only | 191 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,6 +122,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-07-25 22:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-25 22:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-25 22:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
+| 2026-07-25 22:53 | release-please | push | main | success | 52s | 45s |
 | 2026-07-25 22:53 | conventional-commits | pull_request | feat/right-click-context-menus | success | 15s | 11s |
 | 2026-07-25 22:53 | conventional-commits | pull_request | feat/connector-productization | success | 13s | 11s |
 | 2026-07-25 21:54 | ci | pull_request | release-please--branches--main-- | skipped | 3s | 0s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 21:27 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
 | 2026-07-25 21:27 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 21:27 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
-| 2026-07-25 21:27 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 13s |
-| 2026-07-25 21:26 | release-please | push | main | success | 49s | 44s |
-| 2026-07-25 21:26 | ci | push | main | success | 20m18s | 25m38s |
 
 ---
 
