@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T23:51:05Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T23:51:36Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 199 | 60% | 13m34s | 18m24s | 2431 |
+| ci | 200 | 60% | 13m31s | 18m24s | 2431 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
 | release-please | 35 | 97% | 43s | 7m03s | 74 |
-| conventional-commits | 181 | 83% | 16s | 21s | 38 |
+| conventional-commits | 182 | 83% | 16s | 21s | 38 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 198 | 2s | 13m21s | 17m58s |
-| check | 195 | 2s | 2m49s | 5m11s |
-| detect docs-only | 199 | 2s | 5s | 8s |
+| test | 199 | 2s | 13m21s | 17m58s |
+| check | 196 | 2s | 2m47s | 5m11s |
+| detect docs-only | 200 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-25 23:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-25 23:36 | conventional-commits | pull_request | feat/agent-detection-manifests | success | 22s | 18s |
 | 2026-07-25 23:36 | ci | pull_request | feat/agent-detection-manifests | success | 14m43s | 19m32s |
 | 2026-07-25 23:16 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 21:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 10s |
 | 2026-07-25 21:53 | release-please | push | main | success | 45s | 37s |
 | 2026-07-25 21:53 | observatory | push | main | success | 13m00s | 24m57s |
-| 2026-07-25 21:53 | ci | push | main | success | 28m57s | 23m34s |
-| 2026-07-25 21:53 | conventional-commits | pull_request | feat/relay-alpn-dialer | success | 19s | 15s |
 
 ---
 
