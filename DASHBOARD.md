@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-25T21:33:38Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-25T21:34:08Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,34 +9,34 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 180 | 60% | 13m29s | 18m08s | 2197 |
+| ci | 181 | 60% | 13m29s | 18m08s | 2197 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 9 | 78% | 12m07s | 12m42s | 190 |
 | release-please | 31 | 97% | 43s | 7m03s | 72 |
-| conventional-commits | 165 | 84% | 16s | 21s | 35 |
+| conventional-commits | 166 | 83% | 16s | 21s | 35 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 179 | 2s | 13m19s | 17m49s |
-| check | 177 | 2s | 2m43s | 5m03s |
-| detect docs-only | 180 | 2s | 5s | 8s |
+| test | 180 | 2s | 13m19s | 17m49s |
+| check | 178 | 2s | 2m43s | 5m03s |
+| detect docs-only | 181 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 15m49s | 9 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m03s | 10 |
-| check | runner disk headroom | 1m11s | 13 |
-| test | runner disk headroom | 57s | 13 |
-| check | Run Swatinem/rust-cache@v2 | 20s | 13 |
-| test | Run Swatinem/rust-cache@v2 | 17s | 13 |
-| test | agents smoke | 12s | 9 |
-| check | docs-check | 10s | 13 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
+| test | tests (unit + e2e) | 15m49s | 8 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m08s | 9 |
+| check | runner disk headroom | 1m11s | 12 |
+| test | runner disk headroom | 54s | 12 |
+| check | Run Swatinem/rust-cache@v2 | 20s | 12 |
+| test | Run Swatinem/rust-cache@v2 | 17s | 12 |
+| test | agents smoke | 12s | 8 |
+| check | docs-check | 10s | 12 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 12 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 12 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-25 21:33 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 0s |
+| 2026-07-25 21:33 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | success | 25s | 17s |
 | 2026-07-25 21:30 | conventional-commits | pull_request | feat/cross-session-pane-move | cancelled | 7s | 4s |
 | 2026-07-25 21:30 | ci | pull_request | feat/cross-session-pane-move | success | 3m06s | 4m00s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 17:16 | ci | pull_request | feat/herdr-parity-wave1 | failure | 4s | 3s |
 | 2026-07-25 17:16 | conventional-commits | pull_request | feat/herdr-parity-wave1 | success | 18s | 15s |
 | 2026-07-25 09:04 | stress | schedule | main | success | 18m05s | 18m01s |
-| 2026-07-25 01:40 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
-| 2026-07-25 01:40 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 14s |
 
 ---
 
