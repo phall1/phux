@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T22:23:02Z",
+  "generated_at": "2026-07-25T22:53:35Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/right-click-context-menus",
+      "conclusion": "success",
+      "created_at": "2026-07-25T22:53:14Z",
+      "duration_s": 15,
+      "runner_s": 11
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/connector-productization",
+      "conclusion": "success",
+      "created_at": "2026-07-25T22:53:11Z",
+      "duration_s": 13,
+      "runner_s": 11
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-25T21:26:15Z",
       "duration_s": 14,
       "runner_s": 11
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/always-on-server-and-ssh-enrollment",
-      "conclusion": "success",
-      "created_at": "2026-07-25T21:26:15Z",
-      "duration_s": 1007,
-      "runner_s": 1270
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/cross-session-pane-move",
-      "conclusion": "success",
-      "created_at": "2026-07-25T21:26:12Z",
-      "duration_s": 13,
-      "runner_s": 9
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 172,
+      "runs": 174,
       "success_rate": 83,
       "median_s": 16,
       "p95_s": 21,
