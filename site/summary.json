@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-25T21:34:37Z",
+  "generated_at": "2026-07-25T21:34:54Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-25T21:34:20Z",
+      "duration_s": 21,
+      "runner_s": 17
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-25T17:45:15Z",
       "duration_s": 5,
       "runner_s": 4
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/always-on-server-and-ssh-enrollment",
-      "conclusion": "failure",
-      "created_at": "2026-07-25T17:45:15Z",
-      "duration_s": 6,
-      "runner_s": 5
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 167,
+      "runs": 168,
       "success_rate": 83,
       "median_s": 16,
       "p95_s": 21,
