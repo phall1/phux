@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-26T00:06:20Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-26T00:06:35Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 203 | 59% | 13m31s | 18m14s | 2451 |
+| ci | 204 | 59% | 13m29s | 18m14s | 2451 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
-| release-please | 36 | 97% | 43s | 7m03s | 75 |
-| conventional-commits | 186 | 83% | 16s | 21s | 39 |
+| release-please | 37 | 97% | 44s | 7m03s | 76 |
+| conventional-commits | 187 | 83% | 16s | 21s | 39 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 201 | 2s | 13m21s | 17m58s |
-| check | 199 | 2s | 2m47s | 5m11s |
-| detect docs-only | 203 | 2s | 5s | 7s |
+| test | 202 | 2s | 13m19s | 17m51s |
+| check | 200 | 2s | 2m43s | 5m11s |
+| detect docs-only | 204 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -29,14 +29,14 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 13m03s | 12 |
 | check | rust checks (fmt + clippy + doc + deny) | 2m52s | 12 |
-| test | runner disk headroom | 1m07s | 14 |
-| check | runner disk headroom | 1m00s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 17s | 14 |
+| test | runner disk headroom | 1m09s | 13 |
+| check | runner disk headroom | 1m00s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 22s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 17s | 13 |
 | test | agents smoke | 12s | 12 |
-| check | docs-check | 10s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| check | docs-check | 10s | 13 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -121,8 +121,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-26 00:06 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-26 00:05 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 17s |
 | 2026-07-26 00:05 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-26 00:05 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-26 00:05 | release-please | push | main | success | 45s | 38s |
 | 2026-07-26 00:05 | conventional-commits | pull_request | feat/agent-detection-fixtures | success | 21s | 18s |
 | 2026-07-25 23:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | success | 13s | 10s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 22:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-07-25 22:53 | release-please | push | main | success | 52s | 45s |
 | 2026-07-25 22:53 | ci | push | main | success | 15m49s | 19m30s |
-| 2026-07-25 22:53 | conventional-commits | pull_request | feat/right-click-context-menus | success | 15s | 11s |
-| 2026-07-25 22:53 | ci | pull_request | feat/right-click-context-menus | success | 17m28s | 21m09s |
-| 2026-07-25 22:53 | conventional-commits | pull_request | feat/connector-productization | success | 13s | 11s |
 
 ---
 
