@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-26T03:52:43Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-26T03:53:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 224 | 59% | 13m34s | 18m11s | 2675 |
+| ci | 225 | 59% | 13m34s | 18m11s | 2675 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
 | release-please | 42 | 98% | 44s | 54s | 79 |
-| conventional-commits | 206 | 83% | 16s | 21s | 43 |
+| conventional-commits | 207 | 82% | 16s | 21s | 43 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 221 | 2s | 13m25s | 17m51s |
-| check | 219 | 2s | 2m52s | 5m05s |
-| detect docs-only | 224 | 2s | 5s | 7s |
+| test | 222 | 2s | 13m22s | 17m49s |
+| check | 220 | 2s | 2m49s | 5m05s |
+| detect docs-only | 225 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-26 03:52 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-07-26 03:52 | ci | pull_request | release-please--branches--main-- | skipped | 10s | 0s |
 | 2026-07-26 03:52 | conventional-commits | pull_request | work/version-negotiation | success | 16s | 13s |
 | 2026-07-26 02:55 | release-please | push | main | success | 28s | 23s |
 | 2026-07-26 02:55 | ci | push | main | success | 16m27s | 19m37s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
 | 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-26 01:26 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
-| 2026-07-26 01:25 | release-please | push | main | success | 45s | 38s |
-| 2026-07-26 01:25 | ci | push | main | success | 15m01s | 18m47s |
 
 ---
 
