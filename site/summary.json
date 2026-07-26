@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-26T03:53:13Z",
+  "generated_at": "2026-07-26T03:53:33Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-26T03:53:21Z",
+      "duration_s": 2,
+      "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-26T03:52:58Z",
+      "duration_s": 19,
+      "runner_s": 15
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -19,6 +37,15 @@
       "created_at": "2026-07-26T03:52:57Z",
       "duration_s": 10,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-26T03:52:35Z",
+      "duration_s": 45,
+      "runner_s": 41
     },
     {
       "workflow": "conventional-commits",
@@ -244,41 +271,14 @@
       "created_at": "2026-07-26T01:26:43Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-26T01:26:20Z",
-      "duration_s": 17,
-      "runner_s": 13
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-07-26T01:26:19Z",
-      "duration_s": 2,
-      "runner_s": 0
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-26T01:26:19Z",
-      "duration_s": 2,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 225,
-      "success_rate": 59,
-      "median_s": 814,
+      "runs": 226,
+      "success_rate": 58,
+      "median_s": 811,
       "p95_s": 1091,
       "runner_minutes": 2675
     },
@@ -300,7 +300,7 @@
     },
     {
       "workflow": "release-please",
-      "runs": 42,
+      "runs": 43,
       "success_rate": 98,
       "median_s": 44,
       "p95_s": 54,
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 207,
+      "runs": 208,
       "success_rate": 82,
       "median_s": 16,
       "p95_s": 21,
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 222,
+      "runs": 223,
       "median_queue_s": 2,
       "median_s": 802,
       "p95_s": 1069
     },
     {
       "job": "check",
-      "runs": 220,
+      "runs": 221,
       "median_queue_s": 2,
       "median_s": 169,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 225,
+      "runs": 226,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 7
@@ -349,13 +349,13 @@
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 91,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 68,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
@@ -372,8 +372,8 @@
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 21,
-      "n": 14
+      "median_s": 22,
+      "n": 13
     },
     {
       "job": "test",
@@ -385,13 +385,13 @@
       "job": "check",
       "step": "docs-check",
       "median_s": 10,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
