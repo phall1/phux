@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-26T01:46:17Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-26T01:46:29Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 215 | 59% | 13m31s | 18m14s | 2563 |
+| ci | 216 | 58% | 13m29s | 18m14s | 2563 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
 | release-please | 40 | 98% | 44s | 7m03s | 78 |
@@ -19,9 +19,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 213 | 2s | 13m21s | 17m51s |
-| check | 210 | 2s | 2m47s | 5m05s |
-| detect docs-only | 215 | 2s | 5s | 7s |
+| test | 214 | 2s | 13m19s | 17m51s |
+| check | 211 | 2s | 2m47s | 5m05s |
+| detect docs-only | 216 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-26 01:46 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-26 01:45 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 00:05 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-26 00:05 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 00:05 | release-please | push | main | success | 45s | 38s |
-| 2026-07-26 00:05 | ci | push | main | success | 14m53s | 17m50s |
 
 ---
 
