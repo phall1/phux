@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-26T01:26:43Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-26T01:27:11Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 211 | 59% | 13m31s | 18m14s | 2526 |
+| ci | 212 | 58% | 13m29s | 18m14s | 2526 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
-| release-please | 38 | 97% | 44s | 7m03s | 76 |
-| conventional-commits | 195 | 83% | 16s | 21s | 41 |
+| release-please | 39 | 97% | 44s | 7m03s | 77 |
+| conventional-commits | 196 | 83% | 16s | 21s | 41 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 209 | 2s | 13m21s | 17m51s |
-| check | 206 | 2s | 2m47s | 5m05s |
-| detect docs-only | 211 | 2s | 5s | 7s |
+| test | 210 | 2s | 13m19s | 17m51s |
+| check | 207 | 2s | 2m47s | 5m05s |
+| detect docs-only | 212 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,9 +121,12 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 16s |
+| 2026-07-26 01:26 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
 | 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-07-26 01:26 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
+| 2026-07-26 01:25 | release-please | push | main | success | 45s | 38s |
 | 2026-07-26 01:25 | conventional-commits | pull_request | feat/federation-defaults | success | 17s | 13s |
 | 2026-07-26 01:11 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 01:11 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
 | 2026-07-25 23:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-25 23:51 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
-| 2026-07-25 23:50 | release-please | push | main | success | 46s | 40s |
-| 2026-07-25 23:50 | ci | push | main | success | 15m15s | 19m44s |
-| 2026-07-25 23:36 | conventional-commits | pull_request | feat/agent-detection-manifests | success | 22s | 18s |
 
 ---
 
