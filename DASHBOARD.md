@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-26T01:46:02Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-26T01:46:17Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 215 | 59% | 13m31s | 18m14s | 2563 |
 | stress | 20 | 65% | 18m05s | 23m45s | 257 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
-| release-please | 39 | 97% | 44s | 7m03s | 77 |
-| conventional-commits | 198 | 82% | 16s | 21s | 41 |
+| release-please | 40 | 98% | 44s | 7m03s | 78 |
+| conventional-commits | 199 | 82% | 16s | 21s | 41 |
 
 ## ci jobs, last 30 days
 
@@ -123,6 +123,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-26 01:45 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
+| 2026-07-26 01:45 | release-please | push | main | success | 47s | 40s |
 | 2026-07-26 01:45 | conventional-commits | pull_request | feat/claude-in-phux | success | 19s | 15s |
 | 2026-07-26 01:26 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 16s |
 | 2026-07-26 01:26 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 00:05 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 00:05 | release-please | push | main | success | 45s | 38s |
 | 2026-07-26 00:05 | ci | push | main | success | 14m53s | 17m50s |
-| 2026-07-26 00:05 | conventional-commits | pull_request | feat/agent-detection-fixtures | success | 21s | 18s |
-| 2026-07-26 00:05 | ci | pull_request | feat/agent-detection-fixtures | success | 14m38s | 18m11s |
 
 ---
 

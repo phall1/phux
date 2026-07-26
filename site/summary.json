@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-26T01:46:02Z",
+  "generated_at": "2026-07-26T01:46:17Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -19,6 +19,24 @@
       "created_at": "2026-07-26T01:45:50Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-07-26T01:45:50Z",
+      "duration_s": 15,
+      "runner_s": 11
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-26T01:45:26Z",
+      "duration_s": 47,
+      "runner_s": 40
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-07-26T00:05:31Z",
       "duration_s": 893,
       "runner_s": 1070
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/agent-detection-fixtures",
-      "conclusion": "success",
-      "created_at": "2026-07-26T00:05:04Z",
-      "duration_s": 21,
-      "runner_s": 18
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/agent-detection-fixtures",
-      "conclusion": "success",
-      "created_at": "2026-07-26T00:05:04Z",
-      "duration_s": 878,
-      "runner_s": 1091
     }
   ],
   "workflows_30d": [
@@ -300,15 +300,15 @@
     },
     {
       "workflow": "release-please",
-      "runs": 39,
-      "success_rate": 97,
+      "runs": 40,
+      "success_rate": 98,
       "median_s": 44,
       "p95_s": 423,
-      "runner_minutes": 77
+      "runner_minutes": 78
     },
     {
       "workflow": "conventional-commits",
-      "runs": 198,
+      "runs": 199,
       "success_rate": 82,
       "median_s": 16,
       "p95_s": 21,
