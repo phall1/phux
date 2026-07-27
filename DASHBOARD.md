@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T05:44:31Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T05:55:17Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -11,7 +11,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|---:|---:|---:|
 | ci | 232 | 58% | 13m31s | 18m11s | 2749 |
 | stress | 21 | 62% | 18m05s | 23m45s | 264 |
-| observatory | 10 | 80% | 12m07s | 12m56s | 215 |
+| observatory | 11 | 82% | 12m07s | 12m56s | 240 |
 | release-please | 44 | 98% | 44s | 54s | 80 |
 | conventional-commits | 214 | 82% | 16s | 21s | 44 |
 
@@ -49,8 +49,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 13m24s | 110 |
 | ci / test | e2e | 10s | 109 |
 | ci / test | agents-smoke | 1s | 50 |
-| observatory / timings | build-dev | 11m06s | 8 |
-| observatory / timings | build-release | 5m01s | 9 |
+| observatory / timings | build-dev | 11m06s | 9 |
+| observatory / timings | build-release | 5m01s | 10 |
 | stress / stress | stress | 19m05s | 12 |
 
 ## Cache effectiveness (last 30 days)
@@ -63,42 +63,42 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 11m44s (previous: 11m01s) — 528 units at `0ae92367a`
+### dev: 10m43s (previous: 11m44s) — 535 units at `74c55ee83`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 122.95s |
-| `phux-server lib (test)` | 99.24s |
-| `phux bin "phux"` | 81.19s |
-| `phux-client lib (test)` | 65.43s |
-| `phux-server` | 57.01s |
-| `rustls` | 47.45s |
-| `phux-server test "spawn_terminal" (test)` | 35.61s |
-| `phux-server test "hub_relay_federation" (test)` | 34.74s |
+| `libghostty-vt-sys build script (run)` | 122.03s |
+| `phux bin "phux"` | 86.95s |
+| `phux-client lib (test)` | 84.9s |
+| `phux-server` | 76.49s |
+| `phux-server lib (test)` | 73.37s |
+| `rustls` | 47.24s |
+| `phux bin "phux" (test)` | 39.23s |
+| `quinn-proto` | 33.42s |
 
-### release: 5m13s (previous: 4m10s) — 362 units at `0ae92367a`
+### release: 5m35s (previous: 5m13s) — 365 units at `74c55ee83`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 148.24s |
-| `phux bin "phux"` | 117.54s |
-| `phux-server` | 24.08s |
-| `phux-mcp bin "phux-mcp"` | 22.58s |
-| `phux-config` | 22.25s |
-| `regex-automata` | 19.92s |
-| `clap_builder` | 17.54s |
-| `rustls` | 14.46s |
+| `libghostty-vt-sys build script (run)` | 142.99s |
+| `phux bin "phux"` | 138.0s |
+| `phux-server` | 29.74s |
+| `phux-mcp bin "phux-mcp"` | 24.38s |
+| `regex-automata` | 23.16s |
+| `phux-config` | 22.98s |
+| `rustls` | 17.68s |
+| `phux-client` | 12.77s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 13.6 MiB | 12.8 MiB |
+| `phux` | 14.5 MiB | 13.6 MiB |
 | `phux-mcp` | 2.1 MiB | 2.1 MiB |
 
 ## Dependency graph
 
-- locked packages: **435** (previous: 432) — 12 workspace members, 50 direct deps
+- locked packages: **438** (previous: 435) — 13 workspace members, 51 direct deps
 - duplicate versions: **32** (previous: 32)
 - proc-macro crates: 33; build-script crates: 67
 
@@ -127,6 +127,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 05:43 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-27 05:43 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 | 2026-07-27 05:43 | release-please | push | main | success | 51s | 44s |
+| 2026-07-27 05:43 | observatory | push | main | success | 11m54s | 24m43s |
 | 2026-07-27 05:25 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 15s | 10s |
 | 2026-07-27 05:25 | ci | pull_request | worktree-federated-enchanting-ye | success | 17m32s | 21m53s |
 | 2026-07-27 05:18 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 18s | 14s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 02:16 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-26 02:16 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
 | 2026-07-26 02:16 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
-| 2026-07-26 02:15 | release-please | push | main | success | 41s | 35s |
 
 ---
 
