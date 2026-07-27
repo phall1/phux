@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T05:25:59Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T05:26:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 228 | 59% | 13m34s | 18m11s | 2715 |
+| ci | 229 | 59% | 13m34s | 18m11s | 2727 |
 | stress | 21 | 62% | 18m05s | 23m45s | 264 |
 | observatory | 10 | 80% | 12m07s | 12m56s | 215 |
 | release-please | 43 | 98% | 44s | 54s | 79 |
@@ -19,9 +19,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 225 | 2s | 13m25s | 17m49s |
-| check | 223 | 2s | 2m52s | 5m05s |
-| detect docs-only | 228 | 2s | 5s | 7s |
+| test | 226 | 2s | 13m22s | 17m49s |
+| check | 224 | 2s | 2m52s | 5m05s |
+| detect docs-only | 229 | 2s | 5s | 7s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -29,23 +29,23 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 13m09s | 14 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m31s | 14 |
-| check | runner disk headroom | 1m08s | 14 |
-| test | runner disk headroom | 58s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 24s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 21s | 14 |
+| check | runner disk headroom | 1m08s | 15 |
+| test | runner disk headroom | 58s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 24s | 15 |
+| check | Run Swatinem/rust-cache@v2 | 21s | 15 |
 | test | agents smoke | 12s | 14 |
 | check | docs-check | 10s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 15 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 15 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m53s | 119 |
-| ci / check | doc | 11s | 119 |
+| ci / check | clippy | 1m53s | 120 |
+| ci / check | doc | 11s | 120 |
 | ci / check | deny | 3s | 119 |
-| ci / check | fmt | 2s | 122 |
+| ci / check | fmt | 2s | 123 |
 | ci / test | unit | 13m24s | 109 |
 | ci / test | e2e | 10s | 108 |
 | ci / test | agents-smoke | 1s | 49 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 34% | 129 |
-| ci / test | 39% | 127 |
+| ci / check | 34% | 130 |
+| ci / test | 38% | 128 |
 | stress / stress | 17% | 12 |
 
 ## Cold build (observatory)
@@ -118,6 +118,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-27 05:25 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 15s | 10s |
 | 2026-07-27 05:18 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 18s | 14s |
+| 2026-07-27 05:18 | ci | pull_request | worktree-federated-enchanting-ye | cancelled | 7m33s | 12m14s |
 | 2026-07-26 09:19 | stress | schedule | main | failure | 6m52s | 6m49s |
 | 2026-07-26 03:53 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-26 03:53 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
@@ -145,7 +146,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 01:46 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
 | 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-26 01:45 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-07-26 01:45 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 11s |
 
 ---
 
