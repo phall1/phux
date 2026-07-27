@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-27T13:53:52Z",
+  "generated_at": "2026-07-27T14:00:43Z",
   "recent_runs": [
     {
       "workflow": "stress",
@@ -55,6 +55,15 @@
       "created_at": "2026-07-27T13:35:25Z",
       "duration_s": 87,
       "runner_s": 85
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-27T13:34:51Z",
+      "duration_s": 1537,
+      "runner_s": 1116
     },
     {
       "workflow": "release-please",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-27T09:24:02Z",
       "duration_s": 18,
       "runner_s": 14
-    },
-    {
-      "workflow": "stress",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-07-27T09:24:01Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 249,
+      "runs": 250,
       "success_rate": 59,
       "median_s": 817,
-      "p95_s": 1088,
-      "runner_minutes": 2990
+      "p95_s": 1091,
+      "runner_minutes": 3009
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 246,
+      "runs": 247,
       "median_queue_s": 2,
-      "median_s": 805,
+      "median_s": 806,
       "p95_s": 1066
     },
     {
       "job": "check",
-      "runs": 244,
+      "runs": 245,
       "median_queue_s": 2,
       "median_s": 195,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 249,
+      "runs": 250,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,7 +342,7 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 832,
+      "median_s": 820,
       "n": 15
     },
     {
@@ -354,13 +354,13 @@
     {
       "job": "test",
       "step": "runner disk headroom",
-      "median_s": 57,
+      "median_s": 55,
       "n": 17
     },
     {
       "job": "check",
       "step": "runner disk headroom",
-      "median_s": 38,
+      "median_s": 28,
       "n": 18
     },
     {
@@ -378,7 +378,7 @@
     {
       "job": "test",
       "step": "agents smoke",
-      "median_s": 13,
+      "median_s": 12,
       "n": 15
     },
     {
@@ -401,29 +401,29 @@
     },
     {
       "job": "check",
-      "step": "e2e lane coverage",
+      "step": "formula-check",
       "median_s": 5,
-      "n": 9
+      "n": 10
     },
     {
       "job": "check",
-      "step": "formula-check",
+      "step": "generated-font check",
       "median_s": 5,
-      "n": 9
+      "n": 10
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 143,
-      "hit_rate": 31
+      "samples": 144,
+      "hit_rate": 32
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 141,
-      "hit_rate": 36
+      "samples": 142,
+      "hit_rate": 37
     },
     {
       "workflow": "stress",
@@ -437,50 +437,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 115,
-      "n": 133
+      "median_s": 113,
+      "n": 134
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 11,
-      "n": 133
+      "n": 134
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
-      "median_s": 3,
-      "n": 132
+      "median_s": 4,
+      "n": 133
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 136
+      "n": 137
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 804,
-      "n": 121
+      "n": 122
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 10,
-      "n": 120
+      "n": 121
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 61
+      "n": 62
     },
     {
       "workflow": "observatory",

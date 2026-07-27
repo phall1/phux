@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T13:53:52Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T14:00:43Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 249 | 59% | 13m37s | 18m08s | 2990 |
+| ci | 250 | 59% | 13m37s | 18m11s | 3009 |
 | observatory | 14 | 86% | 12m07s | 12m56s | 315 |
 | stress | 25 | 52% | 6m52s | 22m37s | 270 |
 | release-please | 49 | 98% | 45s | 7m03s | 101 |
@@ -19,38 +19,38 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 246 | 2s | 13m25s | 17m46s |
-| check | 244 | 2s | 3m15s | 5m05s |
-| detect docs-only | 249 | 2s | 5s | 8s |
+| test | 247 | 2s | 13m26s | 17m46s |
+| check | 245 | 2s | 3m15s | 5m05s |
+| detect docs-only | 250 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 13m52s | 15 |
+| test | tests (unit + e2e) | 13m40s | 15 |
 | check | rust checks (fmt + clippy + doc + deny) | 3m06s | 17 |
-| test | runner disk headroom | 57s | 17 |
-| check | runner disk headroom | 38s | 18 |
+| test | runner disk headroom | 55s | 17 |
+| check | runner disk headroom | 28s | 18 |
 | test | Run Swatinem/rust-cache@v2 | 18s | 17 |
 | check | Run Swatinem/rust-cache@v2 | 17s | 18 |
-| test | agents smoke | 13s | 15 |
+| test | agents smoke | 12s | 15 |
 | check | docs-check | 11s | 17 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 17 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 18 |
-| check | e2e lane coverage | 5s | 9 |
-| check | formula-check | 5s | 9 |
+| check | formula-check | 5s | 10 |
+| check | generated-font check | 5s | 10 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m55s | 133 |
-| ci / check | doc | 11s | 133 |
-| ci / check | deny | 3s | 132 |
-| ci / check | fmt | 2s | 136 |
-| ci / test | unit | 13m24s | 121 |
-| ci / test | e2e | 10s | 120 |
-| ci / test | agents-smoke | 1s | 61 |
+| ci / check | clippy | 1m53s | 134 |
+| ci / check | doc | 11s | 134 |
+| ci / check | deny | 4s | 133 |
+| ci / check | fmt | 2s | 137 |
+| ci / test | unit | 13m24s | 122 |
+| ci / test | e2e | 10s | 121 |
+| ci / test | agents-smoke | 1s | 62 |
 | observatory / timings | build-dev | 11m06s | 12 |
 | observatory / timings | build-release | 5m11s | 13 |
 | stress / stress | stress | 19m05s | 13 |
@@ -59,8 +59,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 31% | 143 |
-| ci / test | 36% | 141 |
+| ci / check | 32% | 144 |
+| ci / test | 37% | 142 |
 | stress / stress | 15% | 13 |
 
 ## Cold build (observatory)
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 13:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
 | 2026-07-27 13:35 | ci | pull_request | release-please--branches--main-- | cancelled | 1m29s | 1m02s |
 | 2026-07-27 13:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1m27s | 1m25s |
+| 2026-07-27 13:34 | ci | push | main | success | 25m37s | 18m36s |
 | 2026-07-27 13:34 | release-please | push | main | success | 1m58s | 46s |
 | 2026-07-27 13:33 | conventional-commits | pull_request | feat/gascity-runtime | success | 21s | 16s |
 | 2026-07-27 13:33 | ci | pull_request | feat/gascity-runtime | success | 16m37s | 20m14s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 09:24 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-07-27 09:24 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 09:24 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
-| 2026-07-27 09:24 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
