@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T09:25:01Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T09:35:43Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 238 | 58% | 13m34s | 18m11s | 2838 |
-| observatory | 12 | 83% | 12m07s | 12m56s | 265 |
+| observatory | 13 | 85% | 12m07s | 12m56s | 290 |
 | stress | 23 | 57% | 16m36s | 22m37s | 264 |
 | release-please | 46 | 98% | 44s | 7m03s | 99 |
 | conventional-commits | 217 | 82% | 16s | 21s | 45 |
@@ -51,8 +51,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 13m42s | 114 |
 | ci / test | e2e | 10s | 113 |
 | ci / test | agents-smoke | 1s | 54 |
-| observatory / timings | build-dev | 11m06s | 10 |
-| observatory / timings | build-release | 5m07s | 11 |
+| observatory / timings | build-dev | 11m06s | 11 |
+| observatory / timings | build-release | 5m07s | 12 |
 | stress / stress | stress | 19m05s | 12 |
 
 ## Cache effectiveness (last 30 days)
@@ -65,31 +65,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 11m14s (previous: 10m43s) — 535 units at `5e38ec985`
+### dev: 10m45s (previous: 11m14s) — 537 units at `f8112127d`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 125.2s |
-| `phux bin "phux"` | 91.38s |
-| `phux-client lib (test)` | 88.73s |
-| `phux-server` | 80.86s |
-| `phux-server lib (test)` | 57.82s |
-| `rustls` | 51.39s |
-| `phux bin "phux" (test)` | 40.64s |
-| `quinn-proto` | 37.59s |
+| `libghostty-vt-sys build script (run)` | 114.36s |
+| `phux bin "phux"` | 88.51s |
+| `phux-client lib (test)` | 88.09s |
+| `phux-server` | 76.43s |
+| `phux-server lib (test)` | 61.59s |
+| `rustls` | 49.56s |
+| `phux bin "phux" (test)` | 39.69s |
+| `quinn-proto` | 34.08s |
 
-### release: 5m34s (previous: 5m35s) — 365 units at `5e38ec985`
+### release: 5m30s (previous: 5m34s) — 365 units at `f8112127d`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 160.07s |
-| `phux bin "phux"` | 122.86s |
-| `phux-server` | 26.68s |
-| `phux-config` | 23.54s |
-| `phux-mcp bin "phux-mcp"` | 21.77s |
-| `regex-automata` | 18.15s |
-| `clap_builder` | 16.48s |
-| `rustls` | 15.2s |
+| `libghostty-vt-sys build script (run)` | 160.15s |
+| `phux bin "phux"` | 121.62s |
+| `phux-server` | 24.95s |
+| `phux-config` | 24.57s |
+| `phux-mcp bin "phux-mcp"` | 21.81s |
+| `regex-automata` | 19.41s |
+| `rustls` | 17.13s |
+| `clap_builder` | 16.53s |
 
 ## Release binary size
 
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 09:24 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-07-27 09:24 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 09:23 | release-please | push | main | success | 43s | 37s |
+| 2026-07-27 09:23 | observatory | push | main | success | 11m53s | 24m37s |
 | 2026-07-27 09:06 | conventional-commits | pull_request | seams-and-guardrails | success | 13s | 10s |
 | 2026-07-27 09:06 | ci | pull_request | seams-and-guardrails | success | 17m07s | 21m49s |
 | 2026-07-27 06:01 | stress | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-26 03:53 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-26 03:53 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-07-26 03:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
-| 2026-07-26 03:52 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 
 ---
 
