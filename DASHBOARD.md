@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T13:28:17Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T13:33:35Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 14 | 86% | 12m07s | 12m56s | 315 |
 | stress | 24 | 54% | 6m52s | 22m37s | 270 |
 | release-please | 48 | 98% | 44s | 7m03s | 100 |
-| conventional-commits | 222 | 82% | 16s | 21s | 46 |
+| conventional-commits | 223 | 82% | 16s | 21s | 46 |
 
 ## ci jobs, last 30 days
 
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-27 13:33 | conventional-commits | pull_request | feat/gascity-runtime | success | 21s | 16s |
 | 2026-07-27 13:27 | release-please | push | main | success | 28s | 23s |
 | 2026-07-27 13:12 | conventional-commits | pull_request | deflake-attach-latency | success | 14s | 11s |
 | 2026-07-27 13:12 | ci | pull_request | deflake-attach-latency | success | 15m11s | 19m40s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 06:01 | observatory | push | main | success | 12m23s | 25m09s |
 | 2026-07-27 06:01 | ci | push | main | success | 17m46s | 22m55s |
 | 2026-07-27 05:44 | ci | pull_request | release-please--branches--main-- | success | 16m46s | 21m31s |
-| 2026-07-27 05:44 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
