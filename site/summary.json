@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-27T06:19:29Z",
+  "generated_at": "2026-07-27T09:06:52Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "seams-and-guardrails",
+      "conclusion": "success",
+      "created_at": "2026-07-27T09:06:26Z",
+      "duration_s": 13,
+      "runner_s": 10
+    },
     {
       "workflow": "stress",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-26T02:55:06Z",
       "duration_s": 987,
       "runner_s": 1177
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "test/put-file-e2e",
-      "conclusion": "success",
-      "created_at": "2026-07-26T02:54:42Z",
-      "duration_s": 19,
-      "runner_s": 14
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 214,
+      "runs": 215,
       "success_rate": 82,
       "median_s": 16,
       "p95_s": 21,
