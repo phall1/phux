@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T12:04:15Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T12:04:50Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 240 | 59% | 13m36s | 18m11s | 2879 |
+| ci | 241 | 59% | 13m36s | 18m11s | 2879 |
 | observatory | 14 | 86% | 12m07s | 12m56s | 315 |
 | stress | 24 | 54% | 6m52s | 22m37s | 270 |
 | release-please | 46 | 98% | 44s | 7m03s | 99 |
-| conventional-commits | 218 | 83% | 16s | 21s | 45 |
+| conventional-commits | 219 | 82% | 16s | 21s | 45 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 237 | 2s | 13m25s | 17m49s |
-| check | 235 | 2s | 3m01s | 5m11s |
-| detect docs-only | 240 | 2s | 5s | 8s |
+| test | 238 | 2s | 13m25s | 17m49s |
+| check | 236 | 2s | 2m57s | 5m11s |
+| detect docs-only | 241 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -123,6 +123,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-27 12:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-07-27 12:04 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-27 11:48 | conventional-commits | pull_request | seams-residual | success | 19s | 15s |
 | 2026-07-27 11:48 | ci | pull_request | seams-residual | success | 15m36s | 20m07s |
 | 2026-07-27 10:48 | stress | schedule | main | failure | 6m13s | 6m09s |
@@ -151,8 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 05:43 | observatory | push | main | success | 11m54s | 24m43s |
 | 2026-07-27 05:43 | ci | push | main | success | 17m25s | 22m17s |
 | 2026-07-27 05:25 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 15s | 10s |
-| 2026-07-27 05:25 | ci | pull_request | worktree-federated-enchanting-ye | success | 17m32s | 21m53s |
-| 2026-07-27 05:18 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 18s | 14s |
 
 ---
 
