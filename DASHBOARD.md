@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T09:39:35Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T10:04:28Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 239 | 59% | 13m36s | 18m11s | 2859 |
-| observatory | 13 | 85% | 12m07s | 12m56s | 290 |
+| observatory | 14 | 86% | 12m07s | 12m56s | 315 |
 | stress | 23 | 57% | 16m36s | 22m37s | 264 |
 | release-please | 46 | 98% | 44s | 7m03s | 99 |
 | conventional-commits | 217 | 82% | 16s | 21s | 45 |
@@ -51,8 +51,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 13m42s | 115 |
 | ci / test | e2e | 10s | 114 |
 | ci / test | agents-smoke | 1s | 55 |
-| observatory / timings | build-dev | 11m06s | 11 |
-| observatory / timings | build-release | 5m07s | 12 |
+| observatory / timings | build-dev | 11m06s | 12 |
+| observatory / timings | build-release | 5m11s | 13 |
 | stress / stress | stress | 19m05s | 12 |
 
 ## Cache effectiveness (last 30 days)
@@ -65,31 +65,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 10m45s (previous: 11m14s) — 537 units at `f8112127d`
+### dev: 11m25s (previous: 10m45s) — 537 units at `f8112127d`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 114.36s |
-| `phux bin "phux"` | 88.51s |
-| `phux-client lib (test)` | 88.09s |
-| `phux-server` | 76.43s |
-| `phux-server lib (test)` | 61.59s |
-| `rustls` | 49.56s |
-| `phux bin "phux" (test)` | 39.69s |
-| `quinn-proto` | 34.08s |
+| `libghostty-vt-sys build script (run)` | 125.06s |
+| `phux bin "phux"` | 95.02s |
+| `phux-client lib (test)` | 92.19s |
+| `phux-server` | 81.77s |
+| `phux-server lib (test)` | 64.66s |
+| `rustls` | 51.79s |
+| `phux bin "phux" (test)` | 43.07s |
+| `quinn-proto` | 41.79s |
 
-### release: 5m30s (previous: 5m34s) — 365 units at `f8112127d`
+### release: 5m26s (previous: 5m30s) — 365 units at `f8112127d`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 160.15s |
-| `phux bin "phux"` | 121.62s |
-| `phux-server` | 24.95s |
-| `phux-config` | 24.57s |
-| `phux-mcp bin "phux-mcp"` | 21.81s |
-| `regex-automata` | 19.41s |
-| `rustls` | 17.13s |
-| `clap_builder` | 16.53s |
+| `libghostty-vt-sys build script (run)` | 156.26s |
+| `phux bin "phux"` | 120.55s |
+| `phux-server` | 27.34s |
+| `phux-mcp bin "phux-mcp"` | 21.68s |
+| `phux-config` | 20.96s |
+| `regex-automata` | 19.75s |
+| `rustls` | 15.65s |
+| `clap_builder` | 15.23s |
 
 ## Release binary size
 
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-27 09:51 | observatory | schedule | main | success | 12m32s | 24m57s |
 | 2026-07-27 09:24 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 09:24 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-07-27 09:24 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 05:18 | ci | pull_request | worktree-federated-enchanting-ye | cancelled | 7m33s | 12m14s |
 | 2026-07-26 09:19 | stress | schedule | main | failure | 6m52s | 6m49s |
 | 2026-07-26 03:53 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
-| 2026-07-26 03:53 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 
 ---
 
