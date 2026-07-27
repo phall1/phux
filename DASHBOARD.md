@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T20:19:49Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T20:20:09Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 253 | 59% | 13m37s | 18m14s | 3051 |
+| ci | 254 | 59% | 13m37s | 18m14s | 3051 |
 | observatory | 15 | 87% | 12m07s | 12m56s | 336 |
 | stress | 26 | 50% | 6m13s | 22m37s | 270 |
-| release-please | 50 | 98% | 45s | 7m36s | 122 |
+| release-please | 51 | 98% | 45s | 7m36s | 122 |
 | conventional-commits | 228 | 82% | 16s | 22s | 48 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 250 | 2s | 13m26s | 17m46s |
-| check | 248 | 2s | 3m15s | 5m11s |
-| detect docs-only | 253 | 2s | 5s | 8s |
+| test | 251 | 2s | 13m26s | 17m46s |
+| check | 249 | 2s | 3m15s | 5m11s |
+| detect docs-only | 254 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -123,9 +123,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-27 20:19 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 20:19 | stress | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-27 20:19 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 20:19 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
+| 2026-07-27 20:18 | release-please | push | main | success | 50s | 44s |
 | 2026-07-27 20:03 | conventional-commits | pull_request | ephemeral-lifetime-and-playback | success | 15s | 13s |
 | 2026-07-27 20:03 | ci | pull_request | ephemeral-lifetime-and-playback | success | 15m53s | 19m34s |
 | 2026-07-27 13:53 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -151,8 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 12:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-27 12:04 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-07-27 12:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 28s | 23s |
-| 2026-07-27 12:04 | release-please | push | main | success | 55s | 48s |
-| 2026-07-27 12:04 | ci | push | main | success | 16m57s | 20m28s |
 
 ---
 
