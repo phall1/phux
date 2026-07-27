@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T20:46:18Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T20:50:57Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 256 | 59% | 13m37s | 18m14s | 3094 |
-| observatory | 15 | 87% | 12m07s | 12m56s | 336 |
+| observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 27 | 48% | 6m13s | 22m37s | 270 |
 | release-please | 52 | 98% | 45s | 7m42s | 143 |
 | conventional-commits | 229 | 82% | 16s | 22s | 48 |
@@ -51,8 +51,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 13m24s | 126 |
 | ci / test | e2e | 10s | 125 |
 | ci / test | agents-smoke | 1s | 66 |
-| observatory / timings | build-dev | 11m06s | 13 |
-| observatory / timings | build-release | 5m11s | 14 |
+| observatory / timings | build-dev | 11m06s | 14 |
+| observatory / timings | build-release | 5m11s | 15 |
 | stress / stress | stress | 19m05s | 13 |
 
 ## Cache effectiveness (last 30 days)
@@ -65,37 +65,37 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 7m50s (previous: 11m25s) — 538 units at `65a296b14`
+### dev: 11m24s (previous: 7m50s) — 541 units at `02dd58643`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 71.65s |
-| `phux-client lib (test)` | 67.3s |
-| `phux bin "phux"` | 65.29s |
-| `phux-server` | 56.66s |
-| `phux-server lib (test)` | 39.45s |
-| `rustls` | 35.03s |
-| `phux bin "phux" (test)` | 29.77s |
-| `quinn-proto` | 24.47s |
+| `libghostty-vt-sys build script (run)` | 131.05s |
+| `phux-client lib (test)` | 92.59s |
+| `phux bin "phux"` | 90.2s |
+| `phux-server` | 82.24s |
+| `phux-server lib (test)` | 50.6s |
+| `rustls` | 50.38s |
+| `phux bin "phux" (test)` | 45.07s |
+| `phux-config` | 34.65s |
 
-### release: 5m25s (previous: 5m26s) — 365 units at `65a296b14`
+### release: 4m45s (previous: 5m25s) — 365 units at `02dd58643`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 147.32s |
-| `phux bin "phux"` | 127.22s |
-| `phux-server` | 27.89s |
-| `phux-mcp bin "phux-mcp"` | 22.87s |
-| `phux-config` | 21.92s |
-| `regex-automata` | 21.17s |
-| `clap_builder` | 16.04s |
-| `rustls` | 15.53s |
+| `libghostty-vt-sys build script (run)` | 121.34s |
+| `phux bin "phux"` | 118.25s |
+| `phux-server` | 23.48s |
+| `phux-config` | 21.09s |
+| `phux-mcp bin "phux-mcp"` | 20.13s |
+| `regex-automata` | 18.52s |
+| `rustls` | 12.94s |
+| `clap_builder` | 12.29s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 14.5 MiB | 14.5 MiB |
+| `phux` | 14.6 MiB | 14.5 MiB |
 | `phux-mcp` | 2.1 MiB | 2.1 MiB |
 
 ## Dependency graph
@@ -125,6 +125,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-07-27 20:38 | stress | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
 | 2026-07-27 20:37 | release-please | push | main | success | 8m03s | 20m11s |
+| 2026-07-27 20:37 | observatory | push | main | success | 12m46s | 23m55s |
 | 2026-07-27 20:20 | ci | pull_request | release-please--branches--main-- | success | 17m18s | 22m03s |
 | 2026-07-27 20:19 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 20:19 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 13:27 | release-please | push | main | success | 28s | 23s |
 | 2026-07-27 13:27 | ci | push | main | success | 15m40s | 20m12s |
 | 2026-07-27 13:12 | conventional-commits | pull_request | deflake-attach-latency | success | 14s | 11s |
-| 2026-07-27 13:12 | ci | pull_request | deflake-attach-latency | success | 15m11s | 19m40s |
 
 ---
 
