@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T12:05:01Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-27T12:05:18Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,34 +9,34 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 241 | 59% | 13m36s | 18m11s | 2879 |
+| ci | 242 | 58% | 13m34s | 18m08s | 2879 |
 | observatory | 14 | 86% | 12m07s | 12m56s | 315 |
 | stress | 24 | 54% | 6m52s | 22m37s | 270 |
-| release-please | 46 | 98% | 44s | 7m03s | 99 |
-| conventional-commits | 219 | 82% | 16s | 21s | 45 |
+| release-please | 47 | 98% | 45s | 7m03s | 100 |
+| conventional-commits | 220 | 82% | 16s | 21s | 45 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 238 | 2s | 13m25s | 17m49s |
-| check | 236 | 2s | 2m57s | 5m11s |
-| detect docs-only | 241 | 2s | 5s | 8s |
+| test | 239 | 2s | 13m25s | 17m49s |
+| check | 237 | 2s | 2m57s | 5m11s |
+| detect docs-only | 242 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 13m40s | 15 |
-| check | rust checks (fmt + clippy + doc + deny) | 3m06s | 15 |
-| check | runner disk headroom | 1m00s | 16 |
-| test | runner disk headroom | 58s | 16 |
-| check | Run Swatinem/rust-cache@v2 | 18s | 16 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 16 |
-| test | agents smoke | 12s | 15 |
-| check | docs-check | 10s | 15 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 16 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 16 |
+| test | tests (unit + e2e) | 13m40s | 14 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m06s | 14 |
+| check | runner disk headroom | 1m00s | 15 |
+| test | runner disk headroom | 58s | 15 |
+| check | Run Swatinem/rust-cache@v2 | 18s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 15 |
+| test | agents smoke | 12s | 14 |
+| check | docs-check | 10s | 14 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 15 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 15 |
 | check | formula-check | 6s | 3 |
 | check | e2e lane coverage | 5s | 3 |
 
@@ -123,8 +123,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-27 12:05 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-07-27 12:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-27 12:04 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
+| 2026-07-27 12:04 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 28s | 23s |
+| 2026-07-27 12:04 | release-please | push | main | success | 55s | 48s |
 | 2026-07-27 11:48 | conventional-commits | pull_request | seams-residual | success | 19s | 15s |
 | 2026-07-27 11:48 | ci | pull_request | seams-residual | success | 15m36s | 20m07s |
 | 2026-07-27 10:48 | stress | schedule | main | failure | 6m13s | 6m09s |
@@ -150,9 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 05:43 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-07-27 05:43 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 | 2026-07-27 05:43 | release-please | push | main | success | 51s | 44s |
-| 2026-07-27 05:43 | observatory | push | main | success | 11m54s | 24m43s |
-| 2026-07-27 05:43 | ci | push | main | success | 17m25s | 22m17s |
-| 2026-07-27 05:25 | conventional-commits | pull_request | worktree-federated-enchanting-ye | success | 15s | 10s |
 
 ---
 
