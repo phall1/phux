@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-27T12:05:33Z",
+  "generated_at": "2026-07-27T12:21:15Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -55,6 +55,15 @@
       "created_at": "2026-07-27T12:04:05Z",
       "duration_s": 55,
       "runner_s": 48
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-27T12:04:05Z",
+      "duration_s": 1017,
+      "runner_s": 1228
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-27T05:43:39Z",
       "duration_s": 2,
       "runner_s": 1
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-27T05:43:39Z",
-      "duration_s": 17,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 242,
+      "runs": 243,
       "success_rate": 58,
-      "median_s": 814,
+      "median_s": 816,
       "p95_s": 1088,
-      "runner_minutes": 2879
+      "runner_minutes": 2899
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 239,
+      "runs": 240,
       "median_queue_s": 2,
       "median_s": 805,
       "p95_s": 1069
     },
     {
       "job": "check",
-      "runs": 237,
+      "runs": 238,
       "median_queue_s": 2,
       "median_s": 177,
       "p95_s": 311
     },
     {
       "job": "detect docs-only",
-      "runs": 242,
+      "runs": 243,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,7 +342,7 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 820,
+      "median_s": 832,
       "n": 14
     },
     {
@@ -378,7 +378,7 @@
     {
       "job": "test",
       "step": "agents smoke",
-      "median_s": 12,
+      "median_s": 13,
       "n": 14
     },
     {
@@ -403,26 +403,26 @@
       "job": "check",
       "step": "formula-check",
       "median_s": 6,
-      "n": 3
+      "n": 4
     },
     {
       "job": "check",
       "step": "e2e lane coverage",
       "median_s": 5,
-      "n": 3
+      "n": 4
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 137,
+      "samples": 138,
       "hit_rate": 32
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 135,
+      "samples": 136,
       "hit_rate": 36
     },
     {
@@ -437,50 +437,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 119,
-      "n": 127
+      "median_s": 117,
+      "n": 128
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 11,
-      "n": 127
+      "n": 128
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 4,
-      "n": 126
+      "n": 127
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 130
+      "n": 131
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 821,
-      "n": 116
+      "median_s": 822,
+      "n": 117
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 10,
-      "n": 115
+      "n": 116
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 56
+      "n": 57
     },
     {
       "workflow": "observatory",
@@ -505,57 +505,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "c0ced3eb8",
+    "sha": "8f7284de9",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 83.509
+        "seconds": 110.890
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 20.610
+        "seconds": 26.997
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 6.015
+        "seconds": 6.019
       },
       {
         "binary": "phux-relay::relay_auth",
         "test": "stalled_preamble_does_not_wedge_relay",
-        "seconds": 5.177
-      },
-      {
-        "binary": "phux-server::agent_detect",
-        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.814
+        "seconds": 5.114
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.812
+        "seconds": 3.822
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
+        "seconds": 3.818
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.514
-      },
-      {
-        "binary": "phux-server::agent_events",
-        "test": "unattached_subscriber_receives_events",
-        "seconds": 3.013
-      },
-      {
-        "binary": "phux-server::phux_3uv_acked_incremental",
-        "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 2.512
+        "seconds": 3.518
       },
       {
         "binary": "phux-record::golden_cast",
         "test": "both_containers_agree_on_the_frame_count_for_one_recording",
-        "seconds": 2.338
+        "seconds": 3.403
+      },
+      {
+        "binary": "phux-server::agent_events",
+        "test": "unattached_subscriber_receives_events",
+        "seconds": 3.018
+      },
+      {
+        "binary": "phux-record::golden_cast",
+        "test": "golden_cast_renders_to_a_looping_gif",
+        "seconds": 2.674
       }
     ]
   },
