@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-27T20:55:46Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-28T09:42:44Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -11,7 +11,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|---:|---:|---:|
 | ci | 257 | 59% | 13m37s | 18m14s | 3116 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
-| stress | 27 | 48% | 6m13s | 22m37s | 270 |
+| stress | 28 | 46% | 5m20s | 22m37s | 273 |
 | release-please | 52 | 98% | 45s | 7m42s | 143 |
 | conventional-commits | 229 | 82% | 16s | 22s | 48 |
 
@@ -53,7 +53,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | agents-smoke | 1s | 67 |
 | observatory / timings | build-dev | 11m06s | 14 |
 | observatory / timings | build-release | 5m11s | 15 |
-| stress / stress | stress | 19m05s | 13 |
+| stress / stress | stress | 18m30s | 14 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -61,7 +61,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|
 | ci / check | 31% | 149 |
 | ci / test | 35% | 147 |
-| stress / stress | 15% | 13 |
+| stress / stress | 14% | 14 |
 
 ## Cold build (observatory)
 
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-07-28 09:39 | stress | schedule | main | failure | 2m39s | 2m35s |
 | 2026-07-27 20:38 | stress | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
 | 2026-07-27 20:37 | release-please | push | main | success | 8m03s | 20m11s |
 | 2026-07-27 20:37 | observatory | push | main | success | 12m46s | 23m55s |
@@ -152,7 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 13:33 | ci | pull_request | feat/gascity-runtime | success | 16m37s | 20m14s |
 | 2026-07-27 13:28 | ci | pull_request | release-please--branches--main-- | cancelled | 6m59s | 11m48s |
 | 2026-07-27 13:27 | release-please | push | main | success | 28s | 23s |
-| 2026-07-27 13:27 | ci | push | main | success | 15m40s | 20m12s |
 
 ---
 
