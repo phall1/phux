@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-29T10:04:46Z",
+  "generated_at": "2026-07-29T10:09:16Z",
   "recent_runs": [
     {
       "workflow": "stress",
@@ -64,6 +64,15 @@
       "created_at": "2026-07-29T09:36:00Z",
       "duration_s": 60,
       "runner_s": 41
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-07-29T09:36:00Z",
+      "duration_s": 1981,
+      "runner_s": 3149
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-07-27T13:36:52Z",
       "duration_s": 983,
       "runner_s": 1083
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-07-27T13:36:51Z",
-      "duration_s": 48,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 260,
+      "runs": 261,
       "success_rate": 59,
       "median_s": 817,
       "p95_s": 1104,
-      "runner_minutes": 3140
+      "runner_minutes": 3193
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 257,
+      "runs": 258,
       "median_queue_s": 2,
       "median_s": 807,
-      "p95_s": 1069
+      "p95_s": 1071
     },
     {
       "job": "check",
-      "runs": 255,
+      "runs": 256,
       "median_queue_s": 2,
       "median_s": 196,
       "p95_s": 312
     },
     {
       "job": "detect docs-only",
-      "runs": 260,
+      "runs": 261,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -354,7 +354,7 @@
     {
       "job": "test",
       "step": "runner disk headroom",
-      "median_s": 38,
+      "median_s": 31,
       "n": 18
     },
     {
@@ -403,26 +403,26 @@
       "job": "check",
       "step": "e2e lane coverage",
       "median_s": 5,
-      "n": 16
+      "n": 17
     },
     {
       "job": "check",
       "step": "formula-check",
       "median_s": 5,
-      "n": 16
+      "n": 17
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 150,
+      "samples": 151,
       "hit_rate": 31
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 148,
+      "samples": 149,
       "hit_rate": 35
     },
     {
@@ -437,50 +437,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 115,
-      "n": 140
+      "median_s": 116,
+      "n": 141
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 11,
-      "n": 140
+      "n": 141
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 4,
-      "n": 139
+      "n": 140
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 143
+      "n": 144
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 804,
-      "n": 128
+      "median_s": 816,
+      "n": 129
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 10,
-      "n": 127
+      "n": 128
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 68
+      "n": 69
     },
     {
       "workflow": "observatory",
