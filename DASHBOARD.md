@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-07-29T09:36:51Z by the ci-metrics workflow. Do not edit —
+Generated 2026-07-29T09:37:06Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 259 | 59% | 13m37s | 18m24s | 3140 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 29 | 45% | 5m20s | 22m37s | 273 |
-| release-please | 52 | 98% | 45s | 7m42s | 143 |
-| conventional-commits | 230 | 82% | 16s | 22s | 48 |
+| release-please | 53 | 98% | 45s | 7m42s | 143 |
+| conventional-commits | 231 | 82% | 16s | 22s | 49 |
 
 ## ci jobs, last 30 days
 
@@ -124,7 +124,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-07-29 09:36 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
+| 2026-07-29 09:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-07-29 09:36 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-07-29 09:36 | release-please | push | main | success | 1m00s | 41s |
 | 2026-07-29 09:15 | conventional-commits | pull_request | fix/snapshot-mouse-modes | success | 17s | 14s |
 | 2026-07-29 09:15 | ci | pull_request | fix/snapshot-mouse-modes | success | 20m30s | 24m41s |
 | 2026-07-28 09:39 | stress | schedule | main | failure | 2m39s | 2m35s |
@@ -151,8 +153,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 13:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
 | 2026-07-27 13:35 | ci | pull_request | release-please--branches--main-- | cancelled | 1m29s | 1m02s |
 | 2026-07-27 13:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1m27s | 1m25s |
-| 2026-07-27 13:34 | ci | push | main | success | 25m37s | 18m36s |
-| 2026-07-27 13:34 | release-please | push | main | success | 1m58s | 46s |
 
 ---
 
