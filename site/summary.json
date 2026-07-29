@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-29T09:36:04Z",
+  "generated_at": "2026-07-29T09:36:51Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-29T09:36:30Z",
+      "duration_s": 2,
+      "runner_s": 0
+    },
+    {
+      "workflow": "stress",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-07-29T09:36:29Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -253,30 +271,12 @@
       "created_at": "2026-07-27T13:34:50Z",
       "duration_s": 118,
       "runner_s": 46
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/gascity-runtime",
-      "conclusion": "success",
-      "created_at": "2026-07-27T13:33:03Z",
-      "duration_s": 21,
-      "runner_s": 16
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/gascity-runtime",
-      "conclusion": "success",
-      "created_at": "2026-07-27T13:33:01Z",
-      "duration_s": 997,
-      "runner_s": 1214
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 258,
+      "runs": 259,
       "success_rate": 59,
       "median_s": 817,
       "p95_s": 1104,
@@ -292,8 +292,8 @@
     },
     {
       "workflow": "stress",
-      "runs": 28,
-      "success_rate": 46,
+      "runs": 29,
+      "success_rate": 45,
       "median_s": 320,
       "p95_s": 1357,
       "runner_minutes": 273
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 255,
+      "runs": 256,
       "median_queue_s": 2,
       "median_s": 807,
       "p95_s": 1069
     },
     {
       "job": "check",
-      "runs": 253,
+      "runs": 254,
       "median_queue_s": 2,
-      "median_s": 197,
+      "median_s": 196,
       "p95_s": 312
     },
     {
       "job": "detect docs-only",
-      "runs": 258,
+      "runs": 259,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
