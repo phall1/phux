@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-30T09:54:05Z",
+  "generated_at": "2026-07-31T09:53:39Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "schedule",
+      "branch": "main",
+      "conclusion": "failure",
+      "created_at": "2026-07-31T09:49:02Z",
+      "duration_s": 267,
+      "runner_s": 264
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-27T13:53:19Z",
       "duration_s": 668,
       "runner_s": 1267
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-27T13:53:19Z",
-      "duration_s": 1466,
-      "runner_s": 1346
     }
   ],
   "workflows_30d": [
@@ -292,11 +292,11 @@
     },
     {
       "workflow": "stress",
-      "runs": 31,
-      "success_rate": 48,
-      "median_s": 373,
+      "runs": 32,
+      "success_rate": 47,
+      "median_s": 320,
       "p95_s": 1357,
-      "runner_minutes": 314
+      "runner_minutes": 319
     },
     {
       "workflow": "release-please",
@@ -428,8 +428,8 @@
     {
       "workflow": "stress",
       "job": "stress",
-      "samples": 16,
-      "hit_rate": 13
+      "samples": 17,
+      "hit_rate": 18
     }
   ],
   "phase_medians": [
@@ -501,36 +501,26 @@
       "job": "stress",
       "phase": "stress",
       "median_s": 1110,
-      "n": 16
+      "n": 17
     }
   ],
   "slow_tests": {
     "sha": "04b289c1e",
     "tests": [
       {
-        "binary": "phux-server::stress_resize_extremes",
-        "test": "both_axes_shrink_storm_under_output_does_not_panic",
-        "seconds": 844.884
-      },
-      {
         "binary": "phux-server::stress_output_extremes",
         "test": "multi_mb_no_newline_burst_does_not_panic",
-        "seconds": 16.279
+        "seconds": 17.703
       },
       {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "attach_racing_pty_eof_does_not_panic",
-        "seconds": 10.187
+        "seconds": 10.196
       },
       {
-        "binary": "phux-server::stress_resize_extremes",
-        "test": "resize_degenerate_viewports_do_not_panic",
-        "seconds": 2.887
-      },
-      {
-        "binary": "phux-server::stress_output_extremes",
-        "test": "wide_combining_zwj_flood_does_not_panic",
-        "seconds": 2.867
+        "binary": "phux-server::stress_attach_churn",
+        "test": "attach_detach_churn_keeps_pane_alive",
+        "seconds": 0.451
       },
       {
         "binary": "phux-server::stress_output_extremes",
@@ -538,24 +528,9 @@
         "seconds": 0.421
       },
       {
-        "binary": "phux-server::stress_attach_churn",
-        "test": "attach_detach_churn_keeps_pane_alive",
-        "seconds": 0.411
-      },
-      {
-        "binary": "phux-server::stress_output_extremes",
-        "test": "rapid_alt_screen_toggles_do_not_panic",
-        "seconds": 0.314
-      },
-      {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "many_concurrent_clients_attach_detach_under_output",
-        "seconds": 0.260
-      },
-      {
-        "binary": "phux-server::stress_resize_storm",
-        "test": "resize_storm_converges_to_final_geometry",
-        "seconds": 0.116
+        "seconds": 0.345
       }
     ]
   },
