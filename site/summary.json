@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-07-31T09:53:39Z",
+  "generated_at": "2026-08-01T09:17:14Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "schedule",
+      "branch": "main",
+      "conclusion": "failure",
+      "created_at": "2026-08-01T09:10:22Z",
+      "duration_s": 399,
+      "runner_s": 396
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-07-27T13:53:20Z",
       "duration_s": 515,
       "runner_s": 1228
-    },
-    {
-      "workflow": "observatory",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-07-27T13:53:19Z",
-      "duration_s": 668,
-      "runner_s": 1267
     }
   ],
   "workflows_30d": [
@@ -292,11 +292,11 @@
     },
     {
       "workflow": "stress",
-      "runs": 32,
-      "success_rate": 47,
-      "median_s": 320,
+      "runs": 33,
+      "success_rate": 45,
+      "median_s": 373,
       "p95_s": 1357,
-      "runner_minutes": 319
+      "runner_minutes": 325
     },
     {
       "workflow": "release-please",
@@ -428,8 +428,8 @@
     {
       "workflow": "stress",
       "job": "stress",
-      "samples": 17,
-      "hit_rate": 18
+      "samples": 18,
+      "hit_rate": 17
     }
   ],
   "phase_medians": [
@@ -500,8 +500,8 @@
       "workflow": "stress",
       "job": "stress",
       "phase": "stress",
-      "median_s": 1110,
-      "n": 17
+      "median_s": 1047,
+      "n": 18
     }
   ],
   "slow_tests": {
@@ -510,27 +510,27 @@
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "multi_mb_no_newline_burst_does_not_panic",
-        "seconds": 17.703
+        "seconds": 18.121
       },
       {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "attach_racing_pty_eof_does_not_panic",
-        "seconds": 10.196
+        "seconds": 10.194
       },
       {
         "binary": "phux-server::stress_attach_churn",
         "test": "attach_detach_churn_keeps_pane_alive",
-        "seconds": 0.451
+        "seconds": 0.453
       },
       {
         "binary": "phux-server::stress_output_extremes",
         "test": "control_char_flood_does_not_panic",
-        "seconds": 0.421
+        "seconds": 0.448
       },
       {
         "binary": "phux-server::stress_lifecycle_churn",
         "test": "many_concurrent_clients_attach_detach_under_output",
-        "seconds": 0.345
+        "seconds": 0.358
       }
     ]
   },
