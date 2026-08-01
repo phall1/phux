@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-01T09:42:39Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-01T09:42:59Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 261 | 59% | 13m37s | 18m24s | 3193 |
+| ci | 262 | 59% | 13m37s | 18m24s | 3206 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 33 | 45% | 6m13s | 22m37s | 325 |
 | release-please | 53 | 98% | 45s | 7m42s | 143 |
@@ -19,35 +19,35 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 258 | 2s | 13m27s | 17m51s |
-| check | 256 | 2s | 3m16s | 5m12s |
-| detect docs-only | 261 | 2s | 5s | 8s |
+| test | 259 | 2s | 13m27s | 17m51s |
+| check | 257 | 2s | 3m17s | 5m14s |
+| detect docs-only | 262 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m32s | 17 |
-| check | rust checks (fmt + clippy + doc + deny) | 2m47s | 17 |
-| test | runner disk headroom | 31s | 18 |
-| check | runner disk headroom | 29s | 17 |
-| check | Run Swatinem/rust-cache@v2 | 18s | 17 |
-| test | Run Swatinem/rust-cache@v2 | 17s | 18 |
-| check | docs-check | 13s | 17 |
-| test | agents smoke | 12s | 17 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 17 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 18 |
-| check | e2e lane coverage | 5s | 17 |
-| check | formula-check | 5s | 17 |
+| test | tests (unit + e2e) | 14m19s | 15 |
+| check | rust checks (fmt + clippy + doc + deny) | 2m47s | 18 |
+| test | runner disk headroom | 31s | 17 |
+| check | runner disk headroom | 29s | 18 |
+| check | Run Swatinem/rust-cache@v2 | 18s | 18 |
+| test | Run Swatinem/rust-cache@v2 | 17s | 17 |
+| check | docs-check | 13s | 18 |
+| test | agents smoke | 12s | 15 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 9s | 17 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 18 |
+| check | e2e lane coverage | 5s | 18 |
+| check | formula-check | 5s | 18 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m56s | 141 |
-| ci / check | doc | 11s | 141 |
-| ci / check | deny | 4s | 140 |
-| ci / check | fmt | 2s | 144 |
+| ci / check | clippy | 1m56s | 142 |
+| ci / check | doc | 11s | 142 |
+| ci / check | deny | 4s | 141 |
+| ci / check | fmt | 2s | 145 |
 | ci / test | unit | 13m36s | 129 |
 | ci / test | e2e | 10s | 128 |
 | ci / test | agents-smoke | 1s | 69 |
@@ -59,8 +59,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 31% | 151 |
-| ci / test | 35% | 149 |
+| ci / check | 31% | 152 |
+| ci / test | 35% | 150 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -120,6 +120,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-08-01 09:42 | conventional-commits | pull_request | dev | success | 17s | 13s |
 | 2026-08-01 09:35 | conventional-commits | pull_request | dev | failure | 17s | 13s |
+| 2026-08-01 09:35 | ci | pull_request | dev | cancelled | 7m12s | 12m45s |
 | 2026-08-01 09:10 | stress | schedule | main | failure | 6m39s | 6m36s |
 | 2026-07-31 09:49 | stress | schedule | main | failure | 4m27s | 4m24s |
 | 2026-07-30 09:34 | stress | schedule | main | success | 19m27s | 19m20s |
@@ -147,7 +148,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-07-27 20:18 | release-please | push | main | success | 50s | 44s |
 | 2026-07-27 20:18 | ci | push | main | success | 15m37s | 20m37s |
 | 2026-07-27 20:03 | conventional-commits | pull_request | ephemeral-lifetime-and-playback | success | 15s | 13s |
-| 2026-07-27 20:03 | ci | pull_request | ephemeral-lifetime-and-playback | success | 15m53s | 19m34s |
 
 ---
 
