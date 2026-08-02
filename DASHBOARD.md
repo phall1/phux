@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T21:44:41Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T21:45:27Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,9 +9,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 365 | 56% | 12m28s | 18m24s | 4189 |
+| ci | 366 | 56% | 12m25s | 18m24s | 4189 |
 | observatory | 20 | 90% | 12m07s | 13m00s | 456 |
-| stress | 37 | 41% | 5m20s | 22m37s | 334 |
+| stress | 38 | 39% | 4m27s | 22m37s | 334 |
 | release-please | 78 | 99% | 45s | 7m42s | 194 |
 | conventional-commits | 331 | 79% | 16s | 24s | 67 |
 
@@ -19,24 +19,24 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 359 | 2s | 12m08s | 17m38s |
-| check | 357 | 2s | 2m38s | 5m05s |
-| detect docs-only | 360 | 2s | 5s | 8s |
+| test | 360 | 2s | 12m07s | 17m38s |
+| check | 358 | 2s | 2m37s | 5m05s |
+| detect docs-only | 361 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m02s | 16 |
+| test | tests (unit + e2e) | 10m12s | 15 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m30s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 17 |
 | check | Run Swatinem/rust-cache@v2 | 17s | 16 |
-| test | agents smoke | 11s | 16 |
+| test | Run Swatinem/rust-cache@v2 | 17s | 16 |
+| test | agents smoke | 11s | 15 |
 | check | docs-check | 10s | 13 |
 | check | runner disk headroom | 7s | 16 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 17 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 16 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 16 |
-| test | runner disk headroom | 6s | 17 |
+| test | runner disk headroom | 6s | 16 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 21:45 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 21:45 | stress | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 | 2026-08-02 21:33 | conventional-commits | pull_request | feat/ux-wave-6 | success | 20s | 17s |
 | 2026-08-02 21:33 | ci | pull_request | feat/ux-wave-6 | success | 10m52s | 13m03s |
 | 2026-08-02 18:02 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | cancelled | 9s | 6s |
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | success | 21s | 16s |
 | 2026-08-02 13:13 | conventional-commits | pull_request | phux-cull | failure | 14s | 11s |
-| 2026-08-02 13:13 | conventional-commits | pull_request | phux-cull | failure | 23s | 14s |
-| 2026-08-02 13:13 | ci | pull_request | phux-cull | success | 12m06s | 15m52s |
 
 ---
 
