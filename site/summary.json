@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T06:07:19Z",
+  "generated_at": "2026-08-02T06:07:36Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -10,6 +10,15 @@
       "created_at": "2026-08-02T06:07:02Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:07:02Z",
+      "duration_s": 21,
+      "runner_s": 11
     },
     {
       "workflow": "ci",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-02T05:33:05Z",
       "duration_s": 15,
       "runner_s": 11
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "fix/copy-mode-resize-clamp",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:33:05Z",
-      "duration_s": 694,
-      "runner_s": 837
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 292,
+      "runs": 293,
       "success_rate": 82,
       "median_s": 16,
       "p95_s": 24,
