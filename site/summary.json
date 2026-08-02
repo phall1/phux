@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T04:43:36Z",
+  "generated_at": "2026-08-02T04:48:27Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -138,6 +138,15 @@
       "runner_s": 14
     },
     {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "chore/beads-reconcile-receipt",
+      "conclusion": "success",
+      "created_at": "2026-08-02T04:31:29Z",
+      "duration_s": 1005,
+      "runner_s": 1235
+    },
+    {
       "workflow": "release-please",
       "event": "push",
       "branch": "main",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-02T03:53:39Z",
       "duration_s": 45,
       "runner_s": 39
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-02T03:53:39Z",
-      "duration_s": 1267,
-      "runner_s": 1256
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 301,
+      "runs": 302,
       "success_rate": 57,
       "median_s": 817,
       "p95_s": 1104,
-      "runner_minutes": 3629
+      "runner_minutes": 3650
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 297,
+      "runs": 298,
       "median_queue_s": 2,
       "median_s": 806,
       "p95_s": 1069
     },
     {
       "job": "check",
-      "runs": 295,
+      "runs": 296,
       "median_queue_s": 2,
       "median_s": 195,
       "p95_s": 312
     },
     {
       "job": "detect docs-only",
-      "runs": 299,
+      "runs": 300,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,75 +342,75 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 889,
-      "n": 11
+      "median_s": 886,
+      "n": 12
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 97,
-      "n": 12
+      "n": 13
+    },
+    {
+      "job": "test",
+      "step": "runner disk headroom",
+      "median_s": 58,
+      "n": 13
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 57,
-      "n": 12
-    },
-    {
-      "job": "test",
-      "step": "runner disk headroom",
-      "median_s": 56,
-      "n": 12
+      "n": 13
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 22,
-      "n": 12
+      "median_s": 23,
+      "n": 13
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 22,
-      "n": 12
+      "n": 13
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 12,
-      "n": 12
+      "n": 13
     },
     {
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 11
+      "n": 12
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 9,
-      "n": 12
+      "n": 13
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 8,
-      "n": 12
+      "n": 13
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 173,
-      "hit_rate": 38
+      "samples": 174,
+      "hit_rate": 39
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 171,
+      "samples": 172,
       "hit_rate": 42
     },
     {
@@ -425,50 +425,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 111,
-      "n": 163
+      "median_s": 110,
+      "n": 164
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 163
+      "n": 164
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 4,
-      "n": 162
+      "n": 163
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 166
+      "n": 167
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 782,
-      "n": 149
+      "median_s": 779,
+      "n": 150
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 10,
-      "n": 146
+      "n": 147
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 87
+      "n": 88
     },
     {
       "workflow": "observatory",
@@ -493,17 +493,17 @@
     }
   ],
   "slow_tests": {
-    "sha": "382dde766",
+    "sha": "a16a164b1",
     "tests": [
       {
         "binary": "phux-server::perf_bursty_output",
         "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 110.230
+        "seconds": 108.380
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 27.870
+        "seconds": 28.571
       },
       {
         "binary": "phux-server::agent_detect",
@@ -513,27 +513,27 @@
       {
         "binary": "phux-relay::relay_auth",
         "test": "stalled_preamble_does_not_wedge_relay",
-        "seconds": 5.115
+        "seconds": 5.114
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 3.820
+        "seconds": 3.821
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 3.817
+        "seconds": 3.815
       },
       {
         "binary": "phux-record::golden_cast",
         "test": "both_containers_agree_on_the_frame_count_for_one_recording",
-        "seconds": 3.741
+        "seconds": 3.692
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "detector_publishes_blocked_from_a_live_prompt_box",
-        "seconds": 3.517
+        "seconds": 3.519
       },
       {
         "binary": "phux-server::agent_events",
@@ -543,7 +543,7 @@
       {
         "binary": "phux-server::server_idle_exit",
         "test": "without_the_flag_an_unattended_server_stays_up",
-        "seconds": 3.014
+        "seconds": 3.015
       }
     ]
   },
