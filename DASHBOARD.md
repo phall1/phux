@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T05:09:12Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T05:10:35Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 309 | 57% | 13m37s | 18m24s | 3711 |
+| ci | 310 | 57% | 13m37s | 18m27s | 3728 |
 | observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 34 | 44% | 5m20s | 22m37s | 325 |
 | release-please | 65 | 98% | 45s | 7m37s | 168 |
@@ -19,36 +19,36 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 304 | 2s | 13m25s | 17m46s |
-| check | 302 | 2s | 3m15s | 5m11s |
-| detect docs-only | 306 | 2s | 5s | 8s |
+| test | 305 | 2s | 13m25s | 17m46s |
+| check | 303 | 2s | 3m16s | 5m11s |
+| detect docs-only | 307 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m40s | 13 |
+| test | tests (unit + e2e) | 14m34s | 13 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m39s | 14 |
 | check | runner disk headroom | 31s | 16 |
-| test | runner disk headroom | 25s | 16 |
 | check | Run Swatinem/rust-cache@v2 | 22s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 22s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 21s | 15 |
+| test | runner disk headroom | 21s | 16 |
 | check | docs-check | 12s | 14 |
 | test | agents smoke | 11s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 16 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 16 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 16 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m51s | 167 |
-| ci / check | doc | 10s | 167 |
-| ci / check | deny | 4s | 166 |
-| ci / check | fmt | 2s | 171 |
-| ci / test | unit | 12m59s | 153 |
-| ci / test | e2e | 10s | 150 |
-| ci / test | agents-smoke | 1s | 91 |
+| ci / check | clippy | 1m51s | 168 |
+| ci / check | doc | 10s | 168 |
+| ci / check | deny | 4s | 167 |
+| ci / check | fmt | 2s | 172 |
+| ci / test | unit | 12m50s | 154 |
+| ci / test | e2e | 10s | 151 |
+| ci / test | agents-smoke | 1s | 92 |
 | observatory / timings | build-dev | 11m14s | 15 |
 | observatory / timings | build-release | 5m11s | 16 |
 | stress / stress | stress | 17m27s | 18 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 38% | 178 |
-| ci / test | 41% | 176 |
+| ci / check | 37% | 179 |
+| ci / test | 41% | 177 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:49 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 04:48 | release-please | push | main | success | 7m37s | 18m24s |
 | 2026-08-02 04:48 | observatory | push | main | success | 13m04s | 25m34s |
+| 2026-08-02 04:48 | ci | push | main | success | 21m26s | 17m28s |
 | 2026-08-02 04:48 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
 | 2026-08-02 04:48 | ci | pull_request | release-please--branches--main-- | cancelled | 35s | 36s |
 | 2026-08-02 04:48 | release-please | push | main | success | 21s | 13s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:35 | ci | push | main | cancelled | 1m05s | 0s |
 | 2026-08-02 04:34 | conventional-commits | pull_request | ci-arm-runners-evict-bursty | success | 20s | 11s |
 | 2026-08-02 04:34 | ci | pull_request | ci-arm-runners-evict-bursty | success | 14m24s | 18m40s |
-| 2026-08-02 04:31 | conventional-commits | pull_request | chore/beads-reconcile-receipt | success | 18s | 14s |
 
 ---
 
