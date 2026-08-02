@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T22:20:06Z",
+  "generated_at": "2026-08-02T22:29:59Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -10,6 +10,15 @@
       "created_at": "2026-08-02T22:19:30Z",
       "duration_s": 23,
       "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/ux-wave-7",
+      "conclusion": "success",
+      "created_at": "2026-08-02T22:19:30Z",
+      "duration_s": 616,
+      "runner_s": 768
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-02T16:20:27Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-08-02T16:20:27Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 370,
+      "runs": 371,
       "success_rate": 56,
       "median_s": 739,
       "p95_s": 1104,
-      "runner_minutes": 4205
+      "runner_minutes": 4218
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 364,
+      "runs": 365,
       "median_queue_s": 2,
       "median_s": 713,
       "p95_s": 1054
     },
     {
       "job": "check",
-      "runs": 362,
+      "runs": 363,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 303
     },
     {
       "job": "detect docs-only",
-      "runs": 365,
+      "runs": 366,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -349,16 +349,16 @@
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 84,
-      "n": 13
-    },
-    {
-      "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 17,
-      "n": 15
+      "n": 14
     },
     {
       "job": "test",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 18,
+      "n": 16
+    },
+    {
+      "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 17,
       "n": 16
@@ -373,13 +373,13 @@
       "job": "check",
       "step": "docs-check",
       "median_s": 10,
-      "n": 13
+      "n": 14
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 15
+      "n": 16
     },
     {
       "job": "test",
@@ -388,14 +388,14 @@
       "n": 16
     },
     {
-      "job": "check",
-      "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 6,
-      "n": 15
-    },
-    {
       "job": "test",
       "step": "runner disk headroom",
+      "median_s": 7,
+      "n": 16
+    },
+    {
+      "job": "check",
+      "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 6,
       "n": 16
     }
@@ -404,13 +404,13 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 215,
+      "samples": 216,
       "hit_rate": 44
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 213,
+      "samples": 214,
       "hit_rate": 46
     },
     {
@@ -425,50 +425,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 100,
-      "n": 201
+      "median_s": 99,
+      "n": 202
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 201
+      "n": 202
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 200
+      "n": 201
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 207
+      "n": 208
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 744,
-      "n": 188
+      "n": 189
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 11,
-      "n": 184
+      "n": 185
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 124
+      "n": 125
     },
     {
       "workflow": "observatory",
@@ -493,22 +493,22 @@
     }
   ],
   "slow_tests": {
-    "sha": "1447717df",
+    "sha": "b70a2ecad",
     "tests": [
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 2.668
+        "seconds": 2.670
       },
       {
         "binary": "phux-record::golden_cast",
         "test": "golden_cast_renders_gif_and_apng_and_frame_counts_agree",
-        "seconds": 2.189
+        "seconds": 2.195
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry",
-        "seconds": 1.453
+        "seconds": 1.454
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
@@ -522,28 +522,28 @@
       },
       {
         "binary": "phux-server::agent_detect",
-        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
+        "test": "deleting_the_record_hands_it_back_to_the_detector",
         "seconds": 1.114
       },
       {
         "binary": "phux-server::agent_detect",
-        "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 1.113
+        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
+        "seconds": 1.112
       },
       {
         "binary": "phux-server::server_idle_exit",
         "test": "connecting_disarms_the_idle_clock",
-        "seconds": 1.060
-      },
-      {
-        "binary": "phux-server",
-        "test": "hub::link::tests::token_file_first_nonempty_line_wins_and_hex_is_enforced",
-        "seconds": 1.043
+        "seconds": 1.062
       },
       {
         "binary": "phux-server::server_self_exit",
         "test": "server_without_clients_does_not_self_exit_on_seed_pane_death",
-        "seconds": 1.012
+        "seconds": 1.013
+      },
+      {
+        "binary": "phux::config_plugin_actions",
+        "test": "config_run_timeout_returns_125_and_json_timeout",
+        "seconds": 1.010
       }
     ]
   },
