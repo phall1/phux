@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T06:27:38Z",
+  "generated_at": "2026-08-02T06:31:40Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/cache-preserving-agent-awareness",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:31:15Z",
+      "duration_s": 15,
+      "runner_s": 11
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-02T05:56:01Z",
       "duration_s": 50,
       "runner_s": 42
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "worktree-readme-deslop",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:55:20Z",
-      "duration_s": 20,
-      "runner_s": 17
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 299,
+      "runs": 300,
       "success_rate": 81,
       "median_s": 16,
       "p95_s": 24,
-      "runner_minutes": 61
+      "runner_minutes": 62
     }
   ],
   "ci_jobs_30d": [
