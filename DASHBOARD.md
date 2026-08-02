@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T04:57:02Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T05:02:16Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 308 | 57% | 13m37s | 18m24s | 3694 |
-| observatory | 16 | 88% | 12m07s | 12m56s | 360 |
+| observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 34 | 44% | 5m20s | 22m37s | 325 |
 | release-please | 64 | 98% | 45s | 7m37s | 168 |
 | conventional-commits | 276 | 82% | 16s | 23s | 57 |
@@ -49,8 +49,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 12m59s | 152 |
 | ci / test | e2e | 10s | 149 |
 | ci / test | agents-smoke | 1s | 90 |
-| observatory / timings | build-dev | 11m06s | 14 |
-| observatory / timings | build-release | 5m11s | 15 |
+| observatory / timings | build-dev | 11m14s | 15 |
+| observatory / timings | build-release | 5m11s | 16 |
 | stress / stress | stress | 17m27s | 18 |
 
 ## Cache effectiveness (last 30 days)
@@ -63,37 +63,37 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 11m24s (previous: 7m50s) — 541 units at `02dd58643`
+### dev: 11m45s (previous: 11m24s) — 542 units at `37c7d4fd7`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 131.05s |
-| `phux-client lib (test)` | 92.59s |
-| `phux bin "phux"` | 90.2s |
-| `phux-server` | 82.24s |
-| `phux-server lib (test)` | 50.6s |
-| `rustls` | 50.38s |
-| `phux bin "phux" (test)` | 45.07s |
-| `phux-config` | 34.65s |
+| `libghostty-vt-sys build script (run)` | 127.27s |
+| `phux bin "phux"` | 96.98s |
+| `phux-client lib (test)` | 92.62s |
+| `phux-server` | 83.51s |
+| `phux-server lib (test)` | 57.34s |
+| `rustls` | 51.66s |
+| `phux bin "phux" (test)` | 48.13s |
+| `phux-config` | 35.61s |
 
-### release: 4m45s (previous: 5m25s) — 365 units at `02dd58643`
+### release: 5m35s (previous: 4m45s) — 365 units at `37c7d4fd7`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 121.34s |
-| `phux bin "phux"` | 118.25s |
-| `phux-server` | 23.48s |
-| `phux-config` | 21.09s |
-| `phux-mcp bin "phux-mcp"` | 20.13s |
-| `regex-automata` | 18.52s |
-| `rustls` | 12.94s |
-| `clap_builder` | 12.29s |
+| `libghostty-vt-sys build script (run)` | 158.67s |
+| `phux bin "phux"` | 125.79s |
+| `phux-server` | 27.75s |
+| `phux-mcp bin "phux-mcp"` | 22.25s |
+| `regex-automata` | 22.11s |
+| `phux-config` | 21.9s |
+| `clap_builder` | 18.51s |
+| `rustls` | 15.54s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 14.6 MiB | 14.5 MiB |
+| `phux` | 14.7 MiB | 14.6 MiB |
 | `phux-mcp` | 2.1 MiB | 2.1 MiB |
 
 ## Dependency graph
@@ -126,6 +126,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:52 | ci | pull_request | chore/beads-reconcile-concurrent | cancelled | 3m03s | 5m45s |
 | 2026-08-02 04:49 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 04:48 | release-please | push | main | success | 7m37s | 18m24s |
+| 2026-08-02 04:48 | observatory | push | main | success | 13m04s | 25m34s |
 | 2026-08-02 04:48 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
 | 2026-08-02 04:48 | ci | pull_request | release-please--branches--main-- | cancelled | 35s | 36s |
 | 2026-08-02 04:48 | release-please | push | main | success | 21s | 13s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:31 | conventional-commits | pull_request | chore/beads-reconcile-receipt | success | 18s | 14s |
 | 2026-08-02 04:31 | ci | pull_request | chore/beads-reconcile-receipt | success | 16m45s | 20m35s |
 | 2026-08-02 04:27 | release-please | push | main | success | 29s | 25s |
-| 2026-08-02 04:27 | ci | push | main | success | 16m13s | 21m09s |
 
 ---
 
