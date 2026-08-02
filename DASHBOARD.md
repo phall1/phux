@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T21:45:38Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T21:45:53Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 366 | 56% | 12m25s | 18m24s | 4189 |
+| ci | 367 | 56% | 12m25s | 18m24s | 4189 |
 | observatory | 20 | 90% | 12m07s | 13m00s | 456 |
 | stress | 38 | 39% | 4m27s | 22m37s | 334 |
 | release-please | 79 | 99% | 45s | 7m42s | 194 |
@@ -19,9 +19,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 360 | 2s | 12m07s | 17m38s |
-| check | 358 | 2s | 2m37s | 5m05s |
-| detect docs-only | 361 | 2s | 5s | 8s |
+| test | 361 | 2s | 12m07s | 17m38s |
+| check | 359 | 2s | 2m37s | 5m05s |
+| detect docs-only | 362 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 21:45 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-02 21:45 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 21:45 | stress | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 | 2026-08-02 21:45 | conventional-commits | pull_request | release-please--branches--main-- | success | 23s | 13s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 16:19 | observatory | push | main | success | 11m41s | 22m34s |
 | 2026-08-02 16:19 | ci | push | main | success | 12m28s | 16m27s |
 | 2026-08-02 16:19 | conventional-commits | pull_request | phux-cull | success | 17s | 14s |
-| 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | cancelled | 9s | 6s |
 
 ---
 
