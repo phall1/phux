@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T05:56:44Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T05:57:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 322 | 57% | 13m25s | 18m24s | 3827 |
 | observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 35 | 43% | 5m20s | 22m37s | 325 |
-| release-please | 68 | 99% | 45s | 7m37s | 169 |
-| conventional-commits | 287 | 82% | 16s | 24s | 59 |
+| release-please | 69 | 99% | 45s | 7m37s | 170 |
+| conventional-commits | 288 | 82% | 16s | 24s | 59 |
 
 ## ci jobs, last 30 days
 
@@ -122,7 +122,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-02 05:56 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 05:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 11s |
 | 2026-08-02 05:56 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-08-02 05:56 | release-please | push | main | success | 50s | 42s |
 | 2026-08-02 05:55 | conventional-commits | pull_request | worktree-readme-deslop | success | 20s | 17s |
 | 2026-08-02 05:46 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-02 05:46 | conventional-commits | pull_request | release-please--branches--main-- | success | 23s | 13s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 05:11 | ci | pull_request | chore/beads-final-dolt-update | success | 11m19s | 13m20s |
 | 2026-08-02 05:08 | release-please | push | main | success | 17s | 8s |
 | 2026-08-02 05:08 | ci | push | main | success | 12m37s | 13m11s |
-| 2026-08-02 04:55 | conventional-commits | pull_request | chore/beads-reconcile-concurrent | success | 18s | 12s |
-| 2026-08-02 04:55 | ci | pull_request | chore/beads-reconcile-concurrent | success | 13m19s | 16m43s |
 
 ---
 
