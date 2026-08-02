@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T13:13:49Z",
+  "generated_at": "2026-08-02T13:14:29Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "phux-cull",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-02T13:14:09Z",
+      "duration_s": 9,
+      "runner_s": 6
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-02T06:48:22Z",
       "duration_s": 659,
       "runner_s": 814
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/adr-0066-collision",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:47:25Z",
-      "duration_s": 17,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 319,
+      "runs": 320,
       "success_rate": 80,
       "median_s": 16,
       "p95_s": 24,
