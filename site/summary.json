@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T06:07:49Z",
+  "generated_at": "2026-08-02T06:09:00Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/agent-session-restore",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:08:31Z",
+      "duration_s": 16,
+      "runner_s": 13
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "chore/consolidate-homebrew-tap",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:08:28Z",
+      "duration_s": 17,
+      "runner_s": 13
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -253,24 +271,6 @@
       "created_at": "2026-08-02T05:43:38Z",
       "duration_s": 46,
       "runner_s": 35
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:43:38Z",
-      "duration_s": 673,
-      "runner_s": 819
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/copy-mode-resize-clamp",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:33:05Z",
-      "duration_s": 15,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 293,
+      "runs": 295,
       "success_rate": 82,
       "median_s": 16,
       "p95_s": 24,
-      "runner_minutes": 60
+      "runner_minutes": 61
     }
   ],
   "ci_jobs_30d": [
