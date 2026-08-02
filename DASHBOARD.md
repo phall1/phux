@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T16:21:12Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T16:31:32Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 357 | 56% | 12m47s | 18m24s | 4101 |
-| observatory | 18 | 89% | 12m23s | 13m00s | 410 |
+| observatory | 19 | 89% | 12m23s | 13m00s | 433 |
 | stress | 36 | 42% | 5m20s | 22m37s | 334 |
 | release-please | 76 | 99% | 45s | 7m37s | 174 |
 | conventional-commits | 326 | 79% | 16s | 24s | 66 |
@@ -49,8 +49,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 12m32s | 180 |
 | ci / test | e2e | 11s | 177 |
 | ci / test | agents-smoke | 1s | 117 |
-| observatory / timings | build-dev | 11m06s | 16 |
-| observatory / timings | build-release | 5m13s | 17 |
+| observatory / timings | build-dev | 11m06s | 17 |
+| observatory / timings | build-release | 5m13s | 18 |
 | stress / stress | stress | 17m27s | 19 |
 
 ## Cache effectiveness (last 30 days)
@@ -63,37 +63,37 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 11m02s (previous: 11m45s) — 543 units at `6c7d65e8e`
+### dev: 8m27s (previous: 11m02s) — 537 units at `42781794f`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 121.35s |
-| `phux bin "phux"` | 90.05s |
-| `phux-client lib (test)` | 88.53s |
-| `phux-server` | 77.84s |
-| `phux-server lib (test)` | 59.62s |
-| `rustls` | 45.79s |
-| `phux bin "phux" (test)` | 44.64s |
-| `phux-config` | 34.72s |
+| `libghostty-vt-sys build script (run)` | 79.66s |
+| `phux bin "phux"` | 74.86s |
+| `phux-client lib (test)` | 65.1s |
+| `phux-server` | 64.09s |
+| `phux-server lib (test)` | 45.88s |
+| `phux bin "phux" (test)` | 37.32s |
+| `rustls` | 36.87s |
+| `phux-config` | 28.44s |
 
-### release: 5m34s (previous: 5m35s) — 366 units at `6c7d65e8e`
+### release: 5m38s (previous: 5m34s) — 366 units at `42781794f`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 147.37s |
-| `phux bin "phux"` | 135.53s |
-| `phux-server` | 28.16s |
-| `phux-config` | 24.01s |
-| `phux-mcp bin "phux-mcp"` | 22.81s |
-| `regex-automata` | 21.31s |
-| `rustls` | 14.95s |
-| `clap_builder` | 13.03s |
+| `libghostty-vt-sys build script (run)` | 150.66s |
+| `phux bin "phux"` | 137.72s |
+| `phux-server` | 26.23s |
+| `phux-config` | 24.9s |
+| `regex-automata` | 24.57s |
+| `phux-mcp bin "phux-mcp"` | 23.85s |
+| `rustls` | 16.81s |
+| `clap_builder` | 13.58s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 14.8 MiB | 14.7 MiB |
+| `phux` | 14.8 MiB | 14.8 MiB |
 | `phux-mcp` | 2.1 MiB | 2.1 MiB |
 
 ## Dependency graph
@@ -127,6 +127,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 16:20 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 16:20 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-08-02 16:19 | release-please | push | main | success | 46s | 40s |
+| 2026-08-02 16:19 | observatory | push | main | success | 11m41s | 22m34s |
 | 2026-08-02 16:19 | conventional-commits | pull_request | phux-cull | success | 17s | 14s |
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | cancelled | 9s | 6s |
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | success | 21s | 16s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 08:14 | conventional-commits | pull_request | feat/ux-wave-5 | success | 19s | 14s |
 | 2026-08-02 08:14 | ci | pull_request | feat/ux-wave-5 | success | 10m55s | 13m14s |
 | 2026-08-02 07:30 | conventional-commits | pull_request | feat/ux-wave-5 | success | 23s | 19s |
-| 2026-08-02 07:30 | ci | pull_request | feat/ux-wave-5 | failure | 11m22s | 13m56s |
 
 ---
 
