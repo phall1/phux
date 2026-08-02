@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T17:32:51Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T17:33:14Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,34 +9,34 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 360 | 56% | 12m28s | 18m24s | 4131 |
+| ci | 361 | 56% | 12m28s | 18m24s | 4131 |
 | observatory | 19 | 89% | 12m23s | 13m00s | 433 |
 | stress | 36 | 42% | 5m20s | 22m37s | 334 |
-| release-please | 76 | 99% | 45s | 7m37s | 174 |
-| conventional-commits | 328 | 79% | 16s | 24s | 67 |
+| release-please | 77 | 99% | 45s | 7m37s | 175 |
+| conventional-commits | 330 | 79% | 16s | 24s | 67 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 354 | 2s | 12m08s | 17m38s |
-| check | 352 | 2s | 2m38s | 5m05s |
-| detect docs-only | 355 | 2s | 5s | 8s |
+| test | 355 | 2s | 12m08s | 17m38s |
+| check | 353 | 2s | 2m38s | 5m05s |
+| detect docs-only | 356 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m19s | 15 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m26s | 15 |
-| check | Run Swatinem/rust-cache@v2 | 17s | 16 |
-| test | Run Swatinem/rust-cache@v2 | 17s | 16 |
-| test | agents smoke | 11s | 15 |
-| check | docs-check | 10s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 16 |
-| check | runner disk headroom | 6s | 16 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 16 |
-| test | runner disk headroom | 6s | 16 |
+| test | tests (unit + e2e) | 10m12s | 14 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m24s | 14 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 15 |
+| check | Run Swatinem/rust-cache@v2 | 17s | 15 |
+| test | agents smoke | 11s | 14 |
+| check | docs-check | 10s | 12 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
+| check | runner disk headroom | 6s | 15 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
+| test | runner disk headroom | 6s | 15 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -121,8 +121,12 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 17:32 | ci | pull_request | release-please--branches--main-- | skipped | 10s | 0s |
+| 2026-08-02 17:32 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 13s |
 | 2026-08-02 17:32 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-08-02 17:32 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 17:32 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 12s |
+| 2026-08-02 17:32 | release-please | push | main | success | 48s | 37s |
 | 2026-08-02 17:20 | conventional-commits | pull_request | feat/phux-p39-move-terminal | success | 17s | 13s |
 | 2026-08-02 17:20 | ci | pull_request | feat/phux-p39-move-terminal | success | 10m49s | 13m12s |
 | 2026-08-02 16:20 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -147,10 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 08:26 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 08:26 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
 | 2026-08-02 08:25 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-02 08:25 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
-| 2026-08-02 08:25 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 11s |
-| 2026-08-02 08:25 | release-please | push | main | success | 44s | 39s |
-| 2026-08-02 08:25 | ci | push | main | success | 12m20s | 14m36s |
 
 ---
 
