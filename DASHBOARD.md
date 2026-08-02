@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T05:32:55Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T05:33:30Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 34 | 44% | 5m20s | 22m37s | 325 |
 | release-please | 66 | 98% | 45s | 7m37s | 168 |
-| conventional-commits | 279 | 82% | 16s | 24s | 58 |
+| conventional-commits | 280 | 82% | 16s | 24s | 58 |
 
 ## ci jobs, last 30 days
 
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 05:33 | conventional-commits | pull_request | fix/copy-mode-resize-clamp | success | 15s | 11s |
 | 2026-08-02 05:32 | conventional-commits | pull_request | feat/ux-wave-4 | success | 24s | 15s |
 | 2026-08-02 05:24 | conventional-commits | pull_request | feat/agent-session-restore | success | 25s | 13s |
 | 2026-08-02 05:23 | release-please | push | main | success | 17s | 11s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:36 | ci | push | main | success | 20m31s | 17m55s |
 | 2026-08-02 04:36 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
 | 2026-08-02 04:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
-| 2026-08-02 04:35 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
