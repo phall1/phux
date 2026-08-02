@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T16:20:19Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T16:20:40Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,33 +9,34 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 356 | 56% | 12m47s | 18m24s | 4101 |
+| ci | 357 | 56% | 12m47s | 18m24s | 4101 |
 | observatory | 18 | 89% | 12m23s | 13m00s | 410 |
 | stress | 36 | 42% | 5m20s | 22m37s | 334 |
-| release-please | 75 | 99% | 45s | 7m37s | 174 |
-| conventional-commits | 324 | 79% | 16s | 24s | 66 |
+| release-please | 76 | 99% | 45s | 7m37s | 174 |
+| conventional-commits | 325 | 79% | 16s | 24s | 66 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 350 | 2s | 12m12s | 17m38s |
-| check | 348 | 2s | 2m39s | 5m05s |
-| detect docs-only | 351 | 2s | 5s | 8s |
+| test | 351 | 2s | 12m12s | 17m38s |
+| check | 349 | 2s | 2m39s | 5m05s |
+| detect docs-only | 352 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m12s | 16 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m22s | 16 |
-| check | Run Swatinem/rust-cache@v2 | 17s | 18 |
-| test | Run Swatinem/rust-cache@v2 | 17s | 18 |
-| test | agents smoke | 11s | 16 |
-| check | docs-check | 10s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 18 |
-| check | runner disk headroom | 6s | 18 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 18 |
+| test | tests (unit + e2e) | 10m19s | 15 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m26s | 15 |
+| check | Run Swatinem/rust-cache@v2 | 17s | 17 |
+| test | Run Swatinem/rust-cache@v2 | 17s | 17 |
+| test | agents smoke | 11s | 15 |
+| check | docs-check | 10s | 13 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 17 |
+| check | runner disk headroom | 6s | 17 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 17 |
+| test | runner disk headroom | 6s | 17 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -121,7 +122,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-02 16:20 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 16:20 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 12s |
+| 2026-08-02 16:20 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 16:20 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-08-02 16:19 | release-please | push | main | success | 46s | 40s |
 | 2026-08-02 16:19 | conventional-commits | pull_request | phux-cull | success | 17s | 14s |
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | cancelled | 9s | 6s |
 | 2026-08-02 13:14 | conventional-commits | pull_request | phux-cull | success | 21s | 16s |
@@ -147,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 07:30 | conventional-commits | pull_request | feat/ux-wave-5 | success | 23s | 19s |
 | 2026-08-02 07:30 | ci | pull_request | feat/ux-wave-5 | failure | 11m22s | 13m56s |
 | 2026-08-02 06:52 | conventional-commits | pull_request | feat/ux-wave-5 | failure | 14s | 12s |
-| 2026-08-02 06:49 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-02 06:49 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 15s |
-| 2026-08-02 06:48 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 
 ---
 
