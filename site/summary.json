@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T08:25:59Z",
+  "generated_at": "2026-08-02T08:26:14Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-02T08:26:01Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -19,6 +28,24 @@
       "created_at": "2026-08-02T08:25:41Z",
       "duration_s": 2,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-02T08:25:41Z",
+      "duration_s": 16,
+      "runner_s": 11
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-02T08:25:16Z",
+      "duration_s": 44,
+      "runner_s": 39
     },
     {
       "workflow": "conventional-commits",
@@ -244,39 +271,12 @@
       "created_at": "2026-08-02T06:43:17Z",
       "duration_s": 626,
       "runner_s": 755
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/adr-0066-collision",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:32:18Z",
-      "duration_s": 22,
-      "runner_s": 18
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "fix/adr-0066-collision",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:32:18Z",
-      "duration_s": 767,
-      "runner_s": 903
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/cache-preserving-agent-awareness",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:31:15Z",
-      "duration_s": 15,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 350,
+      "runs": 351,
       "success_rate": 56,
       "median_s": 776,
       "p95_s": 1104,
@@ -300,15 +300,15 @@
     },
     {
       "workflow": "release-please",
-      "runs": 74,
+      "runs": 75,
       "success_rate": 99,
       "median_s": 45,
       "p95_s": 457,
-      "runner_minutes": 173
+      "runner_minutes": 174
     },
     {
       "workflow": "conventional-commits",
-      "runs": 314,
+      "runs": 315,
       "success_rate": 80,
       "median_s": 16,
       "p95_s": 24,
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 344,
+      "runs": 345,
       "median_queue_s": 2,
       "median_s": 758,
       "p95_s": 1058
     },
     {
       "job": "check",
-      "runs": 342,
+      "runs": 343,
       "median_queue_s": 2,
       "median_s": 159,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 345,
+      "runs": 346,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,56 +342,56 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 597,
-      "n": 14
+      "median_s": 602,
+      "n": 13
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 81,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 18,
-      "n": 16
+      "n": 15
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 17,
-      "n": 16
+      "n": 15
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 10,
-      "n": 12
+      "n": 11
     },
     {
       "job": "test",
       "step": "agents smoke",
       "median_s": 10,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 16
+      "n": 15
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 6,
-      "n": 16
+      "n": 15
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 6,
-      "n": 16
+      "n": 15
     }
   ],
   "cache": [
