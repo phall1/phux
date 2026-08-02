@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T08:14:47Z",
+  "generated_at": "2026-08-02T08:19:27Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "docs/phux-bd3-relay-spec-addendum",
+      "conclusion": "success",
+      "created_at": "2026-08-02T08:18:58Z",
+      "duration_s": 19,
+      "runner_s": 14
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-02T06:24:08Z",
       "duration_s": 24,
       "runner_s": 14
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-02T06:24:07Z",
-      "duration_s": 2,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -308,8 +308,8 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 312,
-      "success_rate": 80,
+      "runs": 313,
+      "success_rate": 81,
       "median_s": 16,
       "p95_s": 24,
       "runner_minutes": 64
