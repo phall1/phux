@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T04:53:05Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T04:55:49Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 306 | 57% | 13m37s | 18m24s | 3670 |
+| ci | 307 | 57% | 13m37s | 18m24s | 3676 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 34 | 44% | 5m20s | 22m37s | 325 |
 | release-please | 63 | 98% | 45s | 7m36s | 149 |
-| conventional-commits | 275 | 81% | 16s | 23s | 57 |
+| conventional-commits | 276 | 82% | 16s | 23s | 57 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 301 | 2s | 13m26s | 17m49s |
-| check | 299 | 2s | 3m15s | 5m12s |
-| detect docs-only | 303 | 2s | 5s | 8s |
+| test | 302 | 2s | 13m25s | 17m46s |
+| check | 300 | 2s | 3m15s | 5m12s |
+| detect docs-only | 304 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -29,14 +29,14 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 14m42s | 11 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m37s | 12 |
-| test | runner disk headroom | 56s | 13 |
-| check | runner disk headroom | 49s | 13 |
-| check | Run Swatinem/rust-cache@v2 | 23s | 12 |
-| test | Run Swatinem/rust-cache@v2 | 22s | 12 |
+| check | runner disk headroom | 31s | 14 |
+| test | runner disk headroom | 25s | 14 |
+| check | Run Swatinem/rust-cache@v2 | 23s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 22s | 13 |
 | check | docs-check | 12s | 12 |
 | test | agents smoke | 11s | 11 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 13 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 9s | 14 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -45,7 +45,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / check | clippy | 1m51s | 165 |
 | ci / check | doc | 10s | 165 |
 | ci / check | deny | 4s | 164 |
-| ci / check | fmt | 2s | 168 |
+| ci / check | fmt | 2s | 169 |
 | ci / test | unit | 12m59s | 151 |
 | ci / test | e2e | 10s | 148 |
 | ci / test | agents-smoke | 1s | 89 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 38% | 175 |
-| ci / test | 42% | 173 |
+| ci / check | 38% | 176 |
+| ci / test | 41% | 174 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -121,7 +121,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 04:55 | conventional-commits | pull_request | chore/beads-reconcile-concurrent | success | 18s | 12s |
 | 2026-08-02 04:52 | conventional-commits | pull_request | chore/beads-reconcile-concurrent | success | 16s | 13s |
+| 2026-08-02 04:52 | ci | pull_request | chore/beads-reconcile-concurrent | cancelled | 3m03s | 5m45s |
 | 2026-08-02 04:49 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 04:48 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
 | 2026-08-02 04:48 | ci | pull_request | release-please--branches--main-- | cancelled | 35s | 36s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:27 | ci | push | main | success | 16m13s | 21m09s |
 | 2026-08-02 04:18 | conventional-commits | pull_request | feat/ux-wave-3 | success | 18s | 13s |
 | 2026-08-02 04:18 | ci | pull_request | feat/ux-wave-3 | success | 17m42s | 20m34s |
-| 2026-08-02 04:10 | conventional-commits | pull_request | chore/beads-reconcile | success | 16s | 12s |
-| 2026-08-02 04:10 | ci | pull_request | chore/beads-reconcile | success | 17m03s | 20m57s |
 
 ---
 
