@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T04:36:35Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T04:36:46Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 33 | 45% | 6m13s | 22m37s | 325 |
 | release-please | 61 | 98% | 45s | 7m42s | 148 |
-| conventional-commits | 269 | 81% | 16s | 23s | 56 |
+| conventional-commits | 270 | 81% | 16s | 23s | 56 |
 
 ## ci jobs, last 30 days
 
@@ -122,6 +122,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-02 04:36 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
+| 2026-08-02 04:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-08-02 04:35 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 04:35 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 16s |
 | 2026-08-02 04:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 03:41 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 03:41 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-08-02 03:40 | release-please | push | main | success | 1m54s | 47s |
-| 2026-08-02 03:40 | ci | push | main | success | 17m22s | 20m10s |
 
 ---
 
