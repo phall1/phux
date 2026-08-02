@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T03:54:13Z",
+  "generated_at": "2026-08-02T03:54:30Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -15,10 +15,28 @@
       "workflow": "conventional-commits",
       "event": "pull_request",
       "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-02T03:54:03Z",
+      "duration_s": 22,
+      "runner_s": 17
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
       "conclusion": "cancelled",
       "created_at": "2026-08-02T03:54:02Z",
       "duration_s": 3,
       "runner_s": 1
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-02T03:53:39Z",
+      "duration_s": 45,
+      "runner_s": 39
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-08-02T02:01:38Z",
       "duration_s": 2,
       "runner_s": 1
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-02T02:01:15Z",
-      "duration_s": 42,
-      "runner_s": 36
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-02T02:01:15Z",
-      "duration_s": 1074,
-      "runner_s": 1283
     }
   ],
   "workflows_30d": [
@@ -300,15 +300,15 @@
     },
     {
       "workflow": "release-please",
-      "runs": 58,
+      "runs": 59,
       "success_rate": 98,
       "median_s": 45,
       "p95_s": 462,
-      "runner_minutes": 146
+      "runner_minutes": 147
     },
     {
       "workflow": "conventional-commits",
-      "runs": 260,
+      "runs": 261,
       "success_rate": 81,
       "median_s": 16,
       "p95_s": 24,
