@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T12:29:58Z",
+  "generated_at": "2026-08-02T12:41:20Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -10,6 +10,15 @@
       "created_at": "2026-08-02T12:29:24Z",
       "duration_s": 19,
       "runner_s": 9
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "phux-cull",
+      "conclusion": "success",
+      "created_at": "2026-08-02T12:29:24Z",
+      "duration_s": 703,
+      "runner_s": 922
     },
     {
       "workflow": "stress",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-02T06:47:25Z",
       "duration_s": 650,
       "runner_s": 763
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-02T06:44:03Z",
-      "duration_s": 2,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 353,
+      "runs": 354,
       "success_rate": 56,
-      "median_s": 774,
+      "median_s": 769,
       "p95_s": 1104,
-      "runner_minutes": 4070
+      "runner_minutes": 4085
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 347,
+      "runs": 348,
       "median_queue_s": 2,
-      "median_s": 750,
+      "median_s": 736,
       "p95_s": 1058
     },
     {
       "job": "check",
-      "runs": 345,
+      "runs": 346,
       "median_queue_s": 2,
       "median_s": 159,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 348,
+      "runs": 349,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,13 +342,13 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 609,
+      "median_s": 612,
       "n": 15
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 81,
+      "median_s": 82,
       "n": 15
     },
     {
@@ -398,13 +398,13 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 205,
+      "samples": 206,
       "hit_rate": 43
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 203,
+      "samples": 204,
       "hit_rate": 45
     },
     {
@@ -419,50 +419,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 99,
-      "n": 192
+      "median_s": 100,
+      "n": 193
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 192
+      "n": 193
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 191
+      "n": 192
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 197
+      "n": 198
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 752,
-      "n": 178
+      "n": 179
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 11,
-      "n": 175
+      "n": 176
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 115
+      "n": 116
     },
     {
       "workflow": "observatory",
@@ -487,37 +487,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "b734b7007",
+    "sha": "987763581",
     "tests": [
       {
-        "binary": "phux-server::perf_bursty_output",
-        "test": "synthesize_against_reference_alloc_bounded_under_full_churn",
-        "seconds": 111.320
+        "binary": "phux-server",
+        "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
+        "seconds": 2.633
       },
       {
-        "binary": "phux-server::stress_output_extremes",
-        "test": "multi_mb_no_newline_burst_does_not_panic",
-        "seconds": 17.664
+        "binary": "phux-record::golden_cast",
+        "test": "golden_cast_renders_gif_and_apng_and_frame_counts_agree",
+        "seconds": 2.203
       },
       {
-        "binary": "phux-server::stress_lifecycle_churn",
-        "test": "attach_racing_pty_eof_does_not_panic",
-        "seconds": 10.192
+        "binary": "phux-server",
+        "test": "terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry",
+        "seconds": 1.452
       },
       {
-        "binary": "phux-server::stress_attach_churn",
-        "test": "attach_detach_churn_keeps_pane_alive",
-        "seconds": 0.461
+        "binary": "phux-server::phux_3uv_acked_incremental",
+        "test": "acked_incremental_converges_and_seq_is_monotonic",
+        "seconds": 1.318
       },
       {
-        "binary": "phux-server::stress_output_extremes",
-        "test": "control_char_flood_does_not_panic",
-        "seconds": 0.448
+        "binary": "phux-server::agent_detect",
+        "test": "a_plain_shell_pane_never_gets_an_agent_record",
+        "seconds": 1.213
       },
       {
-        "binary": "phux-server::stress_lifecycle_churn",
-        "test": "many_concurrent_clients_attach_detach_under_output",
-        "seconds": 0.386
+        "binary": "phux-server::agent_detect",
+        "test": "deleting_the_record_hands_it_back_to_the_detector",
+        "seconds": 1.113
+      },
+      {
+        "binary": "phux-server::agent_detect",
+        "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
+        "seconds": 1.113
+      },
+      {
+        "binary": "phux-server::server_idle_exit",
+        "test": "connecting_disarms_the_idle_clock",
+        "seconds": 1.061
+      },
+      {
+        "binary": "phux-server::server_self_exit",
+        "test": "server_without_clients_does_not_self_exit_on_seed_pane_death",
+        "seconds": 1.015
+      },
+      {
+        "binary": "phux::config_plugin_actions",
+        "test": "config_run_timeout_returns_125_and_json_timeout",
+        "seconds": 1.012
       }
     ]
   },
