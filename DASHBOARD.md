@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T04:18:51Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T04:19:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 292 | 58% | 13m37s | 18m24s | 3551 |
+| ci | 293 | 58% | 13m37s | 18m24s | 3566 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 33 | 45% | 6m13s | 22m37s | 325 |
 | release-please | 59 | 98% | 45s | 7m42s | 147 |
@@ -19,33 +19,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 289 | 2s | 13m27s | 17m49s |
-| check | 287 | 2s | 3m15s | 5m12s |
-| detect docs-only | 292 | 2s | 5s | 8s |
+| test | 290 | 2s | 13m26s | 17m49s |
+| check | 288 | 2s | 3m15s | 5m12s |
+| detect docs-only | 293 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m45s | 14 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m36s | 13 |
-| check | runner disk headroom | 1m01s | 13 |
-| test | runner disk headroom | 58s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 23s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 22s | 13 |
-| check | docs-check | 12s | 13 |
-| test | agents smoke | 11s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| test | tests (unit + e2e) | 14m46s | 12 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m36s | 14 |
+| check | runner disk headroom | 1m01s | 14 |
+| test | runner disk headroom | 58s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 23s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 22s | 14 |
+| check | docs-check | 12s | 14 |
+| test | agents smoke | 11s | 12 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m51s | 159 |
-| ci / check | doc | 10s | 159 |
-| ci / check | deny | 4s | 158 |
-| ci / check | fmt | 2s | 162 |
+| ci / check | clippy | 1m51s | 160 |
+| ci / check | doc | 10s | 160 |
+| ci / check | deny | 4s | 159 |
+| ci / check | fmt | 2s | 163 |
 | ci / test | unit | 13m02s | 146 |
 | ci / test | e2e | 10s | 143 |
 | ci / test | agents-smoke | 1s | 84 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 37% | 169 |
-| ci / test | 40% | 167 |
+| ci / check | 38% | 170 |
+| ci / test | 40% | 168 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -124,6 +124,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 04:18 | conventional-commits | pull_request | feat/ux-wave-3 | success | 18s | 13s |
 | 2026-08-02 04:10 | conventional-commits | pull_request | chore/beads-reconcile | success | 16s | 12s |
 | 2026-08-02 04:07 | conventional-commits | pull_request | feat/ux-wave-3 | success | 14s | 10s |
+| 2026-08-02 04:07 | ci | pull_request | feat/ux-wave-3 | cancelled | 11m50s | 15m45s |
 | 2026-08-02 03:54 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-02 03:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 10s |
 | 2026-08-02 03:54 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 02:54 | release-please | push | main | success | 43s | 37s |
 | 2026-08-02 02:54 | ci | push | main | success | 17m33s | 21m12s |
 | 2026-08-02 02:35 | conventional-commits | pull_request | feat/ux-wave-2 | success | 13s | 11s |
-| 2026-08-02 02:35 | ci | pull_request | feat/ux-wave-2 | success | 18m08s | 21m09s |
 
 ---
 
