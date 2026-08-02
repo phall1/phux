@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T03:53:49Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T03:54:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,46 +9,46 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 287 | 58% | 13m37s | 18m24s | 3490 |
+| ci | 289 | 58% | 13m37s | 18m24s | 3509 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 33 | 45% | 6m13s | 22m37s | 325 |
 | release-please | 58 | 98% | 45s | 7m42s | 146 |
-| conventional-commits | 259 | 81% | 16s | 24s | 54 |
+| conventional-commits | 260 | 81% | 16s | 24s | 54 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 284 | 2s | 13m26s | 17m49s |
-| check | 282 | 2s | 3m15s | 5m12s |
-| detect docs-only | 287 | 2s | 5s | 8s |
+| test | 286 | 2s | 13m26s | 17m49s |
+| check | 284 | 2s | 3m15s | 5m12s |
+| detect docs-only | 289 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 14m42s | 12 |
+| test | tests (unit + e2e) | 14m45s | 13 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m36s | 15 |
-| check | runner disk headroom | 1m02s | 15 |
-| test | runner disk headroom | 58s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 23s | 15 |
+| check | runner disk headroom | 1m01s | 15 |
+| test | runner disk headroom | 57s | 14 |
+| test | Run Swatinem/rust-cache@v2 | 23s | 14 |
 | check | Run Swatinem/rust-cache@v2 | 22s | 15 |
 | check | docs-check | 12s | 15 |
-| test | agents smoke | 11s | 12 |
+| test | agents smoke | 11s | 13 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 8s | 15 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 15 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 8s | 14 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m52s | 156 |
-| ci / check | doc | 10s | 156 |
-| ci / check | deny | 4s | 155 |
-| ci / check | fmt | 2s | 159 |
-| ci / test | unit | 13m05s | 143 |
-| ci / test | e2e | 10s | 140 |
-| ci / test | agents-smoke | 1s | 81 |
+| ci / check | clippy | 1m52s | 157 |
+| ci / check | doc | 10s | 157 |
+| ci / check | deny | 4s | 156 |
+| ci / check | fmt | 2s | 160 |
+| ci / test | unit | 13m05s | 144 |
+| ci / test | e2e | 10s | 141 |
+| ci / test | agents-smoke | 1s | 82 |
 | observatory / timings | build-dev | 11m06s | 14 |
 | observatory / timings | build-release | 5m11s | 15 |
 | stress / stress | stress | 17m27s | 18 |
@@ -57,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 36% | 166 |
-| ci / test | 40% | 164 |
+| ci / check | 37% | 167 |
+| ci / test | 40% | 165 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 03:54 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
+| 2026-08-02 03:54 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 3s | 1s |
 | 2026-08-02 03:43 | conventional-commits | pull_request | feat/ux-wave-3 | failure | 33s | 12s |
 | 2026-08-02 03:42 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 03:42 | conventional-commits | pull_request | release-please--branches--main-- | success | 56s | 16s |
@@ -131,6 +133,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 03:37 | conventional-commits | pull_request | fix/pty-writer-resilience | success | 58s | 15s |
 | 2026-08-02 03:37 | ci | pull_request | fix/pty-writer-resilience | success | 16m07s | 18m34s |
 | 2026-08-02 03:35 | conventional-commits | pull_request | feat/ux-wave-3 | failure | 20s | 11s |
+| 2026-08-02 03:35 | ci | pull_request | feat/ux-wave-3 | success | 18m35s | 19m13s |
 | 2026-08-02 02:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
 | 2026-08-02 02:54 | ci | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
 | 2026-08-02 02:54 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
@@ -148,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 02:01 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-08-02 02:01 | release-please | push | main | success | 42s | 36s |
 | 2026-08-02 02:01 | ci | push | main | success | 17m54s | 21m23s |
-| 2026-08-02 01:43 | conventional-commits | pull_request | feat/ux-wave-1 | success | 19s | 10s |
-| 2026-08-02 01:43 | ci | pull_request | feat/ux-wave-1 | success | 17m20s | 20m56s |
-| 2026-08-02 01:06 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 
 ---
 
