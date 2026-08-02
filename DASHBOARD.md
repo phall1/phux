@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T06:11:32Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T06:12:44Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 328 | 56% | 13m18s | 18m27s | 3858 |
+| ci | 329 | 56% | 13m18s | 18m27s | 3858 |
 | observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 35 | 43% | 5m20s | 22m37s | 325 |
 | release-please | 70 | 99% | 45s | 7m37s | 171 |
@@ -130,6 +130,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 06:06 | conventional-commits | pull_request | release-please--branches--main-- | success | 24s | 13s |
 | 2026-08-02 06:06 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-08-02 06:06 | release-please | push | main | success | 56s | 44s |
+| 2026-08-02 06:06 | ci | push | main | cancelled | 6m28s | 0s |
 | 2026-08-02 06:03 | conventional-commits | pull_request | fix/pi-package-arbitration | success | 17s | 13s |
 | 2026-08-02 05:56 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 | 2026-08-02 05:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 10s |
@@ -149,7 +150,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 05:44 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-02 05:44 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 15s |
 | 2026-08-02 05:44 | ci | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
-| 2026-08-02 05:44 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
 
 ---
 
