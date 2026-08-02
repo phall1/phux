@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T06:52:40Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T06:53:58Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 342 | 56% | 13m10s | 18m24s | 3959 |
+| ci | 343 | 56% | 13m10s | 18m24s | 3971 |
 | observatory | 18 | 89% | 12m23s | 13m00s | 410 |
 | stress | 35 | 43% | 5m20s | 22m37s | 325 |
 | release-please | 74 | 99% | 45s | 7m37s | 173 |
@@ -19,18 +19,18 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 336 | 2s | 12m53s | 17m40s |
-| check | 334 | 2s | 2m43s | 5m05s |
-| detect docs-only | 337 | 2s | 5s | 8s |
+| test | 337 | 2s | 12m53s | 17m40s |
+| check | 335 | 2s | 2m43s | 5m05s |
+| detect docs-only | 338 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m07s | 12 |
+| test | tests (unit + e2e) | 10m06s | 12 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m21s | 12 |
-| check | Run Swatinem/rust-cache@v2 | 18s | 13 |
 | test | Run Swatinem/rust-cache@v2 | 18s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 17s | 13 |
 | check | docs-check | 10s | 12 |
 | test | agents smoke | 10s | 12 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 13 |
@@ -40,13 +40,13 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m47s | 184 |
-| ci / check | doc | 10s | 184 |
-| ci / check | deny | 3s | 183 |
-| ci / check | fmt | 2s | 189 |
-| ci / test | unit | 12m39s | 170 |
-| ci / test | e2e | 11s | 167 |
-| ci / test | agents-smoke | 1s | 107 |
+| ci / check | clippy | 1m47s | 185 |
+| ci / check | doc | 10s | 185 |
+| ci / check | deny | 3s | 184 |
+| ci / check | fmt | 2s | 190 |
+| ci / test | unit | 12m39s | 171 |
+| ci / test | e2e | 11s | 168 |
+| ci / test | agents-smoke | 1s | 108 |
 | observatory / timings | build-dev | 11m06s | 16 |
 | observatory / timings | build-release | 5m13s | 17 |
 | stress / stress | stress | 17m27s | 18 |
@@ -55,8 +55,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 41% | 196 |
-| ci / test | 43% | 194 |
+| ci / check | 41% | 197 |
+| ci / test | 43% | 195 |
 | stress / stress | 17% | 18 |
 
 ## Cold build (observatory)
@@ -100,20 +100,20 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 - duplicate versions: **32** (previous: 32)
 - proc-macro crates: 33; build-script crates: 67
 
-## Slowest tests (latest instrumented run, `f4bad18da`)
+## Slowest tests (latest instrumented run, `3e7807c3f`)
 
 | test | wall |
 |---|---:|
-| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 14.399s |
-| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 6.015s |
-| `phux-relay::relay_auth::stalled_preamble_does_not_wedge_relay` | 5.110s |
-| `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 3.814s |
-| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 3.812s |
+| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 14.398s |
+| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 6.014s |
+| `phux-relay::relay_auth::stalled_preamble_does_not_wedge_relay` | 5.343s |
+| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 3.813s |
+| `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 3.813s |
 | `phux-server::agent_detect::detector_publishes_blocked_from_a_live_prompt_box` | 3.513s |
 | `phux-server::server_idle_exit::without_the_flag_an_unattended_server_stays_up` | 3.013s |
 | `phux-server::agent_events::unattached_subscriber_receives_events` | 3.013s |
-| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 2.512s |
-| `phux-record::golden_cast::both_containers_agree_on_the_frame_count_for_one_recording` | 2.218s |
+| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 2.511s |
+| `phux-record::golden_cast::both_containers_agree_on_the_frame_count_for_one_recording` | 2.215s |
 
 ## Recent runs
 
@@ -134,6 +134,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 06:43 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 23s | 13s |
 | 2026-08-02 06:43 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-02 06:43 | release-please | push | main | success | 46s | 40s |
+| 2026-08-02 06:43 | ci | push | main | success | 10m26s | 12m35s |
 | 2026-08-02 06:32 | conventional-commits | pull_request | fix/adr-0066-collision | success | 22s | 18s |
 | 2026-08-02 06:32 | ci | pull_request | fix/adr-0066-collision | success | 12m47s | 15m03s |
 | 2026-08-02 06:31 | conventional-commits | pull_request | feat/cache-preserving-agent-awar | success | 15s | 11s |
@@ -148,7 +149,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 06:23 | ci | push | main | success | 16m08s | 16m22s |
 | 2026-08-02 06:12 | release-please | push | main | success | 24s | 20s |
 | 2026-08-02 06:12 | ci | push | main | success | 14m56s | 12m45s |
-| 2026-08-02 06:10 | conventional-commits | pull_request | feat/agent-session-restore | success | 20s | 17s |
 
 ---
 
