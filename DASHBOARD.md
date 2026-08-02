@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T06:06:54Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T06:07:19Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,33 +9,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 326 | 57% | 13m19s | 18m27s | 3853 |
+| ci | 327 | 57% | 13m19s | 18m27s | 3853 |
 | observatory | 17 | 88% | 12m23s | 13m00s | 385 |
 | stress | 35 | 43% | 5m20s | 22m37s | 325 |
-| release-please | 69 | 99% | 45s | 7m37s | 170 |
-| conventional-commits | 291 | 81% | 16s | 24s | 60 |
+| release-please | 70 | 99% | 45s | 7m37s | 171 |
+| conventional-commits | 292 | 82% | 16s | 24s | 60 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 321 | 2s | 13m08s | 17m46s |
-| check | 319 | 2s | 2m57s | 5m11s |
-| detect docs-only | 323 | 2s | 5s | 8s |
+| test | 322 | 2s | 13m08s | 17m40s |
+| check | 320 | 2s | 2m57s | 5m11s |
+| detect docs-only | 324 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m06s | 12 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m21s | 13 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 16s | 14 |
-| test | agents smoke | 11s | 12 |
-| check | docs-check | 10s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
-| check | runner disk headroom | 5s | 15 |
+| test | tests (unit + e2e) | 10m06s | 11 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m20s | 12 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 16s | 13 |
+| test | agents smoke | 11s | 11 |
+| check | docs-check | 10s | 12 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 14 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
+| check | runner disk headroom | 5s | 14 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -120,8 +120,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 06:07 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 06:06 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 06:06 | conventional-commits | pull_request | release-please--branches--main-- | success | 24s | 13s |
 | 2026-08-02 06:06 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-08-02 06:06 | release-please | push | main | success | 56s | 44s |
 | 2026-08-02 06:03 | conventional-commits | pull_request | fix/pi-package-arbitration | success | 17s | 13s |
 | 2026-08-02 05:56 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 | 2026-08-02 05:56 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 10s |
@@ -147,9 +150,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 05:43 | ci | push | main | success | 11m13s | 13m39s |
 | 2026-08-02 05:33 | conventional-commits | pull_request | fix/copy-mode-resize-clamp | success | 15s | 11s |
 | 2026-08-02 05:33 | ci | pull_request | fix/copy-mode-resize-clamp | success | 11m34s | 13m57s |
-| 2026-08-02 05:32 | conventional-commits | pull_request | feat/ux-wave-4 | success | 24s | 15s |
-| 2026-08-02 05:32 | ci | pull_request | feat/ux-wave-4 | success | 11m16s | 13m31s |
-| 2026-08-02 05:24 | conventional-commits | pull_request | feat/agent-session-restore | success | 25s | 13s |
 
 ---
 

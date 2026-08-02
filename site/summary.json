@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T06:06:54Z",
+  "generated_at": "2026-08-02T06:07:19Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-02T06:07:02Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -15,10 +24,28 @@
       "workflow": "conventional-commits",
       "event": "pull_request",
       "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:06:37Z",
+      "duration_s": 24,
+      "runner_s": 13
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
       "conclusion": "cancelled",
       "created_at": "2026-08-02T06:06:36Z",
       "duration_s": 2,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:06:05Z",
+      "duration_s": 56,
+      "runner_s": 44
     },
     {
       "workflow": "conventional-commits",
@@ -244,39 +271,12 @@
       "created_at": "2026-08-02T05:33:05Z",
       "duration_s": 694,
       "runner_s": 837
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/ux-wave-4",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:32:17Z",
-      "duration_s": 24,
-      "runner_s": 15
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/ux-wave-4",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:32:17Z",
-      "duration_s": 676,
-      "runner_s": 811
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/agent-session-restore",
-      "conclusion": "success",
-      "created_at": "2026-08-02T05:24:36Z",
-      "duration_s": 25,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 326,
+      "runs": 327,
       "success_rate": 57,
       "median_s": 799,
       "p95_s": 1107,
@@ -300,16 +300,16 @@
     },
     {
       "workflow": "release-please",
-      "runs": 69,
+      "runs": 70,
       "success_rate": 99,
       "median_s": 45,
       "p95_s": 457,
-      "runner_minutes": 170
+      "runner_minutes": 171
     },
     {
       "workflow": "conventional-commits",
-      "runs": 291,
-      "success_rate": 81,
+      "runs": 292,
+      "success_rate": 82,
       "median_s": 16,
       "p95_s": 24,
       "runner_minutes": 60
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 321,
+      "runs": 322,
       "median_queue_s": 2,
       "median_s": 788,
-      "p95_s": 1066
+      "p95_s": 1060
     },
     {
       "job": "check",
-      "runs": 319,
+      "runs": 320,
       "median_queue_s": 2,
       "median_s": 177,
       "p95_s": 311
     },
     {
       "job": "detect docs-only",
-      "runs": 323,
+      "runs": 324,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -343,55 +343,55 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 606,
-      "n": 12
+      "n": 11
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 81,
-      "n": 13
+      "median_s": 80,
+      "n": 12
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 18,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 16,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 12
+      "n": 11
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 10,
-      "n": 13
+      "n": 12
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 15
+      "n": 14
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 7,
-      "n": 15
+      "median_s": 6,
+      "n": 14
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 5,
-      "n": 15
+      "n": 14
     }
   ],
   "cache": [
