@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T06:44:09Z",
+  "generated_at": "2026-08-02T06:44:30Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-02T06:44:03Z",
+      "duration_s": 2,
+      "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-02T06:44:03Z",
+      "duration_s": 23,
+      "runner_s": 10
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -10,6 +28,15 @@
       "created_at": "2026-08-02T06:43:43Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-02T06:43:43Z",
+      "duration_s": 23,
+      "runner_s": 13
     },
     {
       "workflow": "ci",
@@ -244,40 +271,13 @@
       "created_at": "2026-08-02T06:06:36Z",
       "duration_s": 2,
       "runner_s": 0
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:06:05Z",
-      "duration_s": 56,
-      "runner_s": 44
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-02T06:06:04Z",
-      "duration_s": 388,
-      "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "fix/pi-package-arbitration",
-      "conclusion": "success",
-      "created_at": "2026-08-02T06:03:49Z",
-      "duration_s": 17,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 338,
-      "success_rate": 57,
+      "runs": 339,
+      "success_rate": 56,
       "median_s": 795,
       "p95_s": 1107,
       "runner_minutes": 3944
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 302,
+      "runs": 304,
       "success_rate": 81,
       "median_s": 16,
       "p95_s": 24,
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 332,
+      "runs": 333,
       "median_queue_s": 2,
       "median_s": 774,
       "p95_s": 1060
     },
     {
       "job": "check",
-      "runs": 330,
+      "runs": 331,
       "median_queue_s": 2,
       "median_s": 168,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 333,
+      "runs": 334,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -342,50 +342,50 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 597,
-      "n": 14
+      "median_s": 606,
+      "n": 13
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 80,
+      "n": 14
+    },
+    {
+      "job": "check",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 18,
       "n": 15
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 18,
-      "n": 16
-    },
-    {
-      "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 17,
-      "n": 16
+      "n": 15
     },
     {
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 10,
-      "n": 15
+      "n": 14
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 16
+      "n": 15
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 6,
-      "n": 16
+      "n": 15
     }
   ],
   "cache": [
