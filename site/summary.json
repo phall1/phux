@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-02T21:58:04Z",
+  "generated_at": "2026-08-02T22:20:06Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/ux-wave-7",
+      "conclusion": "success",
+      "created_at": "2026-08-02T22:19:30Z",
+      "duration_s": 23,
+      "runner_s": 14
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-02T16:20:27Z",
       "duration_s": 16,
       "runner_s": 12
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-08-02T16:20:04Z",
-      "duration_s": 16,
-      "runner_s": 12
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 335,
+      "runs": 336,
       "success_rate": 79,
       "median_s": 16,
       "p95_s": 24,
