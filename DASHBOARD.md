@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T04:35:15Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T04:36:03Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,19 +9,19 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 294 | 58% | 13m37s | 18m24s | 3587 |
+| ci | 295 | 58% | 13m37s | 18m24s | 3587 |
 | observatory | 16 | 88% | 12m07s | 12m56s | 360 |
 | stress | 33 | 45% | 6m13s | 22m37s | 325 |
 | release-please | 60 | 98% | 45s | 7m42s | 148 |
-| conventional-commits | 267 | 82% | 16s | 23s | 56 |
+| conventional-commits | 268 | 81% | 16s | 23s | 56 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 291 | 2s | 13m27s | 17m49s |
-| check | 289 | 2s | 3m16s | 5m12s |
-| detect docs-only | 294 | 2s | 5s | 8s |
+| test | 292 | 2s | 13m26s | 17m49s |
+| check | 290 | 2s | 3m15s | 5m12s |
+| detect docs-only | 295 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 04:35 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-02 04:35 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
 | 2026-08-02 04:34 | conventional-commits | pull_request | ci-arm-runners-evict-bursty | success | 20s | 11s |
 | 2026-08-02 04:31 | conventional-commits | pull_request | chore/beads-reconcile-receipt | success | 18s | 14s |
 | 2026-08-02 04:27 | release-please | push | main | success | 29s | 25s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 03:35 | conventional-commits | pull_request | feat/ux-wave-3 | failure | 20s | 11s |
 | 2026-08-02 03:35 | ci | pull_request | feat/ux-wave-3 | success | 18m35s | 19m13s |
 | 2026-08-02 02:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
-| 2026-08-02 02:54 | ci | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
-| 2026-08-02 02:54 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 
 ---
 
