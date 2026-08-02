@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-02T23:31:14Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-02T23:31:27Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 20 | 90% | 12m07s | 13m00s | 456 |
 | stress | 38 | 39% | 4m27s | 22m37s | 334 |
 | release-please | 80 | 99% | 45s | 7m42s | 195 |
-| conventional-commits | 342 | 79% | 16s | 23s | 69 |
+| conventional-commits | 343 | 79% | 16s | 23s | 69 |
 
 ## ci jobs, last 30 days
 
@@ -121,6 +121,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-02 23:30 | conventional-commits | pull_request | feat/ux-wave-8 | success | 20s | 10s |
 | 2026-08-02 23:30 | conventional-commits | pull_request | chore/zig-0.16-libghostty-bump | success | 17s | 11s |
 | 2026-08-02 23:30 | conventional-commits | pull_request | chore/zig-0.16-libghostty-bump | cancelled | 15s | 4s |
 | 2026-08-02 23:24 | conventional-commits | pull_request | chore/zig-0.16-libghostty-bump | success | 19s | 16s |
@@ -150,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 18:02 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-02 18:02 | release-please | push | main | success | 7m47s | 18m41s |
 | 2026-08-02 18:02 | observatory | push | main | success | 11m53s | 23m06s |
-| 2026-08-02 18:02 | ci | push | main | success | 12m38s | 16m33s |
 
 ---
 
