@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T04:42:38Z",
+  "generated_at": "2026-08-03T04:43:00Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -10,6 +10,15 @@
       "created_at": "2026-08-03T04:42:27Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/negotiated-libghostty-codec-pr",
+      "conclusion": "success",
+      "created_at": "2026-08-03T04:42:27Z",
+      "duration_s": 17,
+      "runner_s": 13
     },
     {
       "workflow": "ci",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-03T03:18:47Z",
       "duration_s": 18,
       "runner_s": 15
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "fix/release-portability-gate",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-03T03:18:47Z",
-      "duration_s": 347,
-      "runner_s": 485
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 384,
+      "runs": 385,
       "success_rate": 79,
       "median_s": 16,
       "p95_s": 24,
-      "runner_minutes": 77
+      "runner_minutes": 78
     },
     {
       "workflow": "release",
