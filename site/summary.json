@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T15:59:07Z",
+  "generated_at": "2026-08-03T15:59:27Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-03T15:59:18Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "stress",
       "event": "pull_request",
@@ -19,6 +28,24 @@
       "created_at": "2026-08-03T15:58:51Z",
       "duration_s": 8,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-03T15:58:50Z",
+      "duration_s": 19,
+      "runner_s": 17
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-03T15:58:14Z",
+      "duration_s": 61,
+      "runner_s": 46
     },
     {
       "workflow": "conventional-commits",
@@ -244,39 +271,12 @@
       "created_at": "2026-08-03T05:35:27Z",
       "duration_s": 624,
       "runner_s": 928
-    },
-    {
-      "workflow": "observatory",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-03T05:35:27Z",
-      "duration_s": 736,
-      "runner_s": 1272
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-08-03T05:24:39Z",
-      "duration_s": 621,
-      "runner_s": 907
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-03T05:08:15Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 448,
+      "runs": 449,
       "success_rate": 53,
       "median_s": 658,
       "p95_s": 1104,
@@ -300,19 +300,19 @@
     },
     {
       "workflow": "release-please",
-      "runs": 94,
+      "runs": 95,
       "success_rate": 97,
-      "median_s": 47,
+      "median_s": 48,
       "p95_s": 462,
-      "runner_minutes": 228
+      "runner_minutes": 229
     },
     {
       "workflow": "conventional-commits",
-      "runs": 404,
+      "runs": 405,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
-      "runner_minutes": 82
+      "runner_minutes": 83
     },
     {
       "workflow": "release",
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 439,
+      "runs": 440,
       "median_queue_s": 2,
       "median_s": 640,
       "p95_s": 1054
     },
     {
       "job": "check",
-      "runs": 440,
+      "runs": 441,
       "median_queue_s": 2,
       "median_s": 155,
       "p95_s": 317
     },
     {
       "job": "detect docs-only",
-      "runs": 443,
+      "runs": 444,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
