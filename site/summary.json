@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T22:51:51Z",
+  "generated_at": "2026-08-03T22:52:26Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-03T22:52:12Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-03T22:52:12Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -253,32 +271,14 @@
       "created_at": "2026-08-03T06:01:58Z",
       "duration_s": 553,
       "runner_s": 896
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-03T05:47:04Z",
-      "duration_s": 22,
-      "runner_s": 12
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "failure",
-      "created_at": "2026-08-03T05:47:04Z",
-      "duration_s": 600,
-      "runner_s": 926
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 451,
+      "runs": 452,
       "success_rate": 53,
-      "median_s": 655,
+      "median_s": 652,
       "p95_s": 1104,
       "runner_minutes": 4950
     },
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 407,
+      "runs": 408,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 442,
+      "runs": 443,
       "median_queue_s": 2,
       "median_s": 638,
       "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 443,
+      "runs": 444,
       "median_queue_s": 2,
-      "median_s": 155,
+      "median_s": 154,
       "p95_s": 317
     },
     {
       "job": "detect docs-only",
-      "runs": 446,
+      "runs": 447,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -350,62 +350,62 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 498,
-      "n": 10
+      "median_s": 518,
+      "n": 9
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 248,
-      "n": 18
+      "median_s": 266,
+      "n": 17
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 14,
-      "n": 19
+      "n": 18
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 13,
-      "n": 19
+      "n": 18
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 11,
-      "n": 18
+      "n": 17
     },
     {
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 10
+      "n": 9
     },
     {
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 19
+      "n": 18
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 19
+      "n": 18
     },
     {
       "job": "test",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 19
+      "n": 18
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 6,
-      "n": 19
+      "n": 18
     }
   ],
   "cache": [
