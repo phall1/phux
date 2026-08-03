@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:37:03Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:44:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,20 +9,20 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 415 | 55% | 11m27s | 18m14s | 4558 |
+| ci | 416 | 55% | 11m26s | 18m14s | 4558 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 90 | 97% | 46s | 7m37s | 205 |
-| conventional-commits | 378 | 79% | 16s | 25s | 76 |
+| conventional-commits | 379 | 79% | 16s | 25s | 77 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 408 | 2s | 11m02s | 17m24s |
-| check | 407 | 2s | 2m34s | 5m03s |
-| detect docs-only | 410 | 2s | 5s | 8s |
+| test | 409 | 2s | 11m02s | 17m24s |
+| check | 408 | 2s | 2m33s | 5m03s |
+| detect docs-only | 411 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,6 +122,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 03:43 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
+| 2026-08-03 03:43 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 18s | 16s |
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -150,8 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:08 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:08 | conventional-commits | pull_request | release-please--branches--main-- | success | 25s | 17s |
 | 2026-08-03 03:07 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-03 03:07 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-03 03:07 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
 
 ---
 
