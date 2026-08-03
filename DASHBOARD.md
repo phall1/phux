@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T04:48:13Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T04:51:20Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 424 | 54% | 11m19s | 18m14s | 4643 |
+| ci | 425 | 54% | 11m19s | 18m14s | 4643 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 91 | 97% | 47s | 7m37s | 206 |
@@ -20,9 +20,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 417 | 2s | 10m58s | 17m30s |
-| check | 416 | 2s | 2m33s | 5m05s |
-| detect docs-only | 419 | 2s | 5s | 8s |
+| test | 418 | 2s | 10m57s | 17m30s |
+| check | 417 | 2s | 2m33s | 5m05s |
+| detect docs-only | 420 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,6 +122,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 04:51 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 0s | 0s |
 | 2026-08-03 04:47 | conventional-commits | pull_request | perf/ci-extract-server-testkit | success | 23s | 13s |
 | 2026-08-03 04:42 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
 | 2026-08-03 04:42 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 17s | 13s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:22 | release | workflow_dispatch | main | success | 8m02s | 20m01s |
 | 2026-08-03 03:21 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 21s | 17s |
 | 2026-08-03 03:20 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
-| 2026-08-03 03:20 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 19s | 15s |
 
 ---
 
