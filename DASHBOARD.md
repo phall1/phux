@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T04:59:10Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T04:59:27Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,11 +9,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 427 | 54% | 11m16s | 18m14s | 4657 |
+| ci | 428 | 54% | 11m16s | 18m14s | 4657 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
-| release-please | 91 | 97% | 47s | 7m37s | 206 |
-| conventional-commits | 390 | 79% | 16s | 25s | 79 |
+| release-please | 92 | 97% | 47s | 7m37s | 206 |
+| conventional-commits | 391 | 80% | 16s | 25s | 79 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
@@ -21,23 +21,22 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
 | test | 420 | 2s | 10m52s | 17m30s |
-| check | 419 | 2s | 2m33s | 5m05s |
-| detect docs-only | 422 | 2s | 5s | 8s |
+| check | 420 | 2s | 2m32s | 5m05s |
+| detect docs-only | 423 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 9m18s | 10 |
+| test | tests (unit + e2e) | 9m18s | 9 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m17s | 11 |
-| test | Run Swatinem/rust-cache@v2 | 20s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 20s | 12 |
 | check | Run Swatinem/rust-cache@v2 | 19s | 12 |
 | check | docs-check | 11s | 11 |
-| test | agents smoke | 11s | 10 |
+| test | agents smoke | 11s | 9 |
 | check | runner disk headroom | 8s | 12 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 12 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 13 |
-| test | runner disk headroom | 7s | 13 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 12 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -122,8 +121,11 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 04:59 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 04:58 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 04:58 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-08-03 04:58 | conventional-commits | pull_request | release-please--branches--main-- | success | 21s | 17s |
+| 2026-08-03 04:58 | release-please | push | main | success | 54s | 47s |
 | 2026-08-03 04:56 | conventional-commits | pull_request | feat/ux-followups | success | 18s | 14s |
 | 2026-08-03 04:53 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 26s | 17s |
 | 2026-08-03 04:51 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 0s | 0s |
@@ -149,9 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 12s |
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
-| 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 10s |
-| 2026-08-03 03:35 | release-please | push | main | success | 48s | 36s |
 
 ---
 
