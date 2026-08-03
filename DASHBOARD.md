@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T05:15:03Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T05:19:35Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 433 | 54% | 11m08s | 18m14s | 4693 |
+| ci | 434 | 54% | 11m08s | 18m24s | 4725 |
 | observatory | 25 | 92% | 12m23s | 12m56s | 582 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 93 | 97% | 47s | 7m37s | 207 |
@@ -20,32 +20,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 424 | 2s | 10m48s | 17m24s |
-| check | 425 | 2s | 2m32s | 5m03s |
-| detect docs-only | 428 | 2s | 5s | 8s |
+| test | 425 | 2s | 10m52s | 17m30s |
+| check | 426 | 2s | 2m32s | 5m05s |
+| detect docs-only | 429 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 8m31s | 9 |
+| test | tests (unit + e2e) | 8m27s | 8 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m17s | 11 |
-| test | Run Swatinem/rust-cache@v2 | 20s | 12 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 12 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 12 |
+| check | Run Swatinem/rust-cache@v2 | 17s | 12 |
 | check | docs-check | 11s | 11 |
-| test | agents smoke | 11s | 9 |
+| test | agents smoke | 11s | 8 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 12 |
-| check | runner disk headroom | 7s | 12 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 12 |
+| test | runner disk headroom | 7s | 12 |
+| check | runner disk headroom | 6s | 12 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m38s | 235 |
-| ci / check | doc | 10s | 235 |
-| ci / check | deny | 3s | 233 |
-| ci / check | fmt | 2s | 241 |
+| ci / check | clippy | 1m38s | 236 |
+| ci / check | doc | 10s | 236 |
+| ci / check | deny | 3s | 234 |
+| ci / check | fmt | 2s | 242 |
 | ci / test | unit | 12m02s | 216 |
 | ci / test | e2e | 12s | 212 |
 | ci / test | agents-smoke | 1s | 152 |
@@ -57,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 46% | 249 |
-| ci / test | 46% | 247 |
+| ci / check | 46% | 250 |
+| ci / test | 46% | 248 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -137,6 +138,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 04:58 | observatory | push | main | success | 12m15s | 22m22s |
 | 2026-08-03 04:56 | conventional-commits | pull_request | feat/ux-followups | success | 18s | 14s |
 | 2026-08-03 04:56 | ci | pull_request | feat/ux-followups | success | 10m24s | 12m39s |
+| 2026-08-03 04:53 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 26m01s | 31m49s |
 | 2026-08-03 04:53 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 26s | 17s |
 | 2026-08-03 04:51 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 0s | 0s |
 | 2026-08-03 04:51 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 20s | 15s |
@@ -150,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 04:08 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 1s |
 | 2026-08-03 04:08 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
 | 2026-08-03 04:07 | release-please | push | main | success | 48s | 43s |
-| 2026-08-03 04:07 | ci | push | main | success | 10m39s | 13m11s |
 
 ---
 
