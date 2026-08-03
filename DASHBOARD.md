@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T16:08:29Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T16:09:48Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 450 | 53% | 10m55s | 18m24s | 4941 |
-| observatory | 27 | 93% | 12m23s | 12m56s | 626 |
+| observatory | 28 | 93% | 12m23s | 12m56s | 647 |
 | stress | 45 | 36% | 11s | 22m15s | 340 |
 | release-please | 95 | 97% | 48s | 7m42s | 229 |
 | conventional-commits | 406 | 80% | 17s | 25s | 83 |
@@ -50,8 +50,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 11m51s | 227 |
 | ci / test | e2e | 18s | 220 |
 | ci / test | agents-smoke | 1s | 157 |
-| observatory / timings | build-dev | 11m02s | 25 |
-| observatory / timings | build-release | 5m26s | 26 |
+| observatory / timings | build-dev | 11m00s | 26 |
+| observatory / timings | build-release | 5m26s | 27 |
 | stress / stress | stress | 16m19s | 20 |
 
 ## Cache effectiveness (last 30 days)
@@ -64,31 +64,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 8m00s (previous: 6m48s) — 542 units at `12bbc8878`
+### dev: 7m53s (previous: 8m00s) — 542 units at `e33c51bd7`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 180.16s |
-| `phux-server lib (test)` | 109.11s |
-| `phux bin "phux"` | 100.29s |
-| `phux-server` | 79.48s |
-| `phux bin "phux" (test)` | 60.46s |
-| `phux-client lib (test)` | 39.2s |
-| `phux-config` | 35.12s |
-| `phux-config lib (test)` | 30.38s |
+| `libghostty-vt-sys build script (run)` | 163.15s |
+| `phux-server lib (test)` | 112.86s |
+| `phux bin "phux"` | 103.16s |
+| `phux-server` | 80.82s |
+| `phux-client lib (test)` | 76.01s |
+| `phux bin "phux" (test)` | 61.08s |
+| `phux-config` | 35.05s |
+| `phux-server-testkit` | 30.16s |
 
-### release: 6m21s (previous: 6m07s) — 367 units at `12bbc8878`
+### release: 5m23s (previous: 6m21s) — 367 units at `e33c51bd7`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 193.27s |
-| `phux bin "phux"` | 132.64s |
-| `phux-server` | 30.7s |
-| `phux-config` | 25.59s |
-| `phux-mcp bin "phux-mcp"` | 22.08s |
-| `rustls` | 15.04s |
-| `regex-automata` | 12.7s |
-| `phux-client` | 12.27s |
+| `libghostty-vt-sys build script (run)` | 145.96s |
+| `phux bin "phux"` | 125.56s |
+| `phux-server` | 28.73s |
+| `phux-config` | 21.63s |
+| `phux-mcp bin "phux-mcp"` | 20.6s |
+| `phux-server-testkit` | 13.67s |
+| `rustls` | 12.47s |
+| `phux-client` | 10.05s |
 
 ## Release binary size
 
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 15:58 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 17s |
 | 2026-08-03 15:58 | release-please | push | main | success | 1m01s | 46s |
 | 2026-08-03 15:58 | ci | push | main | success | 9m59s | 15m26s |
+| 2026-08-03 15:58 | observatory | push | main | success | 11m22s | 21m13s |
 | 2026-08-03 14:33 | conventional-commits | pull_request | refactor/serverstate-tables | success | 15s | 12s |
 | 2026-08-03 14:33 | ci | pull_request | refactor/serverstate-tables | success | 9m30s | 14m09s |
 | 2026-08-03 14:32 | conventional-commits | pull_request | refactor/serverstate-tables | success | 18s | 16s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 05:47 | ci | pull_request | feat/negotiated-libghostty-codec | failure | 10m00s | 15m26s |
 | 2026-08-03 05:40 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 17s | 14s |
 | 2026-08-03 05:40 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 7m00s | 9m08s |
-| 2026-08-03 05:35 | stress | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
 
 ---
 
