@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T02:22:55Z",
+  "generated_at": "2026-08-03T02:31:41Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -55,6 +55,15 @@
       "created_at": "2026-08-03T02:21:14Z",
       "duration_s": 48,
       "runner_s": 41
+    },
+    {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-03T02:21:14Z",
+      "duration_s": 614,
+      "runner_s": 760
     },
     {
       "workflow": "conventional-commits",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-03T00:30:14Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "failure",
-      "created_at": "2026-08-03T00:29:58Z",
-      "duration_s": 96,
-      "runner_s": 134
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 398,
+      "runs": 399,
       "success_rate": 55,
       "median_s": 695,
       "p95_s": 1104,
-      "runner_minutes": 4433
+      "runner_minutes": 4446
     },
     {
       "workflow": "observatory",
@@ -318,21 +318,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 391,
+      "runs": 392,
       "median_queue_s": 2,
-      "median_s": 680,
+      "median_s": 677,
       "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 390,
+      "runs": 391,
       "median_queue_s": 2,
       "median_s": 155,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 393,
+      "runs": 394,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -404,14 +404,14 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 231,
+      "samples": 232,
       "hit_rate": 44
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 229,
-      "hit_rate": 45
+      "samples": 230,
+      "hit_rate": 46
     },
     {
       "workflow": "stress",
@@ -425,50 +425,50 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 100,
-      "n": 217
+      "median_s": 99,
+      "n": 218
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 217
+      "n": 218
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 216
+      "n": 217
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 223
+      "n": 224
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
-      "median_s": 732,
-      "n": 201
+      "median_s": 731,
+      "n": 202
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 11,
-      "n": 197
+      "n": 198
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 137
+      "n": 138
     },
     {
       "workflow": "observatory",
@@ -493,32 +493,27 @@
     }
   ],
   "slow_tests": {
-    "sha": "b0c59e4f8",
+    "sha": "decde8631",
     "tests": [
       {
         "binary": "phux-record::golden_cast",
         "test": "golden_cast_renders_gif_and_apng_and_frame_counts_agree",
-        "seconds": 4.009
+        "seconds": 4.290
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 3.964
+        "seconds": 3.961
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry",
-        "seconds": 1.457
-      },
-      {
-        "binary": "phux-server",
-        "test": "terminal_actor::tests::degenerate_resize_storm_does_not_panic_actor",
-        "seconds": 1.457
+        "seconds": 1.455
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 1.313
+        "seconds": 1.314
       },
       {
         "binary": "phux-server::agent_detect",
@@ -538,12 +533,17 @@
       {
         "binary": "phux-server::server_idle_exit",
         "test": "connecting_disarms_the_idle_clock",
-        "seconds": 1.064
+        "seconds": 1.062
       },
       {
         "binary": "phux-server::server_self_exit",
         "test": "server_without_clients_does_not_self_exit_on_seed_pane_death",
         "seconds": 1.013
+      },
+      {
+        "binary": "phux::config_plugin_actions",
+        "test": "config_run_timeout_returns_125_and_json_timeout",
+        "seconds": 1.009
       }
     ]
   },
