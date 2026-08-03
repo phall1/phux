@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T04:22:13Z",
+  "generated_at": "2026-08-03T04:42:38Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/negotiated-libghostty-codec-pr",
+      "conclusion": "skipped",
+      "created_at": "2026-08-03T04:42:27Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,23 +271,14 @@
       "created_at": "2026-08-03T03:18:47Z",
       "duration_s": 347,
       "runner_s": 485
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-03T03:17:36Z",
-      "duration_s": 25,
-      "runner_s": 15
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 423,
-      "success_rate": 55,
-      "median_s": 682,
+      "runs": 424,
+      "success_rate": 54,
+      "median_s": 679,
       "p95_s": 1094,
       "runner_minutes": 4643
     },
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 416,
+      "runs": 417,
       "median_queue_s": 2,
       "median_s": 658,
       "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 415,
+      "runs": 416,
       "median_queue_s": 2,
       "median_s": 153,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 418,
+      "runs": 419,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -351,7 +351,7 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 566,
-      "n": 11
+      "n": 10
     },
     {
       "job": "check",
@@ -363,7 +363,7 @@
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 20,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
@@ -381,7 +381,7 @@
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 11
+      "n": 10
     },
     {
       "job": "check",
@@ -393,13 +393,13 @@
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 14
+      "n": 13
     },
     {
       "job": "check",
