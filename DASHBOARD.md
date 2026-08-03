@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T22:52:46Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T22:53:01Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 28 | 93% | 12m23s | 12m56s | 647 |
 | stress | 45 | 36% | 11s | 22m15s | 340 |
 | release-please | 96 | 97% | 48s | 7m42s | 230 |
-| conventional-commits | 409 | 80% | 17s | 25s | 83 |
+| conventional-commits | 410 | 80% | 17s | 25s | 84 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-03 22:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-03 22:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 17s |
 | 2026-08-03 22:52 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 1s | 0s |
 | 2026-08-03 22:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 22:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 12s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 07:10 | ci | pull_request | feat/negotiated-libghostty-codec | failure | 10m58s | 17m29s |
 | 2026-08-03 06:42 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 21s | 11s |
 | 2026-08-03 06:42 | ci | pull_request | feat/negotiated-libghostty-codec | failure | 10m01s | 15m42s |
-| 2026-08-03 06:14 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 17s | 14s |
 
 ---
 
