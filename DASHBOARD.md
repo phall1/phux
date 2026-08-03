@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:55:44Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:56:01Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 417 | 55% | 11m26s | 18m14s | 4570 |
+| ci | 418 | 55% | 11m23s | 18m14s | 4586 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 90 | 97% | 46s | 7m37s | 205 |
@@ -20,33 +20,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 410 | 2s | 11m01s | 17m24s |
-| check | 409 | 2s | 2m33s | 5m03s |
-| detect docs-only | 412 | 2s | 5s | 8s |
+| test | 411 | 2s | 11m02s | 17m24s |
+| check | 410 | 2s | 2m33s | 5m03s |
+| detect docs-only | 413 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 9m32s | 11 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m17s | 14 |
+| test | tests (unit + e2e) | 9m32s | 10 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m22s | 13 |
 | test | Run Swatinem/rust-cache@v2 | 21s | 13 |
 | check | Run Swatinem/rust-cache@v2 | 20s | 14 |
-| check | docs-check | 11s | 14 |
-| test | agents smoke | 11s | 11 |
-| check | runner disk headroom | 7s | 14 |
+| check | docs-check | 11s | 13 |
+| test | agents smoke | 11s | 10 |
+| check | runner disk headroom | 8s | 14 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 14 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
-| test | runner disk headroom | 6s | 13 |
+| test | runner disk headroom | 7s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m38s | 227 |
-| ci / check | doc | 10s | 227 |
+| ci / check | clippy | 1m38s | 228 |
+| ci / check | doc | 10s | 228 |
 | ci / check | deny | 3s | 226 |
-| ci / check | fmt | 2s | 233 |
+| ci / check | fmt | 2s | 234 |
 | ci / test | unit | 12m07s | 210 |
 | ci / test | e2e | 11s | 206 |
 | ci / test | agents-smoke | 1s | 146 |
@@ -58,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 46% | 241 |
-| ci / test | 46% | 239 |
+| ci / check | 45% | 242 |
+| ci / test | 46% | 240 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -123,6 +123,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-03 03:55 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 19s | 14s |
+| 2026-08-03 03:44 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 11m23s | 15m56s |
 | 2026-08-03 03:43 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
 | 2026-08-03 03:43 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 18s | 16s |
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:13 | ci | pull_request | release-please--branches--main-- | skipped | 8s | 0s |
 | 2026-08-03 03:12 | release-please | push | main | success | 53s | 40s |
 | 2026-08-03 03:12 | ci | push | main | success | 15m36s | 12m21s |
-| 2026-08-03 03:08 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
