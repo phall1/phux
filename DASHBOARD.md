@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T00:52:19Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T00:52:54Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,9 +9,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 387 | 56% | 12m06s | 18m24s | 4374 |
+| ci | 388 | 56% | 11m58s | 18m24s | 4374 |
 | observatory | 23 | 91% | 12m23s | 12m56s | 533 |
-| stress | 39 | 38% | 4m27s | 22m37s | 334 |
+| stress | 40 | 38% | 2m39s | 22m37s | 334 |
 | release-please | 83 | 98% | 46s | 7m37s | 199 |
 | conventional-commits | 351 | 79% | 16s | 24s | 71 |
 
@@ -19,9 +19,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 381 | 2s | 11m45s | 17m34s |
-| check | 379 | 2s | 2m37s | 5m05s |
-| detect docs-only | 382 | 2s | 5s | 8s |
+| test | 382 | 2s | 11m39s | 17m30s |
+| check | 380 | 2s | 2m37s | 5m05s |
+| detect docs-only | 383 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -121,6 +121,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 00:52 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-03 00:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 00:38 | conventional-commits | pull_request | feat/ux-wave-9 | success | 15s | 12s |
 | 2026-08-03 00:38 | ci | pull_request | feat/ux-wave-9 | success | 13m10s | 15m35s |
 | 2026-08-03 00:30 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-02 23:30 | conventional-commits | pull_request | feat/ux-wave-8 | success | 20s | 10s |
 | 2026-08-02 23:30 | ci | pull_request | feat/ux-wave-8 | cancelled | 5m46s | 9m47s |
 | 2026-08-02 23:30 | conventional-commits | pull_request | chore/zig-0.16-libghostty-bump | success | 17s | 11s |
-| 2026-08-02 23:30 | conventional-commits | pull_request | chore/zig-0.16-libghostty-bump | cancelled | 15s | 4s |
-| 2026-08-02 23:30 | ci | pull_request | chore/zig-0.16-libghostty-bump | success | 14m05s | 18m53s |
 
 ---
 
