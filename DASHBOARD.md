@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:36:18Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:36:42Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,34 +9,35 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 414 | 55% | 11m27s | 18m14s | 4558 |
+| ci | 415 | 55% | 11m27s | 18m14s | 4558 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
-| release-please | 89 | 97% | 46s | 7m37s | 204 |
-| conventional-commits | 376 | 79% | 16s | 25s | 76 |
+| release-please | 90 | 97% | 46s | 7m37s | 205 |
+| conventional-commits | 377 | 79% | 16s | 25s | 76 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 407 | 2s | 11m09s | 17m24s |
-| check | 406 | 2s | 2m34s | 5m03s |
-| detect docs-only | 409 | 2s | 5s | 8s |
+| test | 408 | 2s | 11m02s | 17m24s |
+| check | 407 | 2s | 2m34s | 5m03s |
+| detect docs-only | 410 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 9m26s | 12 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m17s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 20s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 14 |
-| check | docs-check | 11s | 14 |
-| test | agents smoke | 10s | 12 |
-| check | runner disk headroom | 8s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
+| test | tests (unit + e2e) | 9m32s | 11 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m22s | 13 |
+| check | Run Swatinem/rust-cache@v2 | 20s | 13 |
+| test | Run Swatinem/rust-cache@v2 | 20s | 13 |
+| check | docs-check | 11s | 13 |
+| test | agents smoke | 11s | 11 |
+| check | runner disk headroom | 8s | 13 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 13 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 13 |
+| test | runner disk headroom | 6s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -122,7 +123,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-03 03:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-08-03 03:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 15s | 10s |
+| 2026-08-03 03:35 | release-please | push | main | success | 48s | 36s |
 | 2026-08-03 03:24 | conventional-commits | pull_request | fix/release-portability-gate | success | 14s | 11s |
 | 2026-08-03 03:24 | ci | pull_request | fix/release-portability-gate | success | 11m27s | 13m26s |
 | 2026-08-03 03:22 | release | workflow_dispatch | main | success | 8m02s | 20m01s |
@@ -148,9 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:07 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:07 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 13s |
 | 2026-08-03 03:07 | release-please | push | main | success | 57s | 44s |
-| 2026-08-03 03:07 | ci | push | main | success | 11m26s | 13m44s |
-| 2026-08-03 03:04 | release | workflow_dispatch | fix/release-zig-0.16-checksums | success | 8m11s | 20m15s |
-| 2026-08-03 03:04 | conventional-commits | pull_request | fix/release-zig-0.16-checksums | success | 19s | 17s |
 
 ---
 
