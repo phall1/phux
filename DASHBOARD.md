@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T05:46:05Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T05:47:41Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,30 +9,30 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 437 | 54% | 11m08s | 18m24s | 4773 |
+| ci | 438 | 54% | 11m08s | 18m24s | 4782 |
 | observatory | 25 | 92% | 12m23s | 12m56s | 582 |
 | stress | 43 | 35% | 11s | 22m15s | 334 |
 | release-please | 94 | 97% | 47s | 7m42s | 228 |
-| conventional-commits | 395 | 80% | 16s | 25s | 80 |
+| conventional-commits | 396 | 80% | 16s | 25s | 80 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 428 | 2s | 10m48s | 17m30s |
-| check | 429 | 2s | 2m33s | 5m08s |
-| detect docs-only | 432 | 2s | 5s | 8s |
+| test | 429 | 2s | 10m48s | 17m30s |
+| check | 430 | 2s | 2m33s | 5m08s |
+| detect docs-only | 433 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 8m45s | 10 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m18s | 14 |
+| check | rust checks (fmt + clippy + doc + deny) | 3m39s | 13 |
 | check | Run Swatinem/rust-cache@v2 | 16s | 15 |
 | test | Run Swatinem/rust-cache@v2 | 15s | 15 |
-| check | docs-check | 11s | 14 |
+| check | docs-check | 11s | 13 |
 | test | agents smoke | 11s | 10 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
@@ -46,7 +46,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / check | clippy | 1m39s | 239 |
 | ci / check | doc | 10s | 239 |
 | ci / check | deny | 3s | 237 |
-| ci / check | fmt | 2s | 245 |
+| ci / check | fmt | 2s | 246 |
 | ci / test | unit | 12m02s | 218 |
 | ci / test | e2e | 12s | 214 |
 | ci / test | agents-smoke | 1s | 154 |
@@ -58,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 45% | 253 |
-| ci / test | 45% | 252 |
+| ci / check | 45% | 254 |
+| ci / test | 45% | 253 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -122,7 +122,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 05:47 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 22s | 12s |
 | 2026-08-03 05:40 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 17s | 14s |
+| 2026-08-03 05:40 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 7m00s | 9m08s |
 | 2026-08-03 05:35 | stress | pull_request | release-please--branches--main-- | skipped | 7s | 0s |
 | 2026-08-03 05:35 | release-please | push | main | success | 8m32s | 21m22s |
 | 2026-08-03 05:35 | ci | push | main | success | 10m24s | 15m28s |
@@ -150,8 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 04:51 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 20s | 15s |
 | 2026-08-03 04:47 | conventional-commits | pull_request | perf/ci-extract-server-testkit | success | 23s | 13s |
 | 2026-08-03 04:47 | ci | pull_request | perf/ci-extract-server-testkit | success | 9m23s | 14m09s |
-| 2026-08-03 04:42 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
-| 2026-08-03 04:42 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 17s | 13s |
 
 ---
 

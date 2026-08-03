@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T05:46:05Z",
+  "generated_at": "2026-08-03T05:47:41Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "feat/negotiated-libghostty-codec-pr",
+      "conclusion": "success",
+      "created_at": "2026-08-03T05:47:04Z",
+      "duration_s": 22,
+      "runner_s": 12
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -10,6 +19,15 @@
       "created_at": "2026-08-03T05:40:27Z",
       "duration_s": 17,
       "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/negotiated-libghostty-codec-pr",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-03T05:40:27Z",
+      "duration_s": 420,
+      "runner_s": 548
     },
     {
       "workflow": "stress",
@@ -253,34 +271,16 @@
       "created_at": "2026-08-03T04:47:38Z",
       "duration_s": 563,
       "runner_s": 849
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "skipped",
-      "created_at": "2026-08-03T04:42:27Z",
-      "duration_s": 1,
-      "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-03T04:42:27Z",
-      "duration_s": 17,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 437,
+      "runs": 438,
       "success_rate": 54,
       "median_s": 668,
       "p95_s": 1104,
-      "runner_minutes": 4773
+      "runner_minutes": 4782
     },
     {
       "workflow": "observatory",
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 395,
+      "runs": 396,
       "success_rate": 80,
       "median_s": 16,
       "p95_s": 25,
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 428,
+      "runs": 429,
       "median_queue_s": 2,
       "median_s": 648,
       "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 429,
+      "runs": 430,
       "median_queue_s": 2,
       "median_s": 153,
       "p95_s": 308
     },
     {
       "job": "detect docs-only",
-      "runs": 432,
+      "runs": 433,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -356,8 +356,8 @@
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 78,
-      "n": 14
+      "median_s": 219,
+      "n": 13
     },
     {
       "job": "check",
@@ -375,7 +375,7 @@
       "job": "check",
       "step": "docs-check",
       "median_s": 11,
-      "n": 14
+      "n": 13
     },
     {
       "job": "test",
@@ -412,13 +412,13 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 253,
+      "samples": 254,
       "hit_rate": 45
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 252,
+      "samples": 253,
       "hit_rate": 45
     },
     {
@@ -455,7 +455,7 @@
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 245
+      "n": 246
     },
     {
       "workflow": "ci",
