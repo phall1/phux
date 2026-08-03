@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T00:52:54Z",
+  "generated_at": "2026-08-03T00:53:15Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-03T00:53:08Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "stress",
       "event": "pull_request",
@@ -19,6 +28,24 @@
       "created_at": "2026-08-03T00:52:40Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-03T00:52:40Z",
+      "duration_s": 20,
+      "runner_s": 11
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-03T00:52:12Z",
+      "duration_s": 55,
+      "runner_s": 42
     },
     {
       "workflow": "conventional-commits",
@@ -244,39 +271,12 @@
       "created_at": "2026-08-02T23:35:27Z",
       "duration_s": 776,
       "runner_s": 1089
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/ux-wave-8",
-      "conclusion": "success",
-      "created_at": "2026-08-02T23:30:58Z",
-      "duration_s": 20,
-      "runner_s": 10
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/ux-wave-8",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-02T23:30:58Z",
-      "duration_s": 346,
-      "runner_s": 587
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "chore/zig-0.16-libghostty-bump",
-      "conclusion": "success",
-      "created_at": "2026-08-02T23:30:32Z",
-      "duration_s": 17,
-      "runner_s": 11
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 388,
+      "runs": 389,
       "success_rate": 56,
       "median_s": 718,
       "p95_s": 1104,
@@ -300,7 +300,7 @@
     },
     {
       "workflow": "release-please",
-      "runs": 83,
+      "runs": 84,
       "success_rate": 98,
       "median_s": 46,
       "p95_s": 457,
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 351,
+      "runs": 352,
       "success_rate": 79,
       "median_s": 16,
       "p95_s": 24,
@@ -325,14 +325,14 @@
     },
     {
       "job": "check",
-      "runs": 380,
+      "runs": 381,
       "median_queue_s": 2,
       "median_s": 157,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 383,
+      "runs": 384,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
