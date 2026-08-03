@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T03:18:49Z",
+  "generated_at": "2026-08-03T03:19:18Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "fix/release-portability-gate",
+      "conclusion": "success",
+      "created_at": "2026-08-03T03:18:47Z",
+      "duration_s": 18,
+      "runner_s": 15
+    },
     {
       "workflow": "conventional-commits",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-03T02:21:43Z",
       "duration_s": 9,
       "runner_s": 0
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-03T02:21:43Z",
-      "duration_s": 28,
-      "runner_s": 17
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 371,
+      "runs": 372,
       "success_rate": 79,
       "median_s": 16,
       "p95_s": 25,
