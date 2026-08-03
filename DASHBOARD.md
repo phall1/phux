@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:19:18Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:20:39Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 409 | 55% | 11m34s | 18m14s | 4524 |
+| ci | 410 | 55% | 11m30s | 18m14s | 4524 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 89 | 97% | 46s | 7m37s | 204 |
@@ -20,9 +20,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 402 | 2s | 11m16s | 17m24s |
-| check | 401 | 2s | 2m35s | 5m05s |
-| detect docs-only | 404 | 2s | 5s | 8s |
+| test | 403 | 2s | 11m16s | 17m24s |
+| check | 402 | 2s | 2m34s | 5m03s |
+| detect docs-only | 405 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,6 +122,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-03 03:20 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
 | 2026-08-03 03:18 | conventional-commits | pull_request | fix/release-portability-gate | success | 18s | 15s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 25s | 15s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 16s | 13s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 02:52 | ci | pull_request | release-please--branches--main-- | success | 13m02s | 17m35s |
 | 2026-08-03 02:22 | ci | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
 | 2026-08-03 02:22 | conventional-commits | pull_request | release-please--branches--main-- | success | 34s | 17s |
-| 2026-08-03 02:21 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 
 ---
 
