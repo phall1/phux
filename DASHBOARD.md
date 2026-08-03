@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T02:10:46Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T02:11:02Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
