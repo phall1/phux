@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:24:55Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:28:39Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 411 | 55% | 11m30s | 18m14s | 4532 |
+| ci | 412 | 55% | 11m30s | 18m14s | 4544 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 89 | 97% | 46s | 7m37s | 204 |
@@ -20,36 +20,35 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 404 | 2s | 11m13s | 17m24s |
-| check | 403 | 2s | 2m34s | 5m03s |
-| detect docs-only | 406 | 2s | 5s | 8s |
+| test | 405 | 2s | 11m13s | 17m24s |
+| check | 404 | 2s | 2m34s | 5m03s |
+| detect docs-only | 407 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 10m38s | 13 |
+| test | tests (unit + e2e) | 10m00s | 13 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m22s | 15 |
 | check | Run Swatinem/rust-cache@v2 | 19s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 18s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 19s | 15 |
 | check | docs-check | 11s | 15 |
 | test | agents smoke | 10s | 13 |
-| check | runner disk headroom | 7s | 15 |
+| check | runner disk headroom | 8s | 15 |
 | check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
-| test | runner disk headroom | 6s | 15 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m38s | 224 |
-| ci / check | doc | 10s | 224 |
-| ci / check | deny | 3s | 223 |
-| ci / check | fmt | 2s | 230 |
-| ci / test | unit | 12m10s | 207 |
-| ci / test | e2e | 11s | 203 |
-| ci / test | agents-smoke | 1s | 143 |
+| ci / check | clippy | 1m38s | 225 |
+| ci / check | doc | 10s | 225 |
+| ci / check | deny | 3s | 224 |
+| ci / check | fmt | 2s | 231 |
+| ci / test | unit | 12m10s | 208 |
+| ci / test | e2e | 11s | 204 |
+| ci / test | agents-smoke | 1s | 144 |
 | observatory / timings | build-dev | 11m06s | 22 |
 | observatory / timings | build-release | 5m24s | 23 |
 | stress / stress | stress | 17m27s | 19 |
@@ -58,8 +57,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 45% | 238 |
-| ci / test | 45% | 236 |
+| ci / check | 45% | 239 |
+| ci / test | 46% | 237 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -103,20 +102,20 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 - duplicate versions: **32** (previous: 32)
 - proc-macro crates: 33; build-script crates: 67
 
-## Slowest tests (latest instrumented run, `85ebad9d7`)
+## Slowest tests (latest instrumented run, `40a96201c`)
 
 | test | wall |
 |---|---:|
-| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 4.020s |
-| `phux-record::golden_cast::golden_cast_renders_gif_and_apng_and_frame_counts_agree` | 4.007s |
-| `phux-server::terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry` | 1.457s |
-| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 1.314s |
+| `phux-server::terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow` | 3.980s |
+| `phux-record::golden_cast::golden_cast_renders_gif_and_apng_and_frame_counts_agree` | 3.961s |
+| `phux-server::terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry` | 1.456s |
+| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 1.312s |
 | `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 1.216s |
-| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 1.116s |
 | `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 1.115s |
-| `phux-server::server_idle_exit::connecting_disarms_the_idle_clock` | 1.064s |
-| `phux::config_plugin_actions::config_run_timeout_returns_125_and_json_timeout` | 1.013s |
+| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 1.114s |
+| `phux-server::server_idle_exit::connecting_disarms_the_idle_clock` | 1.061s |
 | `phux-server::server_self_exit::server_without_clients_does_not_self_exit_on_seed_pane_death` | 1.013s |
+| `phux::config_plugin_actions::config_run_timeout_returns_125_and_json_timeout` | 1.010s |
 
 ## Recent runs
 
@@ -138,6 +137,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:13 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-08-03 03:13 | ci | pull_request | release-please--branches--main-- | skipped | 8s | 0s |
 | 2026-08-03 03:12 | release-please | push | main | success | 53s | 40s |
+| 2026-08-03 03:12 | ci | push | main | success | 15m36s | 12m21s |
 | 2026-08-03 03:08 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 03:08 | conventional-commits | pull_request | release-please--branches--main-- | success | 25s | 17s |
 | 2026-08-03 03:07 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -151,7 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:00 | conventional-commits | pull_request | feat/ux-wave-12 | success | 18s | 15s |
 | 2026-08-03 03:00 | ci | pull_request | feat/ux-wave-12 | success | 12m17s | 14m54s |
 | 2026-08-03 02:53 | stress | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
-| 2026-08-03 02:53 | release-please | push | main | failure | 1m37s | 2m07s |
 
 ---
 
