@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T02:22:00Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T02:22:17Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 397 | 55% | 11m36s | 18m24s | 4433 |
 | observatory | 23 | 91% | 12m23s | 12m56s | 533 |
 | stress | 40 | 38% | 2m39s | 22m37s | 334 |
-| release-please | 85 | 98% | 46s | 7m37s | 200 |
-| conventional-commits | 360 | 79% | 16s | 24s | 72 |
+| release-please | 86 | 98% | 46s | 7m37s | 201 |
+| conventional-commits | 361 | 79% | 16s | 24s | 73 |
 
 ## ci jobs, last 30 days
 
@@ -122,7 +122,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-03 02:21 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
+| 2026-08-03 02:21 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 28s | 17s |
 | 2026-08-03 02:21 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 0s |
+| 2026-08-03 02:21 | release-please | push | main | success | 48s | 41s |
 | 2026-08-03 02:10 | conventional-commits | pull_request | feat/ux-wave-11 | success | 28s | 18s |
 | 2026-08-03 02:10 | ci | pull_request | feat/ux-wave-11 | success | 11m08s | 13m01s |
 | 2026-08-03 02:02 | conventional-commits | pull_request | feat/ux-wave-11 | success | 22s | 13s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 00:29 | release-please | push | main | failure | 1m36s | 2m14s |
 | 2026-08-03 00:29 | observatory | push | main | success | 12m34s | 25m58s |
 | 2026-08-03 00:29 | ci | push | main | success | 12m54s | 17m39s |
-| 2026-08-03 00:29 | ci | pull_request | release-please--branches--main-- | success | 12m45s | 17m14s |
-| 2026-08-03 00:13 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 
 ---
 

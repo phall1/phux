@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T02:22:00Z",
+  "generated_at": "2026-08-03T02:22:17Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -16,9 +16,27 @@
       "event": "pull_request",
       "branch": "release-please--branches--main--components--phux",
       "conclusion": "cancelled",
+      "created_at": "2026-08-03T02:21:43Z",
+      "duration_s": 28,
+      "runner_s": 17
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "cancelled",
       "created_at": "2026-08-03T02:21:42Z",
       "duration_s": 2,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-03T02:21:14Z",
+      "duration_s": 48,
+      "runner_s": 41
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-08-03T00:29:57Z",
       "duration_s": 774,
       "runner_s": 1059
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "success",
-      "created_at": "2026-08-03T00:29:40Z",
-      "duration_s": 765,
-      "runner_s": 1034
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-03T00:13:03Z",
-      "duration_s": 2,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -300,19 +300,19 @@
     },
     {
       "workflow": "release-please",
-      "runs": 85,
+      "runs": 86,
       "success_rate": 98,
       "median_s": 46,
       "p95_s": 457,
-      "runner_minutes": 200
+      "runner_minutes": 201
     },
     {
       "workflow": "conventional-commits",
-      "runs": 360,
+      "runs": 361,
       "success_rate": 79,
       "median_s": 16,
       "p95_s": 24,
-      "runner_minutes": 72
+      "runner_minutes": 73
     }
   ],
   "ci_jobs_30d": [
