@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T03:18:13Z",
+  "generated_at": "2026-08-03T03:18:49Z",
   "recent_runs": [
     {
       "workflow": "conventional-commits",
@@ -138,6 +138,15 @@
       "runner_s": 44
     },
     {
+      "workflow": "ci",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-03T03:07:13Z",
+      "duration_s": 686,
+      "runner_s": 824
+    },
+    {
       "workflow": "release",
       "event": "workflow_dispatch",
       "branch": "fix/release-zig-0.16-checksums",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-03T02:21:43Z",
       "duration_s": 28,
       "runner_s": 17
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "cancelled",
-      "created_at": "2026-08-03T02:21:42Z",
-      "duration_s": 2,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 408,
+      "runs": 409,
       "success_rate": 55,
       "median_s": 694,
       "p95_s": 1094,
-      "runner_minutes": 4510
+      "runner_minutes": 4524
     },
     {
       "workflow": "observatory",
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 401,
+      "runs": 402,
       "median_queue_s": 2,
-      "median_s": 677,
-      "p95_s": 1050
+      "median_s": 676,
+      "p95_s": 1044
     },
     {
       "job": "check",
-      "runs": 400,
+      "runs": 401,
       "median_queue_s": 2,
       "median_s": 155,
       "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 403,
+      "runs": 404,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -350,13 +350,13 @@
     {
       "job": "test",
       "step": "tests (unit + e2e)",
-      "median_s": 666,
+      "median_s": 638,
       "n": 13
     },
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 83,
+      "median_s": 82,
       "n": 14
     },
     {
@@ -412,13 +412,13 @@
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 236,
-      "hit_rate": 44
+      "samples": 237,
+      "hit_rate": 45
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 234,
+      "samples": 235,
       "hit_rate": 45
     },
     {
@@ -434,49 +434,49 @@
       "job": "check",
       "phase": "clippy",
       "median_s": 99,
-      "n": 222
+      "n": 223
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 222
+      "n": 223
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 221
+      "n": 222
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 228
+      "n": 229
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "unit",
       "median_s": 730,
-      "n": 206
+      "n": 207
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "e2e",
       "median_s": 11,
-      "n": 202
+      "n": 203
     },
     {
       "workflow": "ci",
       "job": "test",
       "phase": "agents-smoke",
       "median_s": 1,
-      "n": 142
+      "n": 143
     },
     {
       "workflow": "observatory",
@@ -501,57 +501,57 @@
     }
   ],
   "slow_tests": {
-    "sha": "4efd7354c",
+    "sha": "85ebad9d7",
     "tests": [
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::resize_desync_then_both_shrink_does_not_overflow",
-        "seconds": 4.015
+        "seconds": 4.020
       },
       {
         "binary": "phux-record::golden_cast",
         "test": "golden_cast_renders_gif_and_apng_and_frame_counts_agree",
-        "seconds": 3.980
+        "seconds": 4.007
       },
       {
         "binary": "phux-server",
         "test": "terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry",
-        "seconds": 1.455
+        "seconds": 1.457
       },
       {
         "binary": "phux-server::phux_3uv_acked_incremental",
         "test": "acked_incremental_converges_and_seq_is_monotonic",
-        "seconds": 1.312
+        "seconds": 1.314
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "a_plain_shell_pane_never_gets_an_agent_record",
-        "seconds": 1.215
+        "seconds": 1.216
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "deleting_the_record_hands_it_back_to_the_detector",
-        "seconds": 1.115
+        "seconds": 1.116
       },
       {
         "binary": "phux-server::agent_detect",
         "test": "an_identity_only_set_gets_its_state_filled_in_by_the_detector",
-        "seconds": 1.114
+        "seconds": 1.115
       },
       {
         "binary": "phux-server::server_idle_exit",
         "test": "connecting_disarms_the_idle_clock",
-        "seconds": 1.062
+        "seconds": 1.064
+      },
+      {
+        "binary": "phux::config_plugin_actions",
+        "test": "config_run_timeout_returns_125_and_json_timeout",
+        "seconds": 1.013
       },
       {
         "binary": "phux-server::server_self_exit",
         "test": "server_without_clients_does_not_self_exit_on_seed_pane_death",
         "seconds": 1.013
-      },
-      {
-        "binary": "phux::config_plugin_actions",
-        "test": "config_run_timeout_returns_125_and_json_timeout",
-        "seconds": 1.008
       }
     ]
   },
