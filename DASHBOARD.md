@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:21:05Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:21:58Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -14,7 +14,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 89 | 97% | 46s | 7m37s | 204 |
 | conventional-commits | 373 | 79% | 16s | 25s | 75 |
-| release | 1 | 100% | 8m11s | 8m11s | 20 |
+| release | 2 | 100% | 7m52s | 7m52s | 41 |
 
 ## ci jobs, last 30 days
 
@@ -128,6 +128,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 25s | 15s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 16s | 13s |
 | 2026-08-03 03:17 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 6s | 0s |
+| 2026-08-03 03:13 | release | workflow_dispatch | main | success | 7m52s | 20m29s |
 | 2026-08-03 03:13 | ci | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
 | 2026-08-03 03:13 | conventional-commits | pull_request | release-please--branches--main-- | success | 17s | 12s |
 | 2026-08-03 03:13 | conventional-commits | pull_request | release-please--branches--main-- | success | 26s | 17s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 02:53 | observatory | push | main | success | 12m40s | 26m09s |
 | 2026-08-03 02:53 | ci | push | main | success | 13m17s | 17m59s |
 | 2026-08-03 02:52 | ci | pull_request | release-please--branches--main-- | success | 13m02s | 17m35s |
-| 2026-08-03 02:22 | ci | pull_request | release-please--branches--main-- | skipped | 11s | 0s |
 
 ---
 
