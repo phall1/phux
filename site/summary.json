@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T04:18:34Z",
+  "generated_at": "2026-08-03T04:22:13Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -91,6 +91,15 @@
       "created_at": "2026-08-03T03:55:13Z",
       "duration_s": 19,
       "runner_s": 14
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "feat/negotiated-libghostty-codec-pr",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-03T03:55:13Z",
+      "duration_s": 1608,
+      "runner_s": 1882
     },
     {
       "workflow": "ci",
@@ -262,25 +271,16 @@
       "created_at": "2026-08-03T03:17:36Z",
       "duration_s": 25,
       "runner_s": 15
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-03T03:17:13Z",
-      "duration_s": 16,
-      "runner_s": 13
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 422,
+      "runs": 423,
       "success_rate": 55,
-      "median_s": 679,
-      "p95_s": 1091,
-      "runner_minutes": 4612
+      "median_s": 682,
+      "p95_s": 1094,
+      "runner_minutes": 4643
     },
     {
       "workflow": "observatory",
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 415,
+      "runs": 416,
       "median_queue_s": 2,
       "median_s": 658,
-      "p95_s": 1044
+      "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 414,
+      "runs": 415,
       "median_queue_s": 2,
       "median_s": 153,
-      "p95_s": 303
+      "p95_s": 305
     },
     {
       "job": "detect docs-only",
-      "runs": 417,
+      "runs": 418,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 8
@@ -351,7 +351,7 @@
       "job": "test",
       "step": "tests (unit + e2e)",
       "median_s": 566,
-      "n": 12
+      "n": 11
     },
     {
       "job": "check",
@@ -360,16 +360,16 @@
       "n": 12
     },
     {
-      "job": "check",
-      "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 20,
-      "n": 13
-    },
-    {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 20,
       "n": 14
+    },
+    {
+      "job": "check",
+      "step": "Run Swatinem/rust-cache@v2",
+      "median_s": 19,
+      "n": 13
     },
     {
       "job": "check",
@@ -381,7 +381,7 @@
       "job": "test",
       "step": "agents smoke",
       "median_s": 11,
-      "n": 12
+      "n": 11
     },
     {
       "job": "check",
@@ -390,12 +390,6 @@
       "n": 13
     },
     {
-      "job": "check",
-      "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 7,
-      "n": 13
-    },
-    {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
@@ -406,19 +400,25 @@
       "step": "runner disk headroom",
       "median_s": 7,
       "n": 14
+    },
+    {
+      "job": "check",
+      "step": "Run DeterminateSystems/nix-installer-action@v22",
+      "median_s": 6,
+      "n": 13
     }
   ],
   "cache": [
     {
       "workflow": "ci",
       "job": "check",
-      "samples": 244,
+      "samples": 245,
       "hit_rate": 46
     },
     {
       "workflow": "ci",
       "job": "test",
-      "samples": 242,
+      "samples": 243,
       "hit_rate": 46
     },
     {
@@ -433,29 +433,29 @@
       "workflow": "ci",
       "job": "check",
       "phase": "clippy",
-      "median_s": 95,
-      "n": 230
+      "median_s": 98,
+      "n": 231
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "doc",
       "median_s": 10,
-      "n": 230
+      "n": 231
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "deny",
       "median_s": 3,
-      "n": 228
+      "n": 229
     },
     {
       "workflow": "ci",
       "job": "check",
       "phase": "fmt",
       "median_s": 2,
-      "n": 236
+      "n": 237
     },
     {
       "workflow": "ci",

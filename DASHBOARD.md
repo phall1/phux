@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T04:18:34Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T04:22:13Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 422 | 55% | 11m19s | 18m11s | 4612 |
+| ci | 423 | 55% | 11m22s | 18m14s | 4643 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 91 | 97% | 47s | 7m37s | 206 |
@@ -20,33 +20,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 415 | 2s | 10m58s | 17m24s |
-| check | 414 | 2s | 2m33s | 5m03s |
-| detect docs-only | 417 | 2s | 5s | 8s |
+| test | 416 | 2s | 10m58s | 17m30s |
+| check | 415 | 2s | 2m33s | 5m05s |
+| detect docs-only | 418 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
-| test | tests (unit + e2e) | 9m26s | 12 |
+| test | tests (unit + e2e) | 9m26s | 11 |
 | check | rust checks (fmt + clippy + doc + deny) | 1m17s | 12 |
-| check | Run Swatinem/rust-cache@v2 | 20s | 13 |
 | test | Run Swatinem/rust-cache@v2 | 20s | 14 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 13 |
 | check | docs-check | 11s | 12 |
-| test | agents smoke | 11s | 12 |
+| test | agents smoke | 11s | 11 |
 | check | runner disk headroom | 8s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 13 |
 | test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 14 |
 | test | runner disk headroom | 7s | 14 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 13 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m35s | 230 |
-| ci / check | doc | 10s | 230 |
-| ci / check | deny | 3s | 228 |
-| ci / check | fmt | 2s | 236 |
+| ci / check | clippy | 1m38s | 231 |
+| ci / check | doc | 10s | 231 |
+| ci / check | deny | 3s | 229 |
+| ci / check | fmt | 2s | 237 |
 | ci / test | unit | 12m04s | 212 |
 | ci / test | e2e | 11s | 208 |
 | ci / test | agents-smoke | 1s | 148 |
@@ -58,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 46% | 244 |
-| ci / test | 46% | 242 |
+| ci / check | 46% | 245 |
+| ci / test | 46% | 243 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -132,6 +132,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:57 | conventional-commits | pull_request | feat/ux-wave-13 | success | 14s | 11s |
 | 2026-08-03 03:57 | ci | pull_request | feat/ux-wave-13 | success | 10m00s | 12m18s |
 | 2026-08-03 03:55 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 19s | 14s |
+| 2026-08-03 03:55 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 26m48s | 31m22s |
 | 2026-08-03 03:44 | ci | pull_request | feat/negotiated-libghostty-codec | cancelled | 11m23s | 15m56s |
 | 2026-08-03 03:43 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
 | 2026-08-03 03:43 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 18s | 16s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:18 | conventional-commits | pull_request | fix/release-portability-gate | success | 18s | 15s |
 | 2026-08-03 03:18 | ci | pull_request | fix/release-portability-gate | cancelled | 5m47s | 8m05s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 25s | 15s |
-| 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 16s | 13s |
 
 ---
 
