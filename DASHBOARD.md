@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T03:24:35Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T03:24:55Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,7 +9,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 410 | 55% | 11m30s | 18m14s | 4524 |
+| ci | 411 | 55% | 11m30s | 18m14s | 4532 |
 | observatory | 24 | 92% | 12m23s | 12m56s | 559 |
 | stress | 42 | 36% | 11s | 22m15s | 334 |
 | release-please | 89 | 97% | 46s | 7m37s | 204 |
@@ -20,33 +20,33 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 403 | 2s | 11m16s | 17m24s |
-| check | 402 | 2s | 2m34s | 5m03s |
-| detect docs-only | 405 | 2s | 5s | 8s |
+| test | 404 | 2s | 11m13s | 17m24s |
+| check | 403 | 2s | 2m34s | 5m03s |
+| detect docs-only | 406 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 10m38s | 13 |
-| check | rust checks (fmt + clippy + doc + deny) | 1m22s | 14 |
-| check | Run Swatinem/rust-cache@v2 | 19s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 15s | 14 |
-| check | docs-check | 11s | 14 |
+| check | rust checks (fmt + clippy + doc + deny) | 1m22s | 15 |
+| check | Run Swatinem/rust-cache@v2 | 19s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 18s | 15 |
+| check | docs-check | 11s | 15 |
 | test | agents smoke | 10s | 13 |
-| check | runner disk headroom | 7s | 14 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 14 |
-| test | runner disk headroom | 6s | 14 |
+| check | runner disk headroom | 7s | 15 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 6s | 15 |
+| test | runner disk headroom | 6s | 15 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
 | workflow / job | phase | median | samples |
 |---|---|---:|---:|
-| ci / check | clippy | 1m39s | 223 |
-| ci / check | doc | 10s | 223 |
-| ci / check | deny | 3s | 222 |
-| ci / check | fmt | 2s | 229 |
+| ci / check | clippy | 1m38s | 224 |
+| ci / check | doc | 10s | 224 |
+| ci / check | deny | 3s | 223 |
+| ci / check | fmt | 2s | 230 |
 | ci / test | unit | 12m10s | 207 |
 | ci / test | e2e | 11s | 203 |
 | ci / test | agents-smoke | 1s | 143 |
@@ -58,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 45% | 237 |
-| ci / test | 45% | 235 |
+| ci / check | 45% | 238 |
+| ci / test | 45% | 236 |
 | stress / stress | 16% | 19 |
 
 ## Cold build (observatory)
@@ -127,6 +127,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:20 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 1s | 0s |
 | 2026-08-03 03:20 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 19s | 15s |
 | 2026-08-03 03:18 | conventional-commits | pull_request | fix/release-portability-gate | success | 18s | 15s |
+| 2026-08-03 03:18 | ci | pull_request | fix/release-portability-gate | cancelled | 5m47s | 8m05s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 25s | 15s |
 | 2026-08-03 03:17 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 16s | 13s |
 | 2026-08-03 03:17 | ci | pull_request | feat/negotiated-libghostty-codec | skipped | 6s | 0s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 03:00 | ci | pull_request | feat/ux-wave-12 | success | 12m17s | 14m54s |
 | 2026-08-03 02:53 | stress | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-03 02:53 | release-please | push | main | failure | 1m37s | 2m07s |
-| 2026-08-03 02:53 | observatory | push | main | success | 12m40s | 26m09s |
 
 ---
 
