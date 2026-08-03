@@ -1,7 +1,34 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-03T10:56:02Z",
+  "generated_at": "2026-08-03T14:33:22Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "refactor/serverstate-tables",
+      "conclusion": "success",
+      "created_at": "2026-08-03T14:33:01Z",
+      "duration_s": 15,
+      "runner_s": 12
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "refactor/serverstate-tables",
+      "conclusion": "success",
+      "created_at": "2026-08-03T14:32:41Z",
+      "duration_s": 18,
+      "runner_s": 16
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "refactor/serverstate-tables",
+      "conclusion": "cancelled",
+      "created_at": "2026-08-03T14:32:41Z",
+      "duration_s": 27,
+      "runner_s": 29
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -244,43 +271,16 @@
       "created_at": "2026-08-03T05:07:45Z",
       "duration_s": 22,
       "runner_s": 19
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-03T05:07:09Z",
-      "duration_s": 65,
-      "runner_s": 47
-    },
-    {
-      "workflow": "ci",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-03T05:07:09Z",
-      "duration_s": 458,
-      "runner_s": 558
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-03T04:59:20Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 445,
+      "runs": 446,
       "success_rate": 53,
-      "median_s": 668,
+      "median_s": 659,
       "p95_s": 1104,
-      "runner_minutes": 4911
+      "runner_minutes": 4912
     },
     {
       "workflow": "observatory",
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 402,
+      "runs": 404,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
@@ -326,24 +326,24 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 436,
+      "runs": 437,
       "median_queue_s": 2,
       "median_s": 643,
       "p95_s": 1054
     },
     {
       "job": "check",
-      "runs": 437,
+      "runs": 438,
       "median_queue_s": 2,
       "median_s": 155,
       "p95_s": 317
     },
     {
       "job": "detect docs-only",
-      "runs": 440,
+      "runs": 441,
       "median_queue_s": 2,
       "median_s": 5,
-      "p95_s": 8
+      "p95_s": 9
     }
   ],
   "slow_steps": [
@@ -356,26 +356,26 @@
     {
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
-      "median_s": 242,
-      "n": 18
+      "median_s": 266,
+      "n": 17
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
-      "median_s": 15,
-      "n": 19
+      "median_s": 14,
+      "n": 18
     },
     {
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 14,
-      "n": 19
+      "n": 18
     },
     {
       "job": "check",
       "step": "docs-check",
       "median_s": 11,
-      "n": 18
+      "n": 17
     },
     {
       "job": "test",
@@ -387,25 +387,25 @@
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 19
+      "n": 18
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 19
+      "n": 18
     },
     {
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
-      "median_s": 7,
-      "n": 19
+      "median_s": 6,
+      "n": 18
     },
     {
       "job": "test",
       "step": "runner disk headroom",
       "median_s": 6,
-      "n": 19
+      "n": 18
     }
   ],
   "cache": [
