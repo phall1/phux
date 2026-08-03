@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-03T01:30:36Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-03T01:30:53Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -12,8 +12,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci | 392 | 56% | 11m43s | 18m24s | 4398 |
 | observatory | 23 | 91% | 12m23s | 12m56s | 533 |
 | stress | 40 | 38% | 2m39s | 22m37s | 334 |
-| release-please | 84 | 98% | 46s | 7m37s | 199 |
-| conventional-commits | 355 | 79% | 16s | 24s | 71 |
+| release-please | 85 | 98% | 46s | 7m37s | 200 |
+| conventional-commits | 356 | 79% | 16s | 24s | 72 |
 
 ## ci jobs, last 30 days
 
@@ -123,6 +123,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---|---|---|---:|---:|
 | 2026-08-03 01:30 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-03 01:30 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
+| 2026-08-03 01:30 | conventional-commits | pull_request | release-please--branches--main-- | success | 18s | 14s |
+| 2026-08-03 01:29 | release-please | push | main | success | 50s | 37s |
 | 2026-08-03 01:19 | conventional-commits | pull_request | feat/ux-wave-10 | success | 28s | 18s |
 | 2026-08-03 01:19 | ci | pull_request | feat/ux-wave-10 | success | 9m50s | 12m02s |
 | 2026-08-03 00:53 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -149,8 +151,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 00:12 | ci | push | main | success | 13m12s | 18m03s |
 | 2026-08-02 23:36 | conventional-commits | pull_request | feat/ux-wave-8 | success | 26s | 16s |
 | 2026-08-02 23:36 | ci | pull_request | feat/ux-wave-8 | success | 13m01s | 17m07s |
-| 2026-08-02 23:36 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-02 23:36 | conventional-commits | pull_request | release-please--branches--main-- | success | 16s | 13s |
 
 ---
 
