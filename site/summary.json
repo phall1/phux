@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-04T19:52:05Z",
+  "generated_at": "2026-08-04T19:52:25Z",
   "recent_runs": [
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-04T19:52:17Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "stress",
       "event": "pull_request",
@@ -19,6 +28,24 @@
       "created_at": "2026-08-04T19:51:45Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-04T19:51:45Z",
+      "duration_s": 23,
+      "runner_s": 14
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-04T19:51:07Z",
+      "duration_s": 68,
+      "runner_s": 53
     },
     {
       "workflow": "ci",
@@ -244,41 +271,14 @@
       "created_at": "2026-08-04T08:51:29Z",
       "duration_s": 794,
       "runner_s": 1545
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-04T08:40:05Z",
-      "duration_s": 20,
-      "runner_s": 16
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-04T08:40:05Z",
-      "duration_s": 610,
-      "runner_s": 935
-    },
-    {
-      "workflow": "conventional-commits",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "success",
-      "created_at": "2026-08-04T07:44:21Z",
-      "duration_s": 18,
-      "runner_s": 15
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 467,
+      "runs": 468,
       "success_rate": 53,
-      "median_s": 629,
+      "median_s": 626,
       "p95_s": 1094,
       "runner_minutes": 5065
     },
@@ -300,15 +300,15 @@
     },
     {
       "workflow": "release-please",
-      "runs": 99,
+      "runs": 100,
       "success_rate": 97,
       "median_s": 48,
       "p95_s": 467,
-      "runner_minutes": 255
+      "runner_minutes": 256
     },
     {
       "workflow": "conventional-commits",
-      "runs": 420,
+      "runs": 421,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
@@ -333,14 +333,14 @@
     },
     {
       "job": "check",
-      "runs": 459,
+      "runs": 460,
       "median_queue_s": 2,
-      "median_s": 153,
+      "median_s": 152,
       "p95_s": 321
     },
     {
       "job": "detect docs-only",
-      "runs": 462,
+      "runs": 463,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 9
@@ -357,13 +357,13 @@
       "job": "check",
       "step": "rust checks (fmt + clippy + doc + deny)",
       "median_s": 266,
-      "n": 16
+      "n": 15
     },
     {
       "job": "check",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 14,
-      "n": 17
+      "n": 16
     },
     {
       "job": "test",
@@ -375,7 +375,7 @@
       "job": "check",
       "step": "docs-check",
       "median_s": 11,
-      "n": 17
+      "n": 16
     },
     {
       "job": "test",
@@ -387,13 +387,13 @@
       "job": "check",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 17
+      "n": 16
     },
     {
       "job": "check",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 17
+      "n": 16
     },
     {
       "job": "test",
