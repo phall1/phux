@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-04T08:52:13Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-04T08:52:27Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,10 +9,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 457 | 53% | 10m50s | 18m24s | 4992 |
+| ci | 458 | 53% | 10m49s | 18m24s | 4992 |
 | observatory | 28 | 93% | 12m23s | 12m56s | 647 |
 | stress | 45 | 36% | 11s | 22m15s | 340 |
-| release-please | 96 | 97% | 48s | 7m42s | 230 |
+| release-please | 97 | 97% | 48s | 7m42s | 231 |
 | conventional-commits | 413 | 80% | 17s | 25s | 84 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
@@ -20,9 +20,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 448 | 2s | 10m35s | 17m30s |
-| check | 449 | 2s | 2m34s | 5m18s |
-| detect docs-only | 452 | 2s | 5s | 8s |
+| test | 449 | 2s | 10m35s | 17m30s |
+| check | 450 | 2s | 2m33s | 5m18s |
+| detect docs-only | 453 | 2s | 5s | 8s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,8 +122,10 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-04 08:52 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-04 08:51 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 2s | 1s |
 | 2026-08-04 08:51 | ci | pull_request | release-please--branches--main-- | skipped | 10s | 0s |
+| 2026-08-04 08:51 | release-please | push | main | success | 50s | 39s |
 | 2026-08-04 08:40 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 20s | 16s |
 | 2026-08-04 08:40 | ci | pull_request | feat/negotiated-libghostty-codec | success | 10m10s | 15m35s |
 | 2026-08-04 07:44 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 18s | 15s |
@@ -150,8 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 14:32 | conventional-commits | pull_request | refactor/serverstate-tables | success | 18s | 16s |
 | 2026-08-03 14:32 | ci | pull_request | refactor/serverstate-tables | cancelled | 27s | 29s |
 | 2026-08-03 10:49 | stress | schedule | main | success | 6m42s | 6m32s |
-| 2026-08-03 09:43 | observatory | schedule | main | success | 12m41s | 22m54s |
-| 2026-08-03 08:49 | conventional-commits | pull_request | refactor/serverstate-decompositi | success | 19s | 15s |
 
 ---
 
