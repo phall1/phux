@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-04T09:04:57Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-04T09:49:07Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -11,7 +11,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|---:|---:|---:|
 | ci | 459 | 53% | 10m50s | 18m24s | 5009 |
 | observatory | 29 | 93% | 12m23s | 13m00s | 673 |
-| stress | 45 | 36% | 11s | 22m15s | 340 |
+| stress | 46 | 37% | 11s | 22m15s | 347 |
 | release-please | 97 | 97% | 48s | 7m42s | 231 |
 | conventional-commits | 415 | 80% | 17s | 25s | 85 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
@@ -52,7 +52,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | agents-smoke | 1s | 161 |
 | observatory / timings | build-dev | 11m00s | 27 |
 | observatory / timings | build-release | 5m26s | 28 |
-| stress / stress | stress | 16m19s | 20 |
+| stress / stress | stress | 16m19s | 21 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -60,7 +60,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---:|---:|
 | ci / check | 43% | 268 |
 | ci / test | 43% | 267 |
-| stress / stress | 15% | 20 |
+| stress / stress | 14% | 21 |
 
 ## Cold build (observatory)
 
@@ -107,21 +107,22 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | test | wall |
 |---|---:|
-| `phux-server::runtime::attach::tests::prepare_attach_rejects_pane_source_count_before_registration` | 1.655s |
-| `phux-server::terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry` | 1.445s |
-| `phux-record::golden_cast::golden_cast_renders_gif_and_apng_and_frame_counts_agree` | 1.439s |
-| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 1.312s |
-| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 1.214s |
-| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 1.114s |
-| `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 1.114s |
-| `phux-server::server_idle_exit::connecting_disarms_the_idle_clock` | 1.062s |
-| `phux-server::server_self_exit::server_without_clients_does_not_self_exit_on_seed_pane_death` | 1.013s |
-| `phux::config_plugin_actions::config_run_timeout_returns_125_and_json_timeout` | 1.012s |
+| `phux-server::stress_lifecycle_churn::attach_racing_pty_eof_does_not_panic` | 10.173s |
+| `phux-server::stress_attach_churn::attach_detach_churn_keeps_pane_alive` | 0.343s |
+| `phux-server::stress_spawn_kill::spawn_storm_then_kill_storm_does_not_panic` | 0.146s |
+| `phux-server::perf_bursty_output::synthesize_against_reference_alloc_bounded_under_full_churn` | 0.081s |
+| `phux-server::stress_resize_storm::resize_storm_converges_to_final_geometry` | 0.053s |
+| `phux-server::stress_lifecycle_churn::many_concurrent_clients_attach_detach_under_output` | 0.044s |
+| `phux-server::stress_output_extremes::multi_mb_no_newline_burst_does_not_panic` | 0.043s |
+| `phux-server::stress_resize_extremes::resize_degenerate_viewports_do_not_panic` | 0.042s |
+| `phux-server::stress_resize_extremes::both_axes_shrink_storm_under_output_does_not_panic` | 0.039s |
+| `phux-server::stress_output_extremes::wide_combining_zwj_flood_does_not_panic` | 0.036s |
 
 ## Recent runs
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-04 09:41 | stress | schedule | main | success | 6m56s | 6m52s |
 | 2026-08-04 08:52 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 | 2026-08-04 08:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 20s | 13s |
 | 2026-08-04 08:51 | conventional-commits | pull_request | release-please--branches--main-- | cancelled | 30s | 20s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 15:58 | release-please | push | main | success | 1m01s | 46s |
 | 2026-08-03 15:58 | ci | push | main | success | 9m59s | 15m26s |
 | 2026-08-03 15:58 | observatory | push | main | success | 11m22s | 21m13s |
-| 2026-08-03 14:33 | conventional-commits | pull_request | refactor/serverstate-tables | success | 15s | 12s |
 
 ---
 
