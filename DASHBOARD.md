@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-04T09:03:18Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-04T09:04:57Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 459 | 53% | 10m50s | 18m24s | 5009 |
-| observatory | 28 | 93% | 12m23s | 12m56s | 647 |
+| observatory | 29 | 93% | 12m23s | 13m00s | 673 |
 | stress | 45 | 36% | 11s | 22m15s | 340 |
 | release-please | 97 | 97% | 48s | 7m42s | 231 |
 | conventional-commits | 415 | 80% | 17s | 25s | 85 |
@@ -50,8 +50,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 11m48s | 232 |
 | ci / test | e2e | 18s | 225 |
 | ci / test | agents-smoke | 1s | 161 |
-| observatory / timings | build-dev | 11m00s | 26 |
-| observatory / timings | build-release | 5m26s | 27 |
+| observatory / timings | build-dev | 11m00s | 27 |
+| observatory / timings | build-release | 5m26s | 28 |
 | stress / stress | stress | 16m19s | 20 |
 
 ## Cache effectiveness (last 30 days)
@@ -64,43 +64,43 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 7m53s (previous: 8m00s) — 542 units at `e33c51bd7`
+### dev: 10m14s (previous: 7m53s) — 552 units at `b442296c3`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 163.15s |
-| `phux-server lib (test)` | 112.86s |
-| `phux bin "phux"` | 103.16s |
-| `phux-server` | 80.82s |
-| `phux-client lib (test)` | 76.01s |
-| `phux bin "phux" (test)` | 61.08s |
-| `phux-config` | 35.05s |
-| `phux-server-testkit` | 30.16s |
+| `libghostty-vt-sys build script (run)` | 263.87s |
+| `phux bin "phux"` | 115.42s |
+| `phux-server lib (test)` | 112.62s |
+| `phux-server` | 103.37s |
+| `phux-client lib (test)` | 95.92s |
+| `phux bin "phux" (test)` | 65.53s |
+| `phux-server-testkit` | 39.89s |
+| `phux-config` | 37.74s |
 
-### release: 5m23s (previous: 6m21s) — 367 units at `e33c51bd7`
+### release: 6m36s (previous: 5m23s) — 368 units at `b442296c3`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 145.96s |
-| `phux bin "phux"` | 125.56s |
-| `phux-server` | 28.73s |
-| `phux-config` | 21.63s |
-| `phux-mcp bin "phux-mcp"` | 20.6s |
-| `phux-server-testkit` | 13.67s |
-| `rustls` | 12.47s |
-| `phux-client` | 10.05s |
+| `libghostty-vt-sys build script (run)` | 201.13s |
+| `phux bin "phux"` | 137.34s |
+| `phux-server` | 32.14s |
+| `phux-config` | 29.23s |
+| `phux-mcp bin "phux-mcp"` | 22.45s |
+| `phux-server-testkit` | 16.48s |
+| `rustls` | 13.61s |
+| `phux-client` | 13.11s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 15.5 MiB | 15.5 MiB |
+| `phux` | 16.4 MiB | 15.5 MiB |
 | `phux-mcp` | 2.1 MiB | 2.1 MiB |
 
 ## Dependency graph
 
-- locked packages: **439** (previous: 439) — 14 workspace members, 52 direct deps
-- duplicate versions: **32** (previous: 32)
+- locked packages: **441** (previous: 439) — 15 workspace members, 53 direct deps
+- duplicate versions: **33** (previous: 32)
 - proc-macro crates: 33; build-script crates: 67
 
 ## Slowest tests (latest instrumented run, `b442296c3`)
@@ -129,6 +129,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-04 08:51 | ci | pull_request | release-please--branches--main-- | skipped | 10s | 0s |
 | 2026-08-04 08:51 | release-please | push | main | success | 50s | 39s |
 | 2026-08-04 08:51 | ci | push | main | success | 11m25s | 17m07s |
+| 2026-08-04 08:51 | observatory | push | main | success | 13m14s | 25m45s |
 | 2026-08-04 08:40 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 20s | 16s |
 | 2026-08-04 08:40 | ci | pull_request | feat/negotiated-libghostty-codec | success | 10m10s | 15m35s |
 | 2026-08-04 07:44 | conventional-commits | pull_request | feat/negotiated-libghostty-codec | success | 18s | 15s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-03 15:58 | ci | push | main | success | 9m59s | 15m26s |
 | 2026-08-03 15:58 | observatory | push | main | success | 11m22s | 21m13s |
 | 2026-08-03 14:33 | conventional-commits | pull_request | refactor/serverstate-tables | success | 15s | 12s |
-| 2026-08-03 14:33 | ci | pull_request | refactor/serverstate-tables | success | 9m30s | 14m09s |
 
 ---
 
