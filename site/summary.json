@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-04T19:34:09Z",
+  "generated_at": "2026-08-04T19:43:42Z",
   "recent_runs": [
     {
       "workflow": "stress",
@@ -10,6 +10,15 @@
       "created_at": "2026-08-04T19:33:42Z",
       "duration_s": 9,
       "runner_s": 0
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-04T19:33:16Z",
+      "duration_s": 603,
+      "runner_s": 1431
     },
     {
       "workflow": "ci",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-03T22:52:12Z",
       "duration_s": 22,
       "runner_s": 12
-    },
-    {
-      "workflow": "release-please",
-      "event": "push",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-03T22:51:43Z",
-      "duration_s": 51,
-      "runner_s": 44
     }
   ],
   "workflows_30d": [
@@ -300,11 +300,11 @@
     },
     {
       "workflow": "release-please",
-      "runs": 98,
+      "runs": 99,
       "success_rate": 97,
       "median_s": 48,
-      "p95_s": 462,
-      "runner_minutes": 231
+      "p95_s": 467,
+      "runner_minutes": 255
     },
     {
       "workflow": "conventional-commits",
