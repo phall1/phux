@@ -1,7 +1,25 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-04T19:51:02Z",
+  "generated_at": "2026-08-04T19:52:05Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-04T19:51:45Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
+    {
+      "workflow": "ci",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-04T19:51:45Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -253,30 +271,12 @@
       "created_at": "2026-08-04T07:44:21Z",
       "duration_s": 18,
       "runner_s": 15
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "feat/negotiated-libghostty-codec-pr",
-      "conclusion": "failure",
-      "created_at": "2026-08-04T07:44:20Z",
-      "duration_s": 680,
-      "runner_s": 1014
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-03T22:52:34Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
     {
       "workflow": "ci",
-      "runs": 466,
+      "runs": 467,
       "success_rate": 53,
       "median_s": 629,
       "p95_s": 1094,
@@ -292,9 +292,9 @@
     },
     {
       "workflow": "stress",
-      "runs": 47,
-      "success_rate": 36,
-      "median_s": 11,
+      "runs": 48,
+      "success_rate": 35,
+      "median_s": 9,
       "p95_s": 1335,
       "runner_minutes": 347
     },
@@ -326,21 +326,21 @@
   "ci_jobs_30d": [
     {
       "job": "test",
-      "runs": 457,
+      "runs": 458,
       "median_queue_s": 2,
-      "median_s": 626,
+      "median_s": 624,
       "p95_s": 1050
     },
     {
       "job": "check",
-      "runs": 458,
+      "runs": 459,
       "median_queue_s": 2,
       "median_s": 153,
       "p95_s": 321
     },
     {
       "job": "detect docs-only",
-      "runs": 461,
+      "runs": 462,
       "median_queue_s": 2,
       "median_s": 5,
       "p95_s": 9
@@ -369,7 +369,7 @@
       "job": "test",
       "step": "Run Swatinem/rust-cache@v2",
       "median_s": 14,
-      "n": 18
+      "n": 16
     },
     {
       "job": "check",
@@ -399,13 +399,13 @@
       "job": "test",
       "step": "Run DeterminateSystems/nix-installer-action@v22",
       "median_s": 7,
-      "n": 18
+      "n": 16
     },
     {
       "job": "test",
       "step": "runner disk headroom",
       "median_s": 7,
-      "n": 18
+      "n": 16
     }
   ],
   "cache": [
