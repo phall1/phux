@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-05T09:48:07Z",
+  "generated_at": "2026-08-05T15:12:57Z",
   "recent_runs": [
+    {
+      "workflow": "stress",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "skipped",
+      "created_at": "2026-08-05T15:12:38Z",
+      "duration_s": 1,
+      "runner_s": 0
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-04T08:51:55Z",
       "duration_s": 2,
       "runner_s": 1
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-04T08:51:55Z",
-      "duration_s": 10,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -292,9 +292,9 @@
     },
     {
       "workflow": "stress",
-      "runs": 49,
-      "success_rate": 37,
-      "median_s": 11,
+      "runs": 50,
+      "success_rate": 36,
+      "median_s": 9,
       "p95_s": 1335,
       "runner_minutes": 354
     },
