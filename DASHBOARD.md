@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-05T15:24:10Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-05T15:26:30Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -10,7 +10,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
 | ci | 471 | 54% | 10m29s | 18m14s | 5109 |
-| observatory | 30 | 93% | 12m23s | 13m04s | 699 |
+| observatory | 31 | 94% | 12m23s | 13m14s | 725 |
 | stress | 50 | 36% | 9s | 22m15s | 354 |
 | release-please | 101 | 97% | 48s | 8m03s | 279 |
 | conventional-commits | 422 | 80% | 17s | 25s | 86 |
@@ -50,8 +50,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / test | unit | 11m47s | 239 |
 | ci / test | e2e | 19s | 232 |
 | ci / test | agents-smoke | 1s | 168 |
-| observatory / timings | build-dev | 10m55s | 28 |
-| observatory / timings | build-release | 5m29s | 29 |
+| observatory / timings | build-dev | 10m55s | 29 |
+| observatory / timings | build-release | 5m29s | 30 |
 | stress / stress | stress | 14m33s | 22 |
 
 ## Cache effectiveness (last 30 days)
@@ -64,31 +64,31 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 ## Cold build (observatory)
 
-### dev: 10m06s (previous: 10m14s) — 552 units at `5b5c67a90`
+### dev: 9m48s (previous: 10m06s) — 552 units at `8821f4145`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 262.88s |
-| `phux-server lib (test)` | 126.52s |
-| `phux-server` | 100.59s |
-| `phux-client lib (test)` | 95.83s |
-| `phux bin "phux"` | 65.45s |
-| `phux bin "phux" (test)` | 46.4s |
-| `phux-server-testkit` | 38.9s |
-| `phux-config` | 36.89s |
+| `libghostty-vt-sys build script (run)` | 256.0s |
+| `phux-server lib (test)` | 143.28s |
+| `phux bin "phux"` | 107.15s |
+| `phux-server` | 97.63s |
+| `phux-client lib (test)` | 88.83s |
+| `phux bin "phux" (test)` | 61.98s |
+| `phux-server-testkit` | 37.65s |
+| `phux-config` | 35.81s |
 
-### release: 6m37s (previous: 6m36s) — 368 units at `5b5c67a90`
+### release: 6m51s (previous: 6m37s) — 368 units at `8821f4145`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 192.07s |
-| `phux bin "phux"` | 146.5s |
-| `phux-server` | 33.4s |
-| `phux-config` | 29.49s |
-| `phux-mcp bin "phux-mcp"` | 23.9s |
-| `phux-server-testkit` | 16.59s |
-| `rustls` | 14.55s |
-| `regex-automata` | 13.77s |
+| `libghostty-vt-sys build script (run)` | 207.03s |
+| `phux bin "phux"` | 142.52s |
+| `phux-server` | 37.04s |
+| `phux-config` | 29.1s |
+| `phux-mcp bin "phux-mcp"` | 23.77s |
+| `rustls` | 16.11s |
+| `phux-server-testkit` | 14.48s |
+| `phux-client` | 14.24s |
 
 ## Release binary size
 
@@ -125,6 +125,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-05 15:12 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-05 15:12 | release-please | push | main | success | 8m48s | 22m51s |
 | 2026-08-05 15:12 | ci | push | main | success | 11m33s | 17m43s |
+| 2026-08-05 15:12 | observatory | push | main | success | 13m55s | 25m53s |
 | 2026-08-05 15:12 | ci | pull_request | release-please--branches--main-- | success | 11m16s | 16m51s |
 | 2026-08-05 09:40 | stress | schedule | main | success | 7m05s | 6m57s |
 | 2026-08-04 19:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-04 16:25 | conventional-commits | pull_request | fix/search-result-release | success | 17s | 14s |
 | 2026-08-04 16:25 | ci | pull_request | fix/search-result-release | success | 7m17s | 9m33s |
 | 2026-08-04 09:41 | stress | schedule | main | success | 6m56s | 6m52s |
-| 2026-08-04 08:52 | ci | pull_request | release-please--branches--main-- | skipped | 2s | 0s |
 
 ---
 
