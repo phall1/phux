@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-07T13:54:50Z",
+  "generated_at": "2026-08-07T14:00:17Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "rc/one-zero-candidate-pass",
+      "conclusion": "success",
+      "created_at": "2026-08-07T13:59:44Z",
+      "duration_s": 18,
+      "runner_s": 14
+    },
     {
       "workflow": "ci",
       "event": "pull_request",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-04T19:51:45Z",
       "duration_s": 1,
       "runner_s": 0
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-04T19:51:45Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -308,11 +308,11 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 430,
+      "runs": 431,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
-      "runner_minutes": 88
+      "runner_minutes": 89
     },
     {
       "workflow": "release",

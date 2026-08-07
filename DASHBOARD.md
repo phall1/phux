@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-07T13:54:50Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-07T14:00:17Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | observatory | 31 | 94% | 12m23s | 13m14s | 725 |
 | stress | 53 | 38% | 11s | 22m15s | 367 |
 | release-please | 102 | 97% | 48s | 7m47s | 279 |
-| conventional-commits | 430 | 80% | 17s | 25s | 88 |
+| conventional-commits | 431 | 80% | 17s | 25s | 89 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
@@ -122,6 +122,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-07 13:59 | conventional-commits | pull_request | rc/one-zero-candidate-pass | success | 18s | 14s |
 | 2026-08-07 13:45 | ci | pull_request | rc/one-zero-candidate-pass | failure | 9m22s | 15m12s |
 | 2026-08-07 13:45 | conventional-commits | pull_request | rc/one-zero-candidate-pass | success | 14s | 12s |
 | 2026-08-07 13:30 | ci | pull_request | rc/one-zero-candidate-pass | failure | 8m59s | 14m55s |
@@ -151,7 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-04 19:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-04 19:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
 | 2026-08-04 19:51 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-04 19:51 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
