@@ -1,7 +1,16 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-06T09:50:55Z",
+  "generated_at": "2026-08-07T06:51:34Z",
   "recent_runs": [
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "docs-ios-consumer-contract",
+      "conclusion": "success",
+      "created_at": "2026-08-07T06:51:09Z",
+      "duration_s": 14,
+      "runner_s": 11
+    },
     {
       "workflow": "stress",
       "event": "schedule",
@@ -262,15 +271,6 @@
       "created_at": "2026-08-04T16:25:30Z",
       "duration_s": 17,
       "runner_s": 14
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "fix/search-result-release",
-      "conclusion": "success",
-      "created_at": "2026-08-04T16:25:29Z",
-      "duration_s": 437,
-      "runner_s": 573
     }
   ],
   "workflows_30d": [
@@ -308,7 +308,7 @@
     },
     {
       "workflow": "conventional-commits",
-      "runs": 422,
+      "runs": 423,
       "success_rate": 80,
       "median_s": 17,
       "p95_s": 25,
