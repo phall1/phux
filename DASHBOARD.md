@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-07T13:11:25Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-07T13:13:36Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -9,20 +9,20 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow | runs | success | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|
-| ci | 475 | 53% | 10m29s | 18m14s | 5144 |
+| ci | 476 | 53% | 10m26s | 18m14s | 5148 |
 | observatory | 31 | 94% | 12m23s | 13m14s | 725 |
 | stress | 53 | 38% | 11s | 22m15s | 367 |
 | release-please | 102 | 97% | 48s | 7m47s | 279 |
-| conventional-commits | 426 | 80% | 17s | 25s | 87 |
+| conventional-commits | 427 | 80% | 17s | 25s | 88 |
 | release | 3 | 100% | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 465 | 2s | 10m26s | 17m24s |
-| check | 467 | 2s | 2m33s | 5m25s |
-| detect docs-only | 470 | 2s | 5s | 9s |
+| test | 466 | 2s | 10m24s | 17m24s |
+| check | 468 | 2s | 2m33s | 5m25s |
+| detect docs-only | 471 | 2s | 5s | 9s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -30,14 +30,14 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 9m13s | 13 |
 | check | rust checks (fmt + clippy + doc + deny) | 4m20s | 14 |
-| test | Run Swatinem/rust-cache@v2 | 15s | 15 |
-| check | Run Swatinem/rust-cache@v2 | 14s | 15 |
+| test | Run Swatinem/rust-cache@v2 | 15s | 16 |
+| check | Run Swatinem/rust-cache@v2 | 14s | 16 |
 | check | docs-check | 11s | 15 |
 | test | agents smoke | 10s | 13 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
-| check | runner disk headroom | 7s | 15 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 15 |
-| test | runner disk headroom | 7s | 15 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 16 |
+| check | runner disk headroom | 7s | 16 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 16 |
+| test | runner disk headroom | 7s | 16 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -46,7 +46,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | ci / check | clippy | 1m49s | 262 |
 | ci / check | doc | 10s | 262 |
 | ci / check | deny | 3s | 260 |
-| ci / check | fmt | 2s | 269 |
+| ci / check | fmt | 2s | 270 |
 | ci / test | unit | 11m47s | 241 |
 | ci / test | e2e | 19s | 234 |
 | ci / test | agents-smoke | 1s | 170 |
@@ -58,8 +58,8 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | workflow / job | rust-cache hit rate | samples |
 |---|---:|---:|
-| ci / check | 43% | 278 |
-| ci / test | 43% | 277 |
+| ci / check | 43% | 279 |
+| ci / test | 43% | 278 |
 | stress / stress | 13% | 24 |
 
 ## Cold build (observatory)
@@ -122,7 +122,9 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-07 13:13 | conventional-commits | pull_request | rc/one-zero-candidate-pass | failure | 17s | 13s |
 | 2026-08-07 13:10 | conventional-commits | pull_request | rc/one-zero-candidate-pass | failure | 21s | 18s |
+| 2026-08-07 13:10 | ci | pull_request | rc/one-zero-candidate-pass | cancelled | 2m32s | 3m50s |
 | 2026-08-07 08:18 | stress | schedule | main | success | 6m33s | 6m29s |
 | 2026-08-07 07:08 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-07 07:08 | conventional-commits | pull_request | release-please--branches--main-- | success | 29s | 26s |
@@ -150,8 +152,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-04 19:48 | ci | pull_request | fix/relay-spec-status-current | success | 2m14s | 2m56s |
 | 2026-08-04 19:48 | conventional-commits | pull_request | fix/relay-spec-status-current | success | 26s | 21s |
 | 2026-08-04 19:33 | stress | pull_request | release-please--branches--main-- | skipped | 9s | 0s |
-| 2026-08-04 19:33 | release-please | push | main | success | 10m03s | 23m51s |
-| 2026-08-04 19:33 | ci | push | main | success | 11m09s | 17m16s |
 
 ---
 
