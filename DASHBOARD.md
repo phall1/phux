@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-08T05:55:06Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-08T05:55:19Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -13,7 +13,7 @@ runs never reached a verdict and are counted under "not run".
 
 | workflow | runs | concluded | success | main | not run | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| ci | 481 | 279 | 91% | 98% (100) | 202 | 10m24s | 18m14s | 5206 |
+| ci | 482 | 279 | 91% | 98% (100) | 203 | 10m24s | 18m11s | 5206 |
 | observatory | 31 | 31 | 94% | 94% (31) | 0 | 12m23s | 13m14s | 725 |
 | stress | 53 | 26 | 77% | 77% (26) | 27 | 11s | 22m15s | 367 |
 | release-please | 103 | 103 | 97% | 97% (103) | 0 | 48s | 7m47s | 280 |
@@ -24,24 +24,24 @@ runs never reached a verdict and are counted under "not run".
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 471 | 2s | 10m13s | 17m24s |
-| check | 473 | 2s | 2m33s | 5m31s |
-| detect docs-only | 476 | 2s | 5s | 9s |
+| test | 472 | 2s | 10m12s | 17m24s |
+| check | 474 | 2s | 2m33s | 5m31s |
+| detect docs-only | 477 | 2s | 5s | 9s |
 
 ## Slowest ci steps (median, last 30 days)
 
 | job | step | median | samples |
 |---|---|---:|---:|
 | test | tests (unit + e2e) | 9m22s | 12 |
-| check | rust checks (fmt + clippy + doc + deny) | 4m33s | 15 |
-| test | Run Swatinem/rust-cache@v2 | 15s | 18 |
-| check | Run Swatinem/rust-cache@v2 | 13s | 18 |
-| check | docs-check | 11s | 16 |
+| check | rust checks (fmt + clippy + doc + deny) | 4m29s | 14 |
+| test | Run Swatinem/rust-cache@v2 | 15s | 17 |
+| check | Run Swatinem/rust-cache@v2 | 14s | 17 |
+| check | docs-check | 11s | 15 |
 | test | agents smoke | 10s | 12 |
-| test | runner disk headroom | 8s | 18 |
-| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 18 |
-| check | runner disk headroom | 7s | 18 |
-| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 18 |
+| test | runner disk headroom | 8s | 17 |
+| check | Run DeterminateSystems/nix-installer-action@v22 | 7s | 17 |
+| check | runner disk headroom | 7s | 17 |
+| test | Run DeterminateSystems/nix-installer-action@v22 | 7s | 17 |
 
 ## Cargo phases inside the lanes (median, last 30 days)
 
@@ -126,6 +126,7 @@ runs never reached a verdict and are counted under "not run".
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-08 05:55 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-08 05:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-08 05:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 19s |
 | 2026-08-08 05:54 | release-please | push | main | success | 51s | 39s |
@@ -155,7 +156,6 @@ runs never reached a verdict and are counted under "not run".
 | 2026-08-05 15:12 | release-please | push | main | success | 8m48s | 22m51s |
 | 2026-08-05 15:12 | ci | push | main | success | 11m33s | 17m43s |
 | 2026-08-05 15:12 | observatory | push | main | success | 13m55s | 25m53s |
-| 2026-08-05 15:12 | ci | pull_request | release-please--branches--main-- | success | 11m16s | 16m51s |
 
 ---
 
