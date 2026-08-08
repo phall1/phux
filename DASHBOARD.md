@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-08T06:05:30Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-08T06:07:14Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -14,7 +14,7 @@ runs never reached a verdict and are counted under "not run".
 | workflow | runs | concluded | success | main | not run | median | p95 | runner minutes |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | ci | 483 | 280 | 91% | 98% (101) | 203 | 10m24s | 18m11s | 5223 |
-| observatory | 31 | 31 | 94% | 94% (31) | 0 | 12m23s | 13m14s | 725 |
+| observatory | 32 | 32 | 94% | 94% (32) | 0 | 12m23s | 13m14s | 747 |
 | stress | 53 | 26 | 77% | 77% (26) | 27 | 11s | 22m15s | 367 |
 | release-please | 103 | 103 | 97% | 97% (103) | 0 | 48s | 7m47s | 280 |
 | conventional-commits | 433 | 360 | 96% | -- | 73 | 17s | 25s | 89 |
@@ -54,8 +54,8 @@ runs never reached a verdict and are counted under "not run".
 | ci / test | unit | 11m40s | 246 |
 | ci / test | e2e | 19s | 236 |
 | ci / test | agents-smoke | 1s | 172 |
-| observatory / timings | build-dev | 10m55s | 29 |
-| observatory / timings | build-release | 5m29s | 30 |
+| observatory / timings | build-dev | 10m47s | 30 |
+| observatory / timings | build-release | 5m33s | 31 |
 | stress / stress | stress | 7m04s | 24 |
 
 ## Cache effectiveness (last 30 days)
@@ -68,38 +68,38 @@ runs never reached a verdict and are counted under "not run".
 
 ## Cold build (observatory)
 
-### dev: 9m48s (previous: 10m06s) — 552 units at `8821f4145`
+### dev: 7m11s (previous: 9m48s) — 555 units at `d8fe06c6f`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 256.0s |
-| `phux-server lib (test)` | 143.28s |
-| `phux bin "phux"` | 107.15s |
-| `phux-server` | 97.63s |
-| `phux-client lib (test)` | 88.83s |
-| `phux bin "phux" (test)` | 61.98s |
-| `phux-server-testkit` | 37.65s |
-| `phux-config` | 35.81s |
+| `libghostty-vt-sys build script (run)` | 200.26s |
+| `phux-server lib (test)` | 101.5s |
+| `phux bin "phux"` | 73.83s |
+| `phux-server` | 69.82s |
+| `phux bin "phux" (test)` | 42.99s |
+| `phux-client lib (test)` | 39.15s |
+| `phux-server-testkit` | 25.33s |
+| `phux-config` | 24.89s |
 
-### release: 6m51s (previous: 6m37s) — 368 units at `8821f4145`
+### release: 6m20s (previous: 6m51s) — 368 units at `d8fe06c6f`
 
 | slowest units | wall |
 |---|---:|
-| `libghostty-vt-sys build script (run)` | 207.03s |
-| `phux bin "phux"` | 142.52s |
-| `phux-server` | 37.04s |
-| `phux-config` | 29.1s |
-| `phux-mcp bin "phux-mcp"` | 23.77s |
-| `rustls` | 16.11s |
-| `phux-server-testkit` | 14.48s |
-| `phux-client` | 14.24s |
+| `libghostty-vt-sys build script (run)` | 176.47s |
+| `phux bin "phux"` | 153.84s |
+| `phux-server` | 31.73s |
+| `phux-mcp bin "phux-mcp"` | 23.89s |
+| `phux-config` | 22.22s |
+| `phux-server-testkit` | 13.14s |
+| `phux-client` | 9.9s |
+| `regex-automata` | 9.01s |
 
 ## Release binary size
 
 | binary | size | previous |
 |---|---:|---:|
-| `phux` | 16.4 MiB | 16.4 MiB |
-| `phux-mcp` | 2.1 MiB | 2.1 MiB |
+| `phux` | 13.5 MiB | 16.4 MiB |
+| `phux-mcp` | 1.7 MiB | 2.1 MiB |
 
 ## Dependency graph
 
@@ -132,6 +132,7 @@ runs never reached a verdict and are counted under "not run".
 | 2026-08-08 05:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 19s |
 | 2026-08-08 05:54 | release-please | push | main | success | 51s | 39s |
 | 2026-08-08 05:54 | ci | push | main | success | 11m09s | 16m58s |
+| 2026-08-08 05:54 | observatory | push | main | success | 12m47s | 22m11s |
 | 2026-08-07 13:59 | conventional-commits | pull_request | rc/one-zero-candidate-pass | success | 18s | 14s |
 | 2026-08-07 13:59 | ci | pull_request | rc/one-zero-candidate-pass | success | 11m46s | 16m55s |
 | 2026-08-07 13:45 | ci | pull_request | rc/one-zero-candidate-pass | failure | 9m22s | 15m12s |
@@ -155,7 +156,6 @@ runs never reached a verdict and are counted under "not run".
 | 2026-08-07 06:51 | ci | pull_request | docs-ios-consumer-contract | success | 13m15s | 18m24s |
 | 2026-08-06 09:43 | stress | schedule | main | success | 6m49s | 6m45s |
 | 2026-08-05 15:12 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-05 15:12 | release-please | push | main | success | 8m48s | 22m51s |
 
 ---
 
