@@ -1,6 +1,6 @@
 {
   "schema": 1,
-  "generated_at": "2026-08-08T05:54:44Z",
+  "generated_at": "2026-08-08T05:55:06Z",
   "recent_runs": [
     {
       "workflow": "ci",
@@ -10,6 +10,24 @@
       "created_at": "2026-08-08T05:54:33Z",
       "duration_s": 1,
       "runner_s": 0
+    },
+    {
+      "workflow": "conventional-commits",
+      "event": "pull_request",
+      "branch": "release-please--branches--main--components--phux",
+      "conclusion": "success",
+      "created_at": "2026-08-08T05:54:33Z",
+      "duration_s": 22,
+      "runner_s": 19
+    },
+    {
+      "workflow": "release-please",
+      "event": "push",
+      "branch": "main",
+      "conclusion": "success",
+      "created_at": "2026-08-08T05:54:10Z",
+      "duration_s": 51,
+      "runner_s": 39
     },
     {
       "workflow": "conventional-commits",
@@ -253,24 +271,6 @@
       "created_at": "2026-08-05T15:12:14Z",
       "duration_s": 676,
       "runner_s": 1011
-    },
-    {
-      "workflow": "stress",
-      "event": "schedule",
-      "branch": "main",
-      "conclusion": "success",
-      "created_at": "2026-08-05T09:40:48Z",
-      "duration_s": 425,
-      "runner_s": 417
-    },
-    {
-      "workflow": "ci",
-      "event": "pull_request",
-      "branch": "release-please--branches--main--components--phux",
-      "conclusion": "skipped",
-      "created_at": "2026-08-04T19:52:17Z",
-      "duration_s": 1,
-      "runner_s": 0
     }
   ],
   "workflows_30d": [
@@ -312,20 +312,20 @@
     },
     {
       "workflow": "release-please",
-      "runs": 102,
-      "concluded": 102,
+      "runs": 103,
+      "concluded": 103,
       "success_rate": 97,
-      "main_concluded": 102,
+      "main_concluded": 103,
       "main_success_rate": 97,
       "not_run": 0,
       "median_s": 48,
       "p95_s": 467,
-      "runner_minutes": 279
+      "runner_minutes": 280
     },
     {
       "workflow": "conventional-commits",
-      "runs": 431,
-      "concluded": 358,
+      "runs": 432,
+      "concluded": 359,
       "success_rate": 96,
       "main_concluded": 0,
       "main_success_rate": null,

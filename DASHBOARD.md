@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-08T05:54:44Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-08T05:55:06Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -16,8 +16,8 @@ runs never reached a verdict and are counted under "not run".
 | ci | 481 | 279 | 91% | 98% (100) | 202 | 10m24s | 18m14s | 5206 |
 | observatory | 31 | 31 | 94% | 94% (31) | 0 | 12m23s | 13m14s | 725 |
 | stress | 53 | 26 | 77% | 77% (26) | 27 | 11s | 22m15s | 367 |
-| release-please | 102 | 102 | 97% | 97% (102) | 0 | 48s | 7m47s | 279 |
-| conventional-commits | 431 | 358 | 96% | -- | 73 | 17s | 25s | 89 |
+| release-please | 103 | 103 | 97% | 97% (103) | 0 | 48s | 7m47s | 280 |
+| conventional-commits | 432 | 359 | 96% | -- | 73 | 17s | 25s | 89 |
 | release | 3 | 3 | 100% | 100% (2) | 0 | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
@@ -127,6 +127,8 @@ runs never reached a verdict and are counted under "not run".
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
 | 2026-08-08 05:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
+| 2026-08-08 05:54 | conventional-commits | pull_request | release-please--branches--main-- | success | 22s | 19s |
+| 2026-08-08 05:54 | release-please | push | main | success | 51s | 39s |
 | 2026-08-07 13:59 | conventional-commits | pull_request | rc/one-zero-candidate-pass | success | 18s | 14s |
 | 2026-08-07 13:59 | ci | pull_request | rc/one-zero-candidate-pass | success | 11m46s | 16m55s |
 | 2026-08-07 13:45 | ci | pull_request | rc/one-zero-candidate-pass | failure | 9m22s | 15m12s |
@@ -154,8 +156,6 @@ runs never reached a verdict and are counted under "not run".
 | 2026-08-05 15:12 | ci | push | main | success | 11m33s | 17m43s |
 | 2026-08-05 15:12 | observatory | push | main | success | 13m55s | 25m53s |
 | 2026-08-05 15:12 | ci | pull_request | release-please--branches--main-- | success | 11m16s | 16m51s |
-| 2026-08-05 09:40 | stress | schedule | main | success | 7m05s | 6m57s |
-| 2026-08-04 19:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
