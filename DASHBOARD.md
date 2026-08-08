@@ -1,28 +1,32 @@
 # phux CI dashboard
 
-Generated 2026-08-07T14:11:54Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-08T05:54:44Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
 
 ## Workflows, last 30 days
 
-| workflow | runs | success | median | p95 | runner minutes |
-|---|---:|---:|---:|---:|---:|
-| ci | 480 | 53% | 10m24s | 18m14s | 5206 |
-| observatory | 31 | 94% | 12m23s | 13m14s | 725 |
-| stress | 53 | 38% | 11s | 22m15s | 367 |
-| release-please | 102 | 97% | 48s | 7m47s | 279 |
-| conventional-commits | 431 | 80% | 17s | 25s | 89 |
-| release | 3 | 100% | 8m02s | 8m02s | 61 |
+Success is over **concluded** runs only. Skipped (draft PRs, which the
+workflow deliberately does not run) and cancelled (superseded pushes)
+runs never reached a verdict and are counted under "not run".
+
+| workflow | runs | concluded | success | main | not run | median | p95 | runner minutes |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| ci | 481 | 279 | 91% | 98% (100) | 202 | 10m24s | 18m14s | 5206 |
+| observatory | 31 | 31 | 94% | 94% (31) | 0 | 12m23s | 13m14s | 725 |
+| stress | 53 | 26 | 77% | 77% (26) | 27 | 11s | 22m15s | 367 |
+| release-please | 102 | 102 | 97% | 97% (102) | 0 | 48s | 7m47s | 279 |
+| conventional-commits | 431 | 358 | 96% | -- | 73 | 17s | 25s | 89 |
+| release | 3 | 3 | 100% | 100% (2) | 0 | 8m02s | 8m02s | 61 |
 
 ## ci jobs, last 30 days
 
 | job | runs | median queue | median wall | p95 wall |
 |---|---:|---:|---:|---:|
-| test | 470 | 2s | 10m13s | 17m24s |
-| check | 472 | 2s | 2m33s | 5m31s |
-| detect docs-only | 475 | 2s | 5s | 9s |
+| test | 471 | 2s | 10m13s | 17m24s |
+| check | 473 | 2s | 2m33s | 5m31s |
+| detect docs-only | 476 | 2s | 5s | 9s |
 
 ## Slowest ci steps (median, last 30 days)
 
@@ -122,6 +126,7 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-08 05:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-07 13:59 | conventional-commits | pull_request | rc/one-zero-candidate-pass | success | 18s | 14s |
 | 2026-08-07 13:59 | ci | pull_request | rc/one-zero-candidate-pass | success | 11m46s | 16m55s |
 | 2026-08-07 13:45 | ci | pull_request | rc/one-zero-candidate-pass | failure | 9m22s | 15m12s |
@@ -151,7 +156,6 @@ Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 | 2026-08-05 15:12 | ci | pull_request | release-please--branches--main-- | success | 11m16s | 16m51s |
 | 2026-08-05 09:40 | stress | schedule | main | success | 7m05s | 6m57s |
 | 2026-08-04 19:52 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
-| 2026-08-04 19:52 | conventional-commits | pull_request | release-please--branches--main-- | success | 14s | 11s |
 
 ---
 
