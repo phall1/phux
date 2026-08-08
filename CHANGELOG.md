@@ -9,6 +9,22 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.13.0](https://github.com/phall1/phux/compare/v0.12.1...v0.13.0) (2026-08-08)
+
+
+### ⚠ BREAKING CHANGES
+
+* **cli:** the following deprecated spellings no longer parse. Each now fails with clap's ordinary unknown-subcommand/unknown-flag error (exit 2), not a panic:
+
+### Features
+
+* **cli:** release-candidate pass: remove deprecated spellings and add phux update ([#379](https://github.com/phall1/phux/issues/379)) ([d8fe06c](https://github.com/phall1/phux/commit/d8fe06c6fe9312f0cbf094155f3e93dac0446382))
+
+
+### Documentation
+
+* **consumers:** own the connect-link shape here, and write the iOS contract ([a20b5a1](https://github.com/phall1/phux/commit/a20b5a1df59125e8b807b3306bf57f2aed37df64))
+
 ## [0.12.1](https://github.com/phall1/phux/compare/v0.12.0...v0.12.1) (2026-08-04)
 
 
