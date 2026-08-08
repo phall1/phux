@@ -1,6 +1,6 @@
 # phux CI dashboard
 
-Generated 2026-08-08T06:07:14Z by the ci-metrics workflow. Do not edit —
+Generated 2026-08-08T07:58:15Z by the ci-metrics workflow. Do not edit —
 every table is re-rendered from `runs/*.ndjson` on each update.
 Machine rollup: [`site/summary.json`](site/summary.json), rendered live at
 <https://phux.phall.io/ci>.
@@ -15,7 +15,7 @@ runs never reached a verdict and are counted under "not run".
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
 | ci | 483 | 280 | 91% | 98% (101) | 203 | 10m24s | 18m11s | 5223 |
 | observatory | 32 | 32 | 94% | 94% (32) | 0 | 12m23s | 13m14s | 747 |
-| stress | 53 | 26 | 77% | 77% (26) | 27 | 11s | 22m15s | 367 |
+| stress | 54 | 27 | 78% | 78% (27) | 27 | 11s | 22m15s | 373 |
 | release-please | 103 | 103 | 97% | 97% (103) | 0 | 48s | 7m47s | 280 |
 | conventional-commits | 433 | 360 | 96% | -- | 73 | 17s | 25s | 89 |
 | release | 3 | 3 | 100% | 100% (2) | 0 | 8m02s | 8m02s | 61 |
@@ -56,7 +56,7 @@ runs never reached a verdict and are counted under "not run".
 | ci / test | agents-smoke | 1s | 172 |
 | observatory / timings | build-dev | 10m47s | 30 |
 | observatory / timings | build-release | 5m33s | 31 |
-| stress / stress | stress | 7m04s | 24 |
+| stress / stress | stress | 7m04s | 25 |
 
 ## Cache effectiveness (last 30 days)
 
@@ -64,7 +64,7 @@ runs never reached a verdict and are counted under "not run".
 |---|---:|---:|
 | ci / check | 42% | 284 |
 | ci / test | 42% | 283 |
-| stress / stress | 13% | 24 |
+| stress / stress | 12% | 25 |
 
 ## Cold build (observatory)
 
@@ -111,21 +111,22 @@ runs never reached a verdict and are counted under "not run".
 
 | test | wall |
 |---|---:|
-| `phux-server::runtime::attach::tests::prepare_attach_rejects_pane_source_count_before_registration` | 1.604s |
-| `phux-server::terminal_actor::tests::xtwinops_size_queries_answered_from_resized_geometry` | 1.450s |
-| `phux-record::golden_cast::golden_cast_renders_gif_and_apng_and_frame_counts_agree` | 1.441s |
-| `phux-server::phux_3uv_acked_incremental::acked_incremental_converges_and_seq_is_monotonic` | 1.311s |
-| `phux-server::agent_detect::a_plain_shell_pane_never_gets_an_agent_record` | 1.214s |
-| `phux-server::agent_detect::an_identity_only_set_gets_its_state_filled_in_by_the_detector` | 1.115s |
-| `phux-server::agent_detect::deleting_the_record_hands_it_back_to_the_detector` | 1.113s |
-| `phux-server::server_idle_exit::connecting_disarms_the_idle_clock` | 1.063s |
-| `phux-relay::relay_routing::unknown_sni_refused_no_bytes_reach_any_tunnel` | 1.031s |
-| `phux-server::server_self_exit::server_without_clients_does_not_self_exit_on_seed_pane_death` | 1.014s |
+| `phux-server::stress_lifecycle_churn::attach_racing_pty_eof_does_not_panic` | 10.175s |
+| `phux-server::stress_attach_churn::attach_detach_churn_keeps_pane_alive` | 0.339s |
+| `phux-server::stress_spawn_kill::spawn_storm_then_kill_storm_does_not_panic` | 0.126s |
+| `phux-server::perf_bursty_output::synthesize_against_reference_alloc_bounded_under_full_churn` | 0.072s |
+| `phux-server::stress_resize_storm::resize_storm_converges_to_final_geometry` | 0.049s |
+| `phux-server::stress_output_extremes::multi_mb_no_newline_burst_does_not_panic` | 0.046s |
+| `phux-server::stress_resize_extremes::resize_degenerate_viewports_do_not_panic` | 0.038s |
+| `phux-server::stress_lifecycle_churn::many_concurrent_clients_attach_detach_under_output` | 0.038s |
+| `phux-server::stress_output_extremes::control_char_flood_does_not_panic` | 0.034s |
+| `phux-server::stress_output_extremes::wide_combining_zwj_flood_does_not_panic` | 0.033s |
 
 ## Recent runs
 
 | when | workflow | event | branch | result | wall | runner time |
 |---|---|---|---|---|---:|---:|
+| 2026-08-08 07:52 | stress | schedule | main | success | 5m35s | 5m32s |
 | 2026-08-08 05:55 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 | 2026-08-08 05:55 | conventional-commits | pull_request | release-please--branches--main-- | success | 19s | 17s |
 | 2026-08-08 05:54 | ci | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
@@ -155,7 +156,6 @@ runs never reached a verdict and are counted under "not run".
 | 2026-08-07 06:51 | conventional-commits | pull_request | docs-ios-consumer-contract | success | 14s | 11s |
 | 2026-08-07 06:51 | ci | pull_request | docs-ios-consumer-contract | success | 13m15s | 18m24s |
 | 2026-08-06 09:43 | stress | schedule | main | success | 6m49s | 6m45s |
-| 2026-08-05 15:12 | stress | pull_request | release-please--branches--main-- | skipped | 1s | 0s |
 
 ---
 
