@@ -207,6 +207,13 @@ pub(super) async fn main_loop<W: crate::attach::RenderSink>(
     // between spaces. Only the toggle is carried: the strip's width and edge
     // stay pure config, re-derived per entry.
     carried_sidebar_enabled: Option<bool>,
+    // ADR-0053: the acknowledged-input replay journal, shared across attach
+    // attempts by the CLI's reconnect loop (remote dials only — `None` on
+    // UDS). Each entry re-decides every queued operation against this
+    // connection's incarnation and replays the survivors; the paste path in
+    // `dispatch_input_events` feeds it and the `COMMAND_RESULT` intercept in
+    // the recv arm resolves it.
+    input_replay: Option<&std::cell::RefCell<crate::attach::input_replay::InputReplayJournal>>,
 ) -> Result<LoopExit, AttachError> {
     let onboarding_moment = onboarding_claim
         .as_ref()
@@ -745,6 +752,43 @@ pub(super) async fn main_loop<W: crate::attach::RenderSink>(
         );
     }
 
+    // ADR-0053: adopt this connection into the acknowledged-input journal.
+    // Every operation still queued from before the reconnect (or the
+    // session-switch drain) is re-decided against this connection's server
+    // incarnation: survivors are resent under their ORIGINAL operation ids —
+    // the server's dedupe cache is what makes that honest — and everything
+    // that cannot be replayed (expired, incarnation changed, feature gone)
+    // resolves loudly as a status-bar notice instead of silently dropping
+    // or doubling.
+    if let Some(journal) = input_replay {
+        let mut reports = journal.borrow_mut().begin_connection(
+            conn.server_id(),
+            negotiated
+                .server_features
+                .contains(ServerFeature::AcknowledgedInput),
+        );
+        let (more, replay_frame) = journal.borrow_mut().next_frame(&mut next_request_id);
+        reports.extend(more);
+        let now = std::time::Instant::now();
+        for report in reports {
+            if matches!(
+                report.disposition,
+                crate::attach::input_replay::ReplayDisposition::Delivered
+            ) {
+                continue;
+            }
+            let notice = Notice::warn(report.notice_line());
+            if let Some(sb) = status_bar.as_mut() {
+                sb.set_notice(notice, now);
+            } else {
+                tracing::warn!(line = %report.notice_line(), "acknowledged paste stranded");
+            }
+        }
+        if let Some(frame) = replay_frame {
+            conn.send(&frame).await?;
+        }
+    }
+
     // phux-i0e8.2.3: seed the post-reconnect notice now that the session is
     // attached and the bar painter exists. The first bar paint — driven by
     // the initial TERMINAL_SNAPSHOT burst that follows ATTACHED — picks it
@@ -1044,6 +1088,7 @@ pub(super) async fn main_loop<W: crate::attach::RenderSink>(
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
                     next_request_id: &mut next_request_id,
+                    input_replay,
                     spawn_initial_size_supported,
                     pending_splits: &mut pending_splits,
                     pending_windows: &mut pending_windows,
@@ -1295,6 +1340,55 @@ pub(super) async fn main_loop<W: crate::attach::RenderSink>(
                         // fleet dashboard's foreign rows carry agent state,
                         // then refresh a live fleet in place.
                         let f = match f {
+                            // ADR-0053: the reply to one of the journal's
+                            // own APPLY_INPUT attempts. Consumed here — the
+                            // same intercept shape as the foreign-layout
+                            // replies below — because the attached-phase
+                            // frame handler has no COMMAND_RESULT arm.
+                            // Delivery is silent; anything else raises a
+                            // notice, and the next queued operation (if any)
+                            // goes on the wire behind the resolution.
+                            FrameKind::CommandResult { request_id, result }
+                                if input_replay
+                                    .is_some_and(|journal| journal.borrow().owns(request_id)) =>
+                            {
+                                let mut next_frame = None;
+                                if let Some(journal) = input_replay {
+                                    let mut reports = Vec::new();
+                                    reports.extend(
+                                        journal.borrow_mut().resolve(request_id, &result),
+                                    );
+                                    let (more, frame) =
+                                        journal.borrow_mut().next_frame(&mut next_request_id);
+                                    reports.extend(more);
+                                    next_frame = frame;
+                                    let now = std::time::Instant::now();
+                                    for report in reports {
+                                        if matches!(
+                                            report.disposition,
+                                            crate::attach::input_replay::ReplayDisposition::Delivered
+                                        ) {
+                                            continue;
+                                        }
+                                        let line = report.notice_line();
+                                        let shown = status_bar.as_mut().is_some_and(|sb| {
+                                            sb.set_notice(Notice::warn(line.clone()), now)
+                                        });
+                                        if shown {
+                                            repaint.raise_chrome();
+                                        } else {
+                                            tracing::warn!(
+                                                line = %line,
+                                                "acknowledged paste outcome",
+                                            );
+                                        }
+                                    }
+                                }
+                                if let Some(frame) = next_frame {
+                                    send_unless_peer_gone(conn, &frame).await?;
+                                }
+                                continue;
+                            }
                             FrameKind::MetadataValue { request_id, value }
                                 if foreign_layout_pending.contains_key(&request_id) =>
                             {
@@ -2134,6 +2228,7 @@ pub(super) async fn main_loop<W: crate::attach::RenderSink>(
                     viewport: viewport_dims,
                     cell_px: cell_px_dims,
                     next_request_id: &mut next_request_id,
+                    input_replay,
                     spawn_initial_size_supported,
                     pending_splits: &mut pending_splits,
                     pending_windows: &mut pending_windows,
