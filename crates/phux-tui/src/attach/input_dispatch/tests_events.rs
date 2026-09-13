@@ -124,6 +124,7 @@ async fn overlay_active_prefix_key_reaches_overlay_not_resolver() {
     let sidebar_targets = targets(0, workspace.windows.len(), 0);
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         resolver: Some(&mut resolver),
@@ -263,6 +264,7 @@ async fn dispatch_with_passthrough_popup(
     let sidebar_targets = targets(0, workspace.windows.len(), 0);
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         resolver: Some(&mut resolver),
@@ -446,6 +448,7 @@ async fn copy_mode_page_scroll_mutates_focused_terminal_viewport() {
     let sidebar_targets = targets(0, workspace.windows.len(), 0);
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         resolver: None,
@@ -723,6 +726,7 @@ async fn dispatch_sidebar_click_with(
     // hit-testable window rows must declare them.
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         resolver: None,
@@ -973,6 +977,7 @@ async fn dispatch_bar_click(
         let sidebar_targets = targets(0, workspace.windows.len(), 0);
         let mut host_refresh = false;
         let mut ctx = DispatchCtx {
+            control_dial: None,
             layout_read_complete: true,
             engine_kernel: &mut engine_kernel,
             resolver: None,
@@ -1354,6 +1359,7 @@ async fn dispatch_mouse_two_pane_into(
         let sidebar_targets = targets(0, workspace.windows.len(), 0);
         let mut host_refresh = false;
         let mut ctx = DispatchCtx {
+            control_dial: None,
             layout_read_complete: true,
             engine_kernel: &mut engine_kernel,
             resolver: None,
@@ -1942,6 +1948,7 @@ fn run_set_pane(
     let sidebar_targets = targets(0, workspace.windows.len(), 0);
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         resolver: None,
@@ -2190,6 +2197,7 @@ async fn predict_state_after_key_dispatch(alt_screen: bool) -> PredictionState {
     let sidebar_targets = targets(0, workspace.windows.len(), 0);
     let mut host_refresh = false;
     let mut ctx = DispatchCtx {
+        control_dial: None,
         layout_read_complete: true,
         engine_kernel: &mut engine_kernel,
         // No resolver: every key forwards straight through to the pane,

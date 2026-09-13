@@ -1,7 +1,7 @@
 ---
 audience: humans, contributors, agents
 stability: evolving
-last-reviewed: 2026-09-12
+last-reviewed: 2026-09-13
 ---
 
 # The phux reference TUI
@@ -466,6 +466,19 @@ The **window picker** (`C-a w`) is hierarchical: sessions as headers,
 windows nested. A window in the current session switches directly; a
 window in another session is a one-step `switch-session` that also
 selects that window.
+
+**Move the focused pane** is available under Pane in Commands & Help and as
+**Move beside…** in the pane context menu. It opens one fuzzy list of exact
+local destination panes from the current layout and every fully cached
+session layout. Rows show the stable `@id`, session, window index/name, and
+pane number. The focused pane, satellite panes, and sessions whose layout is
+not cached are not offered; if nothing is eligible, the action bells without
+changing anything. Enter moves the existing Terminal beside the selected pane
+side-by-side at ratio `0.5`; Esc cancels. The process, scrollback, metadata,
+agent record, subscriptions, and Terminal id stay attached to that identity.
+Focus follows it, including an in-process reattach when it crosses sessions.
+Move, layout, and rollback failures stay in the TUI as a **Pane move failed**
+message rather than silently changing or ending the attach.
 
 The **directory picker** (`C-a G`) browses directories on the attached
 server and opens a new window there. Over `phux --remote` it browses the

@@ -439,6 +439,7 @@ async fn attach_session<W: crate::attach::RenderSink>(
         let claim = onboarding_claim.take();
         let exit = match main_loop(
             &mut conn,
+            dial,
             attached,
             predict,
             out,
