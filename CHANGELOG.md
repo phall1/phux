@@ -9,6 +9,43 @@ It is exempt from the `docs/` frontmatter and TL;DR gates in
 at `docs/spec/CHANGELOG.md` and is hand-maintained; it is a different file and
 keeps every gate.
 
+## [0.36.0](https://github.com/no-phux/phux/compare/v0.35.0...v0.36.0) (2026-09-13)
+
+
+### Features
+
+* **agent:** add fleet-wide agent wait ([29f7eef](https://github.com/no-phux/phux/commit/29f7eefca8acec910cc749fc8a4a91d62b203267))
+* **cli:** auto-start remote server on attach ([141cbbe](https://github.com/no-phux/phux/commit/141cbbe3a5054d45d79df3cfaec304bf95df6a70))
+* **cli:** enable local --hub on satellite enroll without dropping flags ([9faeef3](https://github.com/no-phux/phux/commit/9faeef30fcf5f5fbdf09c9613f44fcb72eb28b06))
+* **site:** show blocked agent inbox handoff ([34533ce](https://github.com/no-phux/phux/commit/34533ce429af0697f6b3563bd7b840d9faafdf1f))
+* **tui:** expose daily-driver management views ([c564a55](https://github.com/no-phux/phux/commit/c564a55dd6d9971591376060fcfa7f9dc80894d4))
+* **tui:** make the fleet inbox obvious on first attach ([#598](https://github.com/no-phux/phux/issues/598)) ([675b495](https://github.com/no-phux/phux/commit/675b4959ce4be0ad3dd2c72fdb34d0e867f413a5))
+* **tui:** move panes from destination picker ([3fdbe6d](https://github.com/no-phux/phux/commit/3fdbe6df3cad06b43bb1d0d109020d8f5af8c5fb))
+
+
+### Bug Fixes
+
+* **ci:** pin a deterministic ghostty-vt.wasm rebuild ([a67ab02](https://github.com/no-phux/phux/commit/a67ab020b59f1eeddebd98aa31a1866d0d7171e3))
+* **ci:** restore green pull request base ([#604](https://github.com/no-phux/phux/issues/604)) ([d5aa316](https://github.com/no-phux/phux/commit/d5aa3168c844ad6765d749d6e13d23c07453ecb0))
+* **ci:** stop setup-zig caches accumulating every run ([a1b7973](https://github.com/no-phux/phux/commit/a1b7973bb3e2d8d5694d2a9de3aba12ebd2f9f7f))
+* **cli:** match first-time pairing notice in remote e2e ([c5dfb6e](https://github.com/no-phux/phux/commit/c5dfb6e45bd2a941e52509b0aa4039b7aa85bed2))
+* **release:** pin portable CPU baselines ([5344cdc](https://github.com/no-phux/phux/commit/5344cdc732b723b94114aad311caa5b96cedeea4))
+* **server:** keep WebSocket accept causes at debug ([c817cd3](https://github.com/no-phux/phux/commit/c817cd3ff56828f9bc98fea2b7b4da4c1e33662f))
+* **update:** keep live servers up across a broken distro path ([73d9e8c](https://github.com/no-phux/phux/commit/73d9e8c52d2945e20e3a8915b4247e6df18a2db6))
+* **update:** make install transaction crash-durable ([1779122](https://github.com/no-phux/phux/commit/17791220c2e10c971a7bff9a9448638ad297199e))
+
+
+### Performance
+
+* **server:** measure complete native bootstrap budgets ([02b98f9](https://github.com/no-phux/phux/commit/02b98f980270a7de5c57d5ebf848df5efbc37e65))
+
+
+### Documentation
+
+* occupy the public sentence, emit contract, and accountless join ([#597](https://github.com/no-phux/phux/issues/597)) ([5d60967](https://github.com/no-phux/phux/commit/5d60967657debc20e4febf52b582dd84a9740fac))
+* **skills:** treat agent sessions as RESOURCE_KINDS, not a branch ([3a68971](https://github.com/no-phux/phux/commit/3a68971ac36187ce95bf862f370b8c6ebf0947da))
+* **transport:** reconcile QUIC routing and ordering with ADR-0115 ([ac710e6](https://github.com/no-phux/phux/commit/ac710e6614a2372a04fbfdd849f768f3cca8572e))
+
 ## [0.35.0](https://github.com/no-phux/phux/compare/v0.34.0...v0.35.0) (2026-09-13)
 
 
