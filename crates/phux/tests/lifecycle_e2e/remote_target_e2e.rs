@@ -237,7 +237,7 @@ fn ssh_rung_registers_a_pinned_quic_entry_under_the_typed_name() {
 
     let seen = home.run_until(&["--remote", "me@mini"], &ssh, "paired");
     assert!(
-        seen.contains("pairing over ssh")
+        seen.contains("pairing mini over ssh")
             && seen.contains("installing and starting the remote Phux service"),
         "the operator must be told what is happening before it happens; got: {seen}"
     );
