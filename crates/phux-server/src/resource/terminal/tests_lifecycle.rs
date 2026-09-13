@@ -582,9 +582,15 @@ async fn pane_kill_lets_foreground_process_flush_before_death() {
             // fully parallel `just test` (phux-2390) with an empty marker
             // in 0.7s: not a timeout, a missing synchronization point.
             let script = dir.path().join("foreground.sh");
+            let holder = dir.path().join("holder");
+            // Record the inner shell's pid first: a panic or nextest abort
+            // after spawn but before `token.cancel()` used to leak this
+            // `while :; do sleep 30; done` at ~7% CPU (phux-6xqf).
+            let holder_cleanup = DetachedHolderCleanup(holder.clone());
             std::fs::write(
                 &script,
-                "trap 'printf flushed > \"$PHUX_TEST_MARKER\"; exit 0' HUP\n\
+                "printf %s \"$$\" > \"$PHUX_TEST_HOLDER\"\n\
+                     trap 'printf flushed > \"$PHUX_TEST_MARKER\"; exit 0' HUP\n\
                      printf armed > \"$PHUX_TEST_ARMED\"\n\
                      while :; do sleep 30; done\n",
             )
@@ -600,6 +606,7 @@ async fn pane_kill_lets_foreground_process_flush_before_death() {
             ));
             cmd.env("PHUX_TEST_MARKER", &marker);
             cmd.env("PHUX_TEST_ARMED", &armed);
+            cmd.env("PHUX_TEST_HOLDER", &holder);
 
             let token = CancellationToken::new();
             let bundle = TerminalActor::build_with_token(
@@ -614,6 +621,7 @@ async fn pane_kill_lets_foreground_process_flush_before_death() {
             let pty = actor.pty.as_ref().expect("test actor has PTY");
             let shell_group = i32::try_from(pty.child.process_id().expect("shell pid"))
                 .expect("shell pid fits i32");
+            let _shell_cleanup = ProcessGroupCleanup(shell_group);
             let master = std::sync::Arc::clone(&pty.master);
             let run = tokio::task::spawn_local(actor.run());
 
@@ -741,9 +749,12 @@ async fn pane_kill_lets_a_terminal_flush_finish_inside_the_grace() {
             // `cat`, not a shell loop: this has to move megabytes inside a
             // 500ms product budget, and a `printf` loop cannot.
             let script = dir.path().join("foreground.sh");
+            let holder = dir.path().join("holder");
+            let holder_cleanup = DetachedHolderCleanup(holder.clone());
             std::fs::write(
                 &script,
-                "trap 'trap \"\" HUP; cat \"$PHUX_TEST_PAYLOAD\" 2>\"$PHUX_TEST_ERR\"; s=$?; \
+                "printf %s \"$$\" > \"$PHUX_TEST_HOLDER\"\n\
+                     trap 'trap \"\" HUP; cat \"$PHUX_TEST_PAYLOAD\" 2>\"$PHUX_TEST_ERR\"; s=$?; \
                      printf %s \"$s\" > \"$PHUX_TEST_STATUS\"; \
                      [ \"$s\" -eq 0 ] && printf flushed > \"$PHUX_TEST_MARKER\"; exit 0' HUP\n\
                      printf armed > \"$PHUX_TEST_ARMED\"\n\
@@ -766,6 +777,7 @@ async fn pane_kill_lets_a_terminal_flush_finish_inside_the_grace() {
             cmd.env("PHUX_TEST_PAYLOAD", &payload);
             cmd.env("PHUX_TEST_STATUS", &status);
             cmd.env("PHUX_TEST_ERR", &stderr);
+            cmd.env("PHUX_TEST_HOLDER", &holder);
 
             let token = CancellationToken::new();
             let bundle = TerminalActor::build_with_token(
@@ -780,6 +792,7 @@ async fn pane_kill_lets_a_terminal_flush_finish_inside_the_grace() {
             let pty = actor.pty.as_ref().expect("test actor has PTY");
             let shell_group = i32::try_from(pty.child.process_id().expect("shell pid"))
                 .expect("shell pid fits i32");
+            let _shell_cleanup = ProcessGroupCleanup(shell_group);
             let master = std::sync::Arc::clone(&pty.master);
             let run = tokio::task::spawn_local(actor.run());
 
@@ -868,6 +881,24 @@ struct DetachedHolderCleanup(std::path::PathBuf);
 impl Drop for DetachedHolderCleanup {
     fn drop(&mut self) {
         kill_detached_holder(&self.0);
+    }
+}
+
+/// Kill a fixture process group on every unwind, including an assertion
+/// after spawn but before the actor's own teardown.
+///
+/// The flush tests' inner `foreground.sh` lives in a *different* group
+/// than this one (`set -m`); [`DetachedHolderCleanup`] covers that job.
+/// This covers the session-leader shell. `SIGKILL` of an already-reaped
+/// group is `ESRCH` and is ignored.
+struct ProcessGroupCleanup(i32);
+
+impl Drop for ProcessGroupCleanup {
+    fn drop(&mut self) {
+        use nix::sys::signal::{Signal, killpg};
+        use nix::unistd::Pid;
+
+        let _ = killpg(Pid::from_raw(self.0), Signal::SIGKILL);
     }
 }
 
