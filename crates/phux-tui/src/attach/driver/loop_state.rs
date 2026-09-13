@@ -1598,7 +1598,10 @@ impl SessionLoop {
         }
         self.overlays.push(Box::new(ToastOverlay::passthrough(
             crate::attach::onboarding::ONBOARDING_TITLE,
-            crate::attach::onboarding::hint_lines(self.settings.keybindings.as_ref()),
+            crate::attach::onboarding::hint_lines(
+                self.settings.keybindings.as_ref(),
+                self.sidebar_enabled,
+            ),
             &self.settings.theme,
         )));
         paint_active_overlay(
